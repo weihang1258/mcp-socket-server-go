@@ -148,7 +148,11 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		if p.Path == "" {
 			p.Path = "/home/tmp/tmp.pcap"
 		}
-		return json.Marshal(resBool(tcpdumpStart(p.Eth, p.Path, p.Extended, sq)))
+		ok, err := tcpdumpStart(p.Eth, p.Path, p.Extended, sq)
+		if err != nil {
+			return nil, err // routeinfo 等异常冒泡断连
+		}
+		return json.Marshal(resBool(ok))
 	case 6: // 抓包停止：{"res":bool}；幂等（未在抓 res:true）
 		var p struct {
 			Path string `json:"path"`

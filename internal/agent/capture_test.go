@@ -60,6 +60,8 @@ func (f *fakeSource) recvFrame(b []byte, deadline time.Time) (int, []byte, error
 
 func (f *fakeSource) close() error { close(f.closed); return nil }
 
+func (f *fakeSource) stats() (uint64, uint64) { return 0, 0 }
+
 var errTimeout = timeoutErr{}
 
 type timeoutErr struct{}
@@ -70,11 +72,11 @@ func (timeoutErr) Timeout() bool { return true }
 // ---- cmsg 构造（对齐内核 ABI）----
 
 func cmsgTimestamping(hwSec, hwNsec, swSec, swNsec int64) []byte {
-	// cmsghdr{len, SOL_SOCKET=1, SCM_TIMESTAMPING=37} + 3×timespec(16B)
+	// 64 位 ABI：cmsghdr{len u64@0, level i32@8, type i32@12} + 3×timespec(16B)
 	b := make([]byte, 16+48)
-	binary.LittleEndian.PutUint32(b[0:], 64)
-	binary.LittleEndian.PutUint32(b[4:], 1) // SOL_SOCKET
-	binary.LittleEndian.PutUint32(b[8:], 37)
+	binary.LittleEndian.PutUint64(b[0:], 64)
+	binary.LittleEndian.PutUint32(b[8:], 1) // SOL_SOCKET
+	binary.LittleEndian.PutUint32(b[12:], 37)
 	binary.LittleEndian.PutUint64(b[16:], uint64(hwSec))
 	binary.LittleEndian.PutUint64(b[24:], uint64(hwNsec))
 	binary.LittleEndian.PutUint64(b[32:], uint64(swSec))
@@ -83,11 +85,11 @@ func cmsgTimestamping(hwSec, hwNsec, swSec, swNsec int64) []byte {
 }
 
 func cmsgAuxdata(tci uint16) []byte {
-	// cmsghdr{len, SOL_PACKET=263, PACKET_AUXDATA=8} + tpacket_auxdata(20B)
+	// 64 位 ABI：cmsghdr{len u64@0, level i32@8, type i32@12} + tpacket_auxdata(20B)
 	b := make([]byte, 16+20)
-	binary.LittleEndian.PutUint32(b[0:], 36)
-	binary.LittleEndian.PutUint32(b[4:], 263)
-	binary.LittleEndian.PutUint32(b[8:], 8)
+	binary.LittleEndian.PutUint64(b[0:], 36)
+	binary.LittleEndian.PutUint32(b[8:], 263) // SOL_PACKET
+	binary.LittleEndian.PutUint32(b[12:], 8)  // PACKET_AUXDATA
 	// tp_status: VLAN_VALID(0x10) 置位
 	binary.LittleEndian.PutUint32(b[16:], 0x10)
 	// tp_vlan_tci @ offset 16+12
@@ -106,7 +108,7 @@ func testEthPayload() []byte {
 
 // ---- 用例 ----
 
-func captureTestStart(t *testing.T, src *fakeSource, path string) bool {
+func captureTestStart(t *testing.T, src *fakeSource, path string) (bool, error) {
 	t.Helper()
 	prev := openPacketSocketFn
 	openPacketSocketFn = func(eth string) (pktSource, error) { return src, nil }
@@ -119,7 +121,7 @@ func TestCaptureStartStopCycle(t *testing.T) {
 	resetCapture(t)
 	path := filepath.Join(t.TempDir(), "cap.pcap")
 	src := newFakeSource()
-	if !captureTestStart(t, src, path) {
+	if ok, _ := captureTestStart(t, src, path); !ok {
 		t.Fatal("start want true")
 	}
 	// 帧 → pcap 落盘
@@ -153,13 +155,13 @@ func TestCaptureRestartSamePath(t *testing.T) {
 	resetCapture(t)
 	path := filepath.Join(t.TempDir(), "cap.pcap")
 	src1 := newFakeSource()
-	if !captureTestStart(t, src1, path) {
+	if ok, _ := captureTestStart(t, src1, path); !ok {
 		t.Fatal("first start")
 	}
 	src2 := newFakeSource()
 	prev := openPacketSocketFn
 	openPacketSocketFn = func(string) (pktSource, error) { return src2, nil }
-	if !tcpdumpStart("eth0", path, "", true) {
+	if ok, _ := tcpdumpStart("eth0", path, "", true); !ok {
 		t.Fatal("second start")
 	}
 	openPacketSocketFn = prev
@@ -217,7 +219,7 @@ func TestCaptureBPFParsed(t *testing.T) {
 	setBPFCapture(func(ins []bpfInstr) { gotBPF = ins }) // compileBPF 先于 open socket
 	openPacketSocketFn = func(string) (pktSource, error) { return src, nil }
 	t.Cleanup(func() { openPacketSocketFn = prev; setBPFCapture(nil) })
-	if !tcpdumpStart("eth0", filepath.Join(t.TempDir(), "z.pcap"), "port 80", true) {
+	if ok, _ := tcpdumpStart("eth0", filepath.Join(t.TempDir(), "z.pcap"), "port 80", true); !ok {
 		t.Fatal("start with BPF")
 	}
 	data, _ := os.ReadFile(calls)
@@ -234,7 +236,7 @@ func TestCaptureStopDrainsQueue(t *testing.T) {
 	resetCapture(t)
 	path := filepath.Join(t.TempDir(), "drain.pcap")
 	src := newFakeSource()
-	if !captureTestStart(t, src, path) {
+	if ok, _ := captureTestStart(t, src, path); !ok {
 		t.Fatal("start")
 	}
 	// 立刻塞 3 帧并马上 stop（帧可能尚未被 recv 线程读走）
@@ -256,7 +258,7 @@ func TestCaptureVLANRestore(t *testing.T) {
 	resetCapture(t)
 	path := filepath.Join(t.TempDir(), "vlan.pcap")
 	src := newFakeSource()
-	if !captureTestStart(t, src, path) {
+	if ok, _ := captureTestStart(t, src, path); !ok {
 		t.Fatal("start")
 	}
 	src.push(testEthPayload(), cmsgAuxdata(100))
@@ -296,7 +298,7 @@ func TestCaptureNoAuxdataUntouched(t *testing.T) {
 	resetCapture(t)
 	path := filepath.Join(t.TempDir(), "plain.pcap")
 	src := newFakeSource()
-	if !captureTestStart(t, src, path) {
+	if ok, _ := captureTestStart(t, src, path); !ok {
 		t.Fatal("start")
 	}
 	orig := testEthPayload()
@@ -325,7 +327,7 @@ echo "0.0.0.0         10.0.0.1        0.0.0.0         UG    0      0        0 en
 	prev := openPacketSocketFn
 	openPacketSocketFn = func(eth string) (pktSource, error) { gotEth = eth; return src, nil }
 	t.Cleanup(func() { openPacketSocketFn = prev })
-	if !tcpdumpStart("", filepath.Join(t.TempDir(), "d.pcap"), "", true) {
+	if ok, _ := tcpdumpStart("", filepath.Join(t.TempDir(), "d.pcap"), "", true); !ok {
 		t.Fatal("start")
 	}
 	if gotEth != "ens19" {
@@ -360,7 +362,7 @@ func TestCaptureSingleQueueBestEffort(t *testing.T) {
 	openPacketSocketFn = func(string) (pktSource, error) { return src, nil }
 	t.Cleanup(func() { openPacketSocketFn = prev })
 	// single_queue=true：单队列配置执行（失败也继续）
-	if !tcpdumpStart("eth0", filepath.Join(t.TempDir(), "sq.pcap"), "", true) {
+	if ok, _ := tcpdumpStart("eth0", filepath.Join(t.TempDir(), "sq.pcap"), "", true); !ok {
 		t.Fatal("start with single_queue")
 	}
 	if _, err := os.Stat(calls); err != nil {
@@ -368,11 +370,11 @@ func TestCaptureSingleQueueBestEffort(t *testing.T) {
 	}
 }
 
-// resetCapture 清空抓包注册表
+// resetCapture 清空抓包注册表（capturesReset 已删——逐实例停）
 func resetCapture(t *testing.T) {
 	t.Helper()
-	capturesReset()
-	t.Cleanup(capturesReset)
+	stopAllCapturesForTest()
+	t.Cleanup(func() { stopAllCapturesForTest() })
 }
 
 var _ = json.Marshal
