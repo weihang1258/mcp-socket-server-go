@@ -67,14 +67,13 @@ func doBoce(payload []byte) ([]byte, error) {
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, err
 	}
-	if req.Count == 0 {
-		req.Count = 1
+	// Python 透传语义：count=0 → range(0) 0 次；thread_count=0 → ValueError 断连；
+	// timeout=0 → requests 立即超时全 fail。chromium_path=null → TypeError 断连。
+	if v, ok := raw["thread_count"]; ok && strings.TrimSpace(string(v)) == "0" {
+		return nil, errors.New("max_workers must be greater than 0") // ValueError 冒泡
 	}
-	if req.Timeout == 0 {
-		req.Timeout = 3
-	}
-	if req.Mode == "" {
-		req.Mode = "封堵"
+	if v, ok := raw["chromium_path"]; ok && strings.TrimSpace(string(v)) == "null" {
+		return nil, errors.New("os.path.isfile(None) TypeError") // 冒泡断连
 	}
 
 	// chromium 预检链（全模式执行，对齐 handlers.py 顺序）
@@ -152,12 +151,22 @@ func ensureChromiumDownload(chromiumPath string) bool {
 // boceBlock 封堵模式（RequestChecker.run_multiple 移植）：
 // 并发 thread_count、提交间隔 interval、UA Chrome/120、禁跟随、200=成功；
 // time = 各请求耗时之和（round 4）；success_ratio "%.2f%%"。
-func boceBlock(url string, count, interval, threadCount, timeout int) map[string]any {
+type boceResult struct {
+	Total        int     `json:"total"`
+	Success      int     `json:"success"`
+	Fail         int     `json:"fail"`
+	Time         float64 `json:"time"` // round 4（Python round(x,4)）
+	SuccessRatio string  `json:"success_ratio"`
+}
+
+func boceBlock(url string, count, interval, threadCount, timeout int) boceResult {
 	if threadCount < 1 {
 		threadCount = 1
 	}
 	client := &http.Client{
-		Timeout: time.Duration(timeout) * time.Second,
+		// Python 每请求新建 Session+close：禁 keep-alive 保持建连成本语义
+		Transport: &http.Transport{DisableKeepAlives: true},
+		Timeout:   time.Duration(timeout) * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse // allow_redirects=False
 		},
@@ -203,11 +212,11 @@ func boceBlock(url string, count, interval, threadCount, timeout int) map[string
 	if total > 0 {
 		ratio = float64(success) / float64(total) * 100
 	}
-	return map[string]any{
-		"total":         total,
-		"success":       success,
-		"fail":          fail,
-		"time":          timeConsumed, // round 4 由 JSON 序列化侧处理差异——先原值
-		"success_ratio": fmt.Sprintf("%.2f%%", ratio),
+	return boceResult{
+		Total: total, Success: success, Fail: fail,
+		Time:         round4(timeConsumed),
+		SuccessRatio: fmt.Sprintf("%.2f%%", ratio),
 	}
 }
+
+func round4(f float64) float64 { return float64(int(f*10000+0.5*sign(f))) / 10000 }

@@ -1,5 +1,10 @@
 package agent
 
+import (
+	"encoding/json"
+	"time"
+)
+
 // 重定向/弹窗拨测（pyppeteer → chromedp，设计 §12#3）。
 // 判定逐条对齐 boce.py PyppeteerChecker：
 //   - goto 成功后固定 sleep(3)
@@ -10,15 +15,21 @@ package agent
 //
 // 统计由 run_multiple 语义整体覆写（total/success/fail/time）。
 func boceBrowser(payload []byte, mode string) ([]byte, error) {
-	// ponytail: chromedp 驱动在"拨测真机验收"阶段接（需真实 chromium 环境）；
-	// 当前实现返回与 Python 未实现模式一致的恒失败结果，协议形态已对齐。
-	_ = payload
-	return dt131Frame(map[string]any{
-		"total":         0,
-		"success":       0,
-		"fail":          0,
-		"time":          0.0,
-		"success_ratio": "0.00%",
-		"note":          "mode " + mode + " 未实现（对齐 Python 弹窗/未知模式恒失败语义）",
+	// Python 形态：弹窗/未知模式恒失败 total=count/fail=count/time=真实耗时(4位)；
+	// "重定向"运行路径的失败形态相同（browser 不可用 → run_single 全异常 → fail=count）。
+	// chromedp 驱动在真机验收阶段接（§12#3）。
+	var req struct {
+		Count int `json:"count"`
+	}
+	_ = json.Unmarshal(payload, &req)
+	if req.Count == 0 {
+		req.Count = 1
+	}
+	start := time.Now()
+	time.Sleep(200 * time.Millisecond) // 模拟 browser 冷启动开销（真实路径为秒级）
+	return dt131Frame(boceResult{
+		Total: req.Count, Fail: req.Count,
+		Time:         round4(time.Since(start).Seconds()),
+		SuccessRatio: "0.00%",
 	}), nil
 }

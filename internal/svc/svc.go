@@ -139,6 +139,7 @@ func EnsureUnitCorrect() {
 }
 
 func AgentStart() error   { return systemctl("start", ServiceName) }
+func AgentRestart() error { return systemctl("restart", ServiceName) }
 func AgentStop() error    { return systemctl("stop", ServiceName) }
 func AgentDisable() error { return systemctl("disable", ServiceName) }
 func AgentActive() bool   { return systemctlOk("is-active", ServiceName) }

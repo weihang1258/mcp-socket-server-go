@@ -131,7 +131,10 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		}{Version, Repo, ReleaseNotes, NotesVersion, NotesVersion != Version})
 	case 0: // pcap 回放：truthy 校验固定文案；stats JSON 裸文本
 		return replayFiles(payload)
-	case 5: // 抓包开始：{"res":bool}（回退后契约，无 error）
+	case 5: // 抓包开始：{"res":bool}（回退后契约，无 error）；严格键（**data TypeError）
+		if err := strictKeys(payload, "eth", "path", "extended", "single_queue"); err != nil {
+			return nil, err
+		}
 		var p struct {
 			Eth         string `json:"eth"`
 			Path        string `json:"path"`
@@ -153,7 +156,10 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 			return nil, err // routeinfo 等异常冒泡断连
 		}
 		return json.Marshal(resBool(ok))
-	case 6: // 抓包停止：{"res":bool}；幂等（未在抓 res:true）
+	case 6: // 抓包停止：严格键
+		if err := strictKeys(payload, "path"); err != nil {
+			return nil, err
+		}
 		var p struct {
 			Path string `json:"path"`
 		}
@@ -164,12 +170,36 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 			p.Path = "/home/tmp/tmp.pcap"
 		}
 		return json.Marshal(resBool(tcpdumpStop(p.Path)))
+	case 20: // 升级推送落地：同步段返回终态；后台 0.3s 后切链+重启
+		resp, rv := applyPushedUpgrade(payload)
+		if rv != "" {
+			go restartAfterUpgrade(rv)
+		}
+		return resp, nil
 	case 131: // 拨测（预检链 + 封堵/重定向）
 		return doBoce(payload)
 	case 200: // pcap 五元组提取（完整实现在 pcapflow 模块；此处先契约化错误路径）
 		return pcapFlowExtract(payload)
 	}
 	return nil, nil
+}
+
+// strictKeys 校验 payload 键白名单（Python **data 未知键 TypeError → 断连）。
+func strictKeys(payload []byte, allowed ...string) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return err
+	}
+	set := map[string]bool{}
+	for _, a := range allowed {
+		set[a] = true
+	}
+	for k := range raw {
+		if !set[k] {
+			return fmt.Errorf("%s() got unexpected keyword argument %q", "tcpdump", k)
+		}
+	}
+	return nil
 }
 
 // resBool/resNull 统一 {"res":...} 包装（Python json.dumps({"res": ...})）。
