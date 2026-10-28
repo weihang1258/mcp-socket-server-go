@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -60,7 +61,7 @@ type listenInstance struct {
 	q       chan []byte
 	dataMu  sync.Mutex // 保护 data（cachedata 写 / fetch/save 读）
 	data    []byte
-	stopped bool
+	stopped atomic.Bool // shutdown 置位 / cachedata 轮询（-race 复审）
 	wg      sync.WaitGroup
 }
 
@@ -197,7 +198,7 @@ func newListenInstance(host *string, port int) (*listenInstance, error) {
 				continue
 			case <-time.After(1 * time.Second):
 			}
-			if inst.stopped {
+			if inst.stopped.Load() {
 				return
 			}
 			if len(pending) > 0 {
@@ -235,7 +236,7 @@ func (li *listenInstance) pids() []string {
 
 // shutdown 关监听与连接 + 对端口残留者 kill -9 清扫（stop_server 链）。
 func (li *listenInstance) shutdown() {
-	li.stopped = true
+	li.stopped.Store(true)
 	for _, ln := range li.lns {
 		ln.Close()
 	}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -37,9 +38,9 @@ func setupChromium(t *testing.T, ensureOK bool) string {
 // 封堵模式：全部 200 → success_ratio 100%
 func TestDT131BlockModeAllSuccess(t *testing.T) {
 	setupChromium(t, true)
-	var hits int
+	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
+		hits.Add(1)
 		if r.Header.Get("User-Agent") == "" {
 			t.Error("UA must be set")
 		}
@@ -67,8 +68,8 @@ func TestDT131BlockModeAllSuccess(t *testing.T) {
 	if _, ok := out["time"]; !ok {
 		t.Fatal("time key missing")
 	}
-	if hits != 3 {
-		t.Fatalf("server hits %d", hits)
+	if hits.Load() != 3 {
+		t.Fatalf("server hits %d", hits.Load())
 	}
 }
 

@@ -215,7 +215,7 @@ var dailyOnce sync.Once
 
 // StartDailyCheck 每日兜底（先睡 24h；有新版记 1 条 info，绝不自动升级；防重）。
 func StartDailyCheck(proxy string, getBridgeVersion func() string) {
-	dailyOnce.Do(func() { dailyLoop(proxy, getBridgeVersion) })
+	dailyOnce.Do(func() { go dailyLoop(proxy, getBridgeVersion) })
 }
 
 func dailyLoop(proxy string, getBridgeVersion func() string) {
