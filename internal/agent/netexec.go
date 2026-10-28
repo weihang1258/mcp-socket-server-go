@@ -19,23 +19,21 @@ func execCmd(cmd string) (code int, stdout, stderr string) {
 	if os.Geteuid() == 0 {
 		cmd = stripSudoPrefix(cmd)
 	}
-	env := cleanEnv(os.Environ())
-	var stdoutBuf, stderrBuf bytes.Buffer
+	return execCmdWith(cmd, "", cleanEnv(os.Environ()), true)
+}
+
+// shellCmd /bin/sh -c 包装。
+func shellCmd(cmd string, env []string) *exec.Cmd {
 	c := exec.Command("/bin/sh", "-c", cmd)
 	c.Env = env
-	c.Stdout = &stdoutBuf
-	c.Stderr = &stderrBuf
-	err := c.Run()
-	code = 0
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			code = ee.ExitCode()
-		} else {
-			return -1, "", err.Error()
-		}
-	}
-	return code, stdoutBuf.String(), stderrBuf.String()
+	return c
+}
+
+// argvCmd argv 模式（env 清理同 shell 模式）。
+func argvCmd(argv []string) *exec.Cmd {
+	c := exec.Command(argv[0], argv[1:]...)
+	c.Env = cleanEnv(os.Environ())
+	return c
 }
 
 // stripSudoPrefix root 时剥裸 "sudo "（带 sudo 自身选项或空命令不剥，对齐 netutils）。
@@ -66,10 +64,8 @@ func cleanEnv(environ []string) []string {
 // execCmdArgs argv 模式执行（不经 shell）——对齐 Python shell=False 的注入防护
 // （dt10 的 eth 来自客户端 payload，绝不能进 shell）。
 func execCmdArgs(argv ...string) (code int, stdout, stderr string) {
-	env := cleanEnv(os.Environ())
 	var stdoutBuf, stderrBuf bytes.Buffer
-	c := exec.Command(argv[0], argv[1:]...)
-	c.Env = env
+	c := argvCmd(argv)
 	c.Stdout = &stdoutBuf
 	c.Stderr = &stderrBuf
 	err := c.Run()

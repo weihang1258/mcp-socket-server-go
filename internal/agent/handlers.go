@@ -27,6 +27,8 @@ type DoFunc func(cs *ConnState, dt int32, payload []byte) ([]byte, error)
 // Do datatype 分发（handlers 逐模块补齐）。
 func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 	switch dt {
+	case 1: // 命令执行：[4B i][gzip {code,stdout,stderr}]；wait=false 回 "null" 帧
+		return cmdExec(payload)
 	case 3: // 文件下载：路径读连接级 filepath（payload 仅 {"gzip":bool}）；[8B <Q][content]
 		return downloadFile(cs, payload)
 	case 4: // routeinfo：失败 → error → 断连（Python 抛 RuntimeError）
@@ -99,6 +101,8 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		}{fi.Size()})
 	case 14: // 获版本号：json.dumps(VERSION) 带引号 JSON 字符串
 		return json.Marshal(Version)
+	case 15: // 解压 zip：恒回裸 b"ok"（unzip 缺失/失败也 ok）
+		return unzipCmd(payload)
 	case 18: // ensure_command：PATH 查找 → {"res":bool}
 		var p struct {
 			Cmd string `json:"cmd"`
