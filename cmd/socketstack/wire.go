@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/weihang1258/mcp-socket-server-go/internal/agent"
 	"github.com/weihang1258/mcp-socket-server-go/internal/config"
+	"github.com/weihang1258/mcp-socket-server-go/internal/mcpbridge"
 	"github.com/weihang1258/mcp-socket-server-go/internal/svc"
 )
 
@@ -26,16 +28,32 @@ func netListen(port string) (net.Listener, error) {
 	return ln4, nil
 }
 
-// runMCPServe 占位：mcpbridge 阶段接线（Streamable HTTP）。
+// runMCPServe Streamable HTTP（mcp 单元 ExecStart 唯一入口）。
 func runMCPServe(cfg config.Config) {
-	fmt.Fprintf(os.Stderr, "mcp serve 尚未接线（mcpbridge 阶段）: %s:%d/mcp\n", cfg.MCP.Bind.Host, cfg.MCP.Bind.Port)
-	os.Exit(3)
+	b := mcpbridge.Init(mcpbridge.BridgeConfig{
+		DBPath: cfg.MCP.DBPath, DownloadDir: cfg.MCP.DownloadDir, Proxy: cfg.MCP.Proxy,
+		LogLevel: cfg.MCP.LogLevel, AuditDays: cfg.MCP.AuditRetentionDays,
+		Whitelist: cfg.MCP.CmdExecWhitelist, BindHost: cfg.MCP.Bind.Host, BindPort: cfg.MCP.Bind.Port,
+		DefaultTimeout: cfg.MCP.DefaultTimeout,
+	})
+	if err := mcpbridge.RunStreamableHTTP(context.Background(), b, cfg.MCP.Bind.Host, cfg.MCP.Bind.Port); err != nil {
+		fmt.Fprintln(os.Stderr, "mcp serve 失败:", err)
+		os.Exit(1)
+	}
 }
 
-// runMCPStdio 占位：mcpbridge 阶段接线。
+// runMCPStdio 本地 stdio（阻塞）。
 func runMCPStdio() {
-	fmt.Fprintln(os.Stderr, "mcp stdio 尚未接线（mcpbridge 阶段）")
-	os.Exit(3)
+	cfg := loadCfg()
+	b := mcpbridge.Init(mcpbridge.BridgeConfig{
+		DBPath: cfg.MCP.DBPath, DownloadDir: cfg.MCP.DownloadDir, Proxy: cfg.MCP.Proxy,
+		LogLevel: cfg.MCP.LogLevel, AuditDays: cfg.MCP.AuditRetentionDays,
+		Whitelist: cfg.MCP.CmdExecWhitelist, DefaultTimeout: cfg.MCP.DefaultTimeout,
+	})
+	if err := mcpbridge.RunStdio(context.Background(), b); err != nil {
+		fmt.Fprintln(os.Stderr, "mcp 失败:", err)
+		os.Exit(1)
+	}
 }
 
 // installSelf 复制自身到 /usr/local/bin/socketstack + 装 agent 单元（+ 可选 mcp 单元）。
