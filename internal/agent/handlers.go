@@ -129,6 +129,8 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 			LatestVersion string `json:"latest_version"`
 			HasUpgrade    bool   `json:"has_upgrade"`
 		}{Version, Repo, ReleaseNotes, NotesVersion, NotesVersion != Version})
+	case 0: // pcap 回放：truthy 校验固定文案；stats JSON 裸文本
+		return replayFiles(payload)
 	case 5: // 抓包开始：{"res":bool}（回退后契约，无 error）
 		var p struct {
 			Eth         string `json:"eth"`
