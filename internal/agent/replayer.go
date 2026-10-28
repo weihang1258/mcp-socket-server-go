@@ -95,7 +95,7 @@ func (r *replayer) getDirection(key tuple5Key, t tuple5, flags byte, ts float64)
 		return fi.direction
 	}
 	direction := "uplink"
-	if r.clientHint != nil && r.serverHint != nil {
+	if r.clientHint != nil && *r.clientHint != "" && r.serverHint != nil && *r.serverHint != "" {
 		if t.ipSrc == *r.clientHint && t.ipDst == *r.serverHint {
 			direction = "uplink"
 		} else if t.ipSrc == *r.serverHint && t.ipDst == *r.clientHint {
@@ -163,7 +163,7 @@ func ip4Str(b []byte) string { return net.IP(b).String() }
 
 // transport sport/dport/flags。
 func transportParse(proto byte, trans []byte) (uint16, uint16, byte) {
-	if (proto == 6 || proto == 17 || proto == 132) && len(trans) >= 4 {
+	if (proto == 6 || proto == 17) && len(trans) >= 4 { // SCTP 不解析（Python 仅 6/17，键为 0）
 		sport := binary.BigEndian.Uint16(trans)
 		dport := binary.BigEndian.Uint16(trans[2:])
 		var flags byte
@@ -240,6 +240,9 @@ func buildModifiedPacket(ethBytes []byte, modSrc, modDst *string, modSport, modD
 			copy(ipHdr[16:20], net.ParseIP(*modDst).To4())
 		}
 		if proto == 6 || proto == 17 || proto == 132 {
+			if (modSport != nil || modDport != nil) && len(trans) < 2 {
+				return nil // Python IndexError → 整包原样
+			}
 			if modSport != nil {
 				binary.BigEndian.PutUint16(trans, *modSport)
 			}
@@ -266,6 +269,110 @@ func buildModifiedPacket(ethBytes []byte, modSrc, modDst *string, modSport, modD
 		binary.BigEndian.PutUint16(ipHdr[10:], checksumBytes(ipHdr))
 		return append(append([]byte{}, ethBytes[:14]...), append(ipHdr, trans...)...)
 	}
+	if ver == 6 && (srcIs4 || dstIs4) { // v6→v4（Python 467-515 半成品照抄）
+		if len(payload) < 40 {
+			return nil
+		}
+		nh := payload[6]
+		if nh != 6 && nh != 17 && nh != 132 && nh != 58 {
+			return nil
+		}
+		trans := append([]byte{}, payload[40:]...)
+		var sport, dport uint16
+		if nh == 6 || nh == 17 || nh == 132 {
+			if len(trans) >= 4 {
+				sport = binary.BigEndian.Uint16(trans)
+				dport = binary.BigEndian.Uint16(trans[2:])
+			}
+			if modSport != nil {
+				sport = *modSport
+			}
+			if modDport != nil {
+				dport = *modDport
+			}
+		}
+		v4 := make([]byte, 20)
+		v4[0] = 0x45
+		binary.BigEndian.PutUint16(v4[2:], uint16(20+len(trans)))
+		v4[8] = 64
+		v4[9] = nh // ICMPv6 载荷直搬（半成品照抄：protocol 写 58）
+		if modSrc != nil {
+			copy(v4[12:16], net.ParseIP(*modSrc).To4())
+		} else {
+			copy(v4[12:16], src4FromMapped(payload[8:24]))
+		}
+		if modDst != nil {
+			copy(v4[16:20], net.ParseIP(*modDst).To4())
+		} else {
+			copy(v4[16:20], dst4FromMapped(payload[24:40]))
+		}
+		if nh == 6 || nh == 17 {
+			binary.BigEndian.PutUint16(trans, sport)
+			binary.BigEndian.PutUint16(trans[2:], dport)
+			off := 16
+			if nh == 17 {
+				off = 6
+			}
+			if off+2 <= len(trans) {
+				trans[off], trans[off+1] = 0, 0
+				binary.BigEndian.PutUint16(trans[off:], tcpChecksum(v4, trans))
+			}
+		}
+		v4[10], v4[11] = 0, 0
+		binary.BigEndian.PutUint16(v4[10:], checksumBytes(v4))
+		return append(append([]byte{}, ethBytes[:14]...), append(v4, trans...)...)
+	}
+	if ver == 4 && (srcIs6 || dstIs6) { // v4→v6（Python 517-562 半成品照抄）
+		if len(payload) < 20 {
+			return nil
+		}
+		proto := payload[9]
+		if proto != 6 && proto != 17 && proto != 132 && proto != 1 {
+			return nil
+		}
+		trans := append([]byte{}, payload[20:]...)
+		var sport, dport uint16
+		if proto == 6 || proto == 17 || proto == 132 {
+			if len(trans) >= 4 {
+				sport = binary.BigEndian.Uint16(trans)
+				dport = binary.BigEndian.Uint16(trans[2:])
+			}
+			if modSport != nil {
+				sport = *modSport
+			}
+			if modDport != nil {
+				dport = *modDport
+			}
+		}
+		v6 := make([]byte, 40)
+		v6[0] = 0x60
+		binary.BigEndian.PutUint16(v6[4:], uint16(len(trans)))
+		v6[6] = proto // ICMP 转 ICMPv6：next header 写 1（半成品照抄）
+		v6[7] = 64
+		if modSrc != nil {
+			copy(v6[8:24], net.ParseIP(*modSrc).To16())
+		} else {
+			copy(v6[8:24], mappedFrom4(payload[12:16]))
+		}
+		if modDst != nil {
+			copy(v6[24:40], net.ParseIP(*modDst).To16())
+		} else {
+			copy(v6[24:40], mappedFrom4(payload[16:20]))
+		}
+		if proto == 6 || proto == 17 {
+			binary.BigEndian.PutUint16(trans, sport)
+			binary.BigEndian.PutUint16(trans[2:], dport)
+			off := 16
+			if proto == 17 {
+				off = 6
+			}
+			if off+2 <= len(trans) {
+				trans[off], trans[off+1] = 0, 0
+				binary.BigEndian.PutUint16(trans[off:], tcpChecksum(v6, trans))
+			}
+		}
+		return append(append([]byte{}, ethBytes[:14]...), append(v6, trans...)...)
+	}
 	if ver == 6 && (srcIs6 || dstIs6) {
 		ipHdr := append([]byte{}, payload[:40]...)
 		trans := append([]byte{}, payload[40:]...)
@@ -276,7 +383,10 @@ func buildModifiedPacket(ethBytes []byte, modSrc, modDst *string, modSport, modD
 		if modDst != nil {
 			copy(ipHdr[24:40], net.ParseIP(*modDst).To16())
 		}
-		if nh == 6 || nh == 17 {
+		if nh == 6 || nh == 17 || nh == 132 {
+			if (modSport != nil || modDport != nil) && len(trans) < 2 {
+				return nil
+			}
 			if modSport != nil {
 				binary.BigEndian.PutUint16(trans, *modSport)
 			}
@@ -298,6 +408,28 @@ func buildModifiedPacket(ethBytes []byte, modSrc, modDst *string, modSport, modD
 		return append(append([]byte{}, ethBytes[:14]...), append(ipHdr, trans...)...)
 	}
 	return nil // v4↔v6 互转需对侧地址族全指定；未满足场景原样（半成品分支少用，照抄语义从简）
+}
+
+// src4FromMapped/mappedFrom4 跨族缺省地址（Python 用 force 值或失败原样；此处尽力映射）。
+func src4FromMapped(b []byte) []byte {
+	if is4in6(b) {
+		return b[12:16]
+	}
+	return net.ParseIP("0.0.0.0").To4()
+}
+
+func dst4FromMapped(b []byte) []byte {
+	if is4in6(b) {
+		return b[12:16]
+	}
+	return net.ParseIP("0.0.0.0").To4()
+}
+
+func mappedFrom4(b []byte) []byte {
+	out := make([]byte, 16)
+	out[10], out[11] = 0xFF, 0xFF
+	copy(out[12:], b)
+	return out
 }
 
 func isIPv4Literal(s string) bool {
@@ -346,7 +478,7 @@ func replayFiles(payload []byte) ([]byte, error) {
 	}
 	for k := range raw {
 		if !allowed[k] {
-			return nil, fmt.Errorf("PcapReplayer() got unexpected keyword argument %q", k)
+			return dt0Error(fmt.Errorf("PcapReplayer() got an unexpected keyword argument '%s'", k)), nil
 		}
 	}
 	if len(raw["pcaps"]) == 0 || len(raw["uplink_iface"]) == 0 || len(raw["downlink_iface"]) == 0 ||
@@ -373,7 +505,7 @@ func replayFiles(payload []byte) ([]byte, error) {
 		ServerHint *string  `json:"server_ip_hint"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
-		return nil, err
+		return dt0Error(err), nil
 	}
 	r := &replayer{
 		upIface: req.UpIface, downIface: req.DownIface,
@@ -386,7 +518,10 @@ func replayFiles(payload []byte) ([]byte, error) {
 	r.startTime = nowSec()
 	var totalBytesSent int
 	for _, f := range req.Pcaps {
-		pkts, _ := r.replayFile(f)
+		pkts, _, ferr := r.replayFile(f)
+		if ferr != nil {
+			return dt0Error(ferr), nil
+		}
 		r.totalFiles++
 		r.totalPackets += pkts
 		totalBytesSent = r.totalBytes
@@ -405,20 +540,29 @@ func replayFiles(payload []byte) ([]byte, error) {
 	if dur > 0 {
 		actual = float64(r.totalBytes) * 8 / 1e6 / dur
 	}
-	stats := map[string]any{
-		"total_files":      r.totalFiles,
-		"total_packets":    r.totalPackets,
-		"total_bytes":      r.totalBytes,
-		"uplink_packets":   r.upPackets,
-		"uplink_bytes":     r.upBytes,
-		"downlink_packets": r.downPackets,
-		"downlink_bytes":   r.downBytes,
-		"flow_count":       r.flowCount,
-		"duration_seconds": round2(dur),
-		"target_mbps":      r.mbps,
-		"actual_mbps":      round2(actual),
+	stats := replayStats{
+		TotalFiles: r.totalFiles, TotalPackets: r.totalPackets, TotalBytes: r.totalBytes,
+		UplinkPackets: r.upPackets, UplinkBytes: r.upBytes,
+		DownlinkPackets: r.downPackets, DownlinkBytes: r.downBytes,
+		FlowCount: r.flowCount, DurationSeconds: round2(dur),
+		TargetMbps: r.mbps, ActualMbps: round2(actual),
 	}
 	return json.Marshal(stats)
+}
+
+// replayStats 键序对齐 Python 字典插入序。
+type replayStats struct {
+	TotalFiles      int     `json:"total_files"`
+	TotalPackets    int     `json:"total_packets"`
+	TotalBytes      int     `json:"total_bytes"`
+	UplinkPackets   int     `json:"uplink_packets"`
+	UplinkBytes     int     `json:"uplink_bytes"`
+	DownlinkPackets int     `json:"downlink_packets"`
+	DownlinkBytes   int     `json:"downlink_bytes"`
+	FlowCount       int     `json:"flow_count"`
+	DurationSeconds float64 `json:"duration_seconds"`
+	TargetMbps      int     `json:"target_mbps"`
+	ActualMbps      float64 `json:"actual_mbps"`
 }
 
 func round2(f float64) float64 { return float64(int(f*100+0.5*sign(f))) / 100 }
@@ -429,16 +573,24 @@ func sign(f float64) float64 {
 	return 1
 }
 
-// replayFile 单文件回放，返回 (packets, 累计字节)。
-func (r *replayer) replayFile(path string) (int, int) {
+// dt0Error {"status":"error","message":str(e)}（Python dt0 try/except 语义）。
+func dt0Error(err error) []byte {
+	out, _ := json.Marshal(map[string]string{"status": "error", "message": err.Error()})
+	return out
+}
+
+// replayFile 单文件回放，返回 (packets, 累计字节, err)。
+// err 非空 = Python RuntimeError（文件缺失/全局头不完整）→ dt0 error JSON。
+func (r *replayer) replayFile(path string) (int, int, error) {
 	if _, err := os.Stat(path); err != nil {
-		log.Printf("[ERROR] %v", err)
-		return 0, r.totalBytes
+		return 0, r.totalBytes, fmt.Errorf("pcap不存在：%s", path)
 	}
 	data, err := os.ReadFile(path)
-	if err != nil || len(data) < 24 {
-		log.Printf("[ERROR] pcap 全局头不完整：%s", path)
-		return 0, r.totalBytes
+	if err != nil {
+		return 0, r.totalBytes, fmt.Errorf("pcap不存在：%s", path)
+	}
+	if len(data) < 24 {
+		return 0, r.totalBytes, fmt.Errorf("pcap 全局头不完整：%s", path)
 	}
 	magic := binary.LittleEndian.Uint32(data[:4])
 	divisor := float64(1e6)
@@ -452,6 +604,7 @@ func (r *replayer) replayFile(path string) (int, int) {
 		sec := binary.LittleEndian.Uint32(data[off:])
 		frac := binary.LittleEndian.Uint32(data[off+4:])
 		incl := int(binary.LittleEndian.Uint32(data[off+8:]))
+		origLen := int(binary.LittleEndian.Uint32(data[off+12:]))
 		off += 16
 		if off+incl > len(data) {
 			break
@@ -525,12 +678,13 @@ func (r *replayer) replayFile(path string) (int, int) {
 			vlan = r.downVlan
 		}
 		out = addOrModifyVLAN(out, vlan)
-		if err := replaySendFn(iface, out); err != nil {
-			log.Printf("[ERROR] 发送数据包失败: %v", err)
-			continue // Python send 失败 return（不计字节）；包计数照常？
+		sendErr := replaySendFn(iface, out)
+		packets++ // Python packets_count += 1 无条件（发送失败仅跳过字节统计）
+		if sendErr != nil {
+			log.Printf("[ERROR] 发送数据包失败: %v", sendErr)
+			continue
 		}
-		packets++
-		bytesInc := incl
+		bytesInc := origLen
 		if bytesInc < 60 {
 			bytesInc = 60
 		}
@@ -553,7 +707,7 @@ func (r *replayer) replayFile(path string) (int, int) {
 			lastSend = time.Now()
 		}
 	}
-	return packets, r.totalBytes
+	return packets, r.totalBytes, nil
 }
 
 func nowSec() float64 { return float64(time.Now().UnixNano()) / 1e9 }

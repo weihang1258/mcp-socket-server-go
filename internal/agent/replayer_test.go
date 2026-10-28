@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -297,11 +298,29 @@ func TestReplayerDT0Validation(t *testing.T) {
 	if m["status"] != "error" || m["message"] != "Missing required parameters: uplink_iface or downlink_iface" {
 		t.Fatalf("fixed message: %q", resp)
 	}
-	// 未知键 → TypeError → 断连
-	if _, err := runDT(t, 0, mustJSON(t, map[string]any{
+	// 未知键 → TypeError 被 dt0 try/except 捕获 → error JSON（Python 语义，审查确认）
+	resp2, err := runDT(t, 0, mustJSON(t, map[string]any{
 		"pcaps": []string{"/x"}, "uplink_iface": "u", "downlink_iface": "d", "bogus": 1,
-	})); err == nil {
-		t.Fatal("unknown key must disconnect")
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m2 map[string]string
+	json.Unmarshal(resp2, &m2)
+	if m2["status"] != "error" {
+		t.Fatalf("unknown key want error JSON, got %q", resp2)
+	}
+	// 文件缺失 → error JSON "pcap不存在："
+	resp3, err := runDT(t, 0, mustJSON(t, map[string]any{
+		"pcaps": []string{"/no/such.pcap"}, "uplink_iface": "u", "downlink_iface": "d",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m3 map[string]string
+	json.Unmarshal(resp3, &m3)
+	if m3["status"] != "error" || !strings.Contains(m3["message"], "pcap不存在") {
+		t.Fatalf("missing file want error JSON: %q", resp3)
 	}
 }
 

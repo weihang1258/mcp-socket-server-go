@@ -187,3 +187,39 @@ func setsockoptGetBytes(fd, level, opt int, b []byte) error {
 	}
 	return nil
 }
+
+// rawPacketSender 回放发送（AF_PACKET SOCK_RAW，replayer 用；socket 按 iface 缓存）。
+type rawPacketSender struct {
+	fd      int
+	ifindex int
+}
+
+var sendSockets = map[string]*rawPacketSender{}
+
+// replaySendLinux 回放发送实现（export 给 replaySendFn 替换；root/CAP_NET_RAW）。
+func replaySendLinux(iface string, pkt []byte) error {
+	s, ok := sendSockets[iface]
+	if !ok {
+		fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, 0)
+		if err != nil {
+			return err
+		}
+		ifaceObj, err := net.InterfaceByName(iface)
+		if err != nil {
+			unix.Close(fd)
+			return err
+		}
+		if err := unix.Bind(fd, &unix.SockaddrLinklayer{Ifindex: ifaceObj.Index}); err != nil {
+			unix.Close(fd)
+			return err
+		}
+		s = &rawPacketSender{fd: fd, ifindex: ifaceObj.Index}
+		sendSockets[iface] = s
+	}
+	addr := &unix.SockaddrLinklayer{Ifindex: s.ifindex}
+	return unix.Sendto(s.fd, pkt, 0, addr)
+}
+
+func init() {
+	replaySendFn = replaySendLinux
+}
