@@ -73,7 +73,7 @@ func execCmdArgs(argv ...string) (code int, stdout, stderr string) {
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			code = ee.ExitCode()
+			code = processExitCode(ee) // 信号死亡 → -signum
 		} else {
 			return -1, "", err.Error()
 		}

@@ -5,10 +5,20 @@ import (
 	"compress/gzip"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 )
+
+// processExitCode 信号死亡的进程返回 -signum（对齐 Python subprocess returncode）。
+func processExitCode(ee *exec.ExitError) int {
+	if ws, ok := ee.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return -int(ws.Signal())
+	}
+	return ee.ExitCode()
+}
 
 // execExitError 退出码错误别名。
 type execExitError = exec.ExitError
@@ -47,9 +57,24 @@ func cmdExec(payload []byte) ([]byte, error) {
 	if wait {
 		code, stdout, stderr = execCmdWith(args, p.Cwd, env, true)
 	} else {
-		// 异步：Start 不等（Python Popen 不 communicate → 返回 None）
-		execCmdWith(args, p.Cwd, env, false)
+		// 异步：Start 不等（Python Popen 不 communicate → 返回 None）；
+		// Start 失败 = Python Popen 抛异常 → except → {code:-1,...} gzip JSON（非 "null"）
+		if code, _, stderr = execCmdWith(args, p.Cwd, env, false); code == -1 {
+			return errGzipFrame(code, stderr)
+		}
 		return gzipFrame([]byte("null")), nil
+	}
+	return errGzipFrame(code, stdout, stderr)
+}
+
+// errGzipFrame [4B i][gzip JSON {code,stdout,stderr}]。
+func errGzipFrame(code int, vals ...string) ([]byte, error) {
+	var stdout, stderr string
+	if len(vals) > 0 {
+		stdout = vals[0]
+	}
+	if len(vals) > 1 {
+		stderr = vals[1]
 	}
 	body, err := json.Marshal(struct {
 		Code   int    `json:"code"`
@@ -77,6 +102,8 @@ func execCmdWith(cmd, cwd string, env []string, wait bool) (int, string, string)
 		c.Dir = cwd
 	}
 	if !wait {
+		c.Stdout = io.Discard // Python PIPE：输出进管道被丢弃，不进 agent 日志
+		c.Stderr = io.Discard
 		if err := c.Start(); err != nil {
 			return -1, "", err.Error()
 		}
@@ -90,7 +117,7 @@ func execCmdWith(cmd, cwd string, env []string, wait bool) (int, string, string)
 	code := 0
 	if err != nil {
 		if ee, ok := err.(*execExitError); ok {
-			code = ee.ExitCode()
+			code = processExitCode(ee) // 信号死亡 → -signum（Python subprocess 语义）
 		} else {
 			return -1, "", err.Error()
 		}
@@ -126,8 +153,8 @@ func unzipCmd(payload []byte) ([]byte, error) {
 	if p.Overwrite != nil {
 		overwrite = *p.Overwrite
 	}
-	if !ensureCommand("unzip") {
-		return []byte("ok"), nil // quirk：缺失静默返回，仍 ok
+	if code, _, _ := execCmdArgs("unzip", "-v"); code != 0 { // Python 实跑 unzip -v 且要求 exit 0
+		return []byte("ok"), nil // quirk：缺失/不可用静默返回，仍 ok
 	}
 	argv := []string{"unzip"}
 	if overwrite {
@@ -141,6 +168,8 @@ func unzipCmd(payload []byte) ([]byte, error) {
 		argv = append(argv, "-d", p.Outdir)
 	}
 	c := argvCmd(argv)
+	c.Stdout = io.Discard // Python PIPE 收走，不进 agent 日志
+	c.Stderr = io.Discard
 	if dir := filepath.Dir(p.File); dir != "" && dir != "." {
 		c.Dir = dir
 	}

@@ -101,12 +101,16 @@ func TestDT1CwdEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out2 struct {
-		Code int `json:"code"`
+		Code   int    `json:"code"`
+		Stdout string `json:"stdout"`
 	}
-	json.Unmarshal(unwrapGzipResp(t, resp), &out2)
-	// 整替换后无 PATH，/bin/sh -c 仍可执行（sh 按绝对路径找到）——
-	// 但 echo 内建可用：stdout 应为 v1 或 code=-1（Python 同暴露面），只要 MYVAR 生效即可
-	_ = out2
+	if err := json.Unmarshal(unwrapGzipResp(t, resp), &out2); err != nil {
+		t.Fatal(err)
+	}
+	// env 整替换后无 PATH，但 /bin/sh 绝对路径 + echo 内建仍可跑：stdout 必须 = v1
+	if out2.Code != 0 || out2.Stdout != "v1\n" {
+		t.Fatalf("env replacement wrong: %+v", out2)
+	}
 }
 
 // dt1 shell 命令非零退出：code 透传
@@ -122,7 +126,7 @@ func TestDT1ExitCode(t *testing.T) {
 	}
 }
 
-// dt1 sudo 剥除（非 root 环境不剥；本测试只验命令透传）
+// dt1 畸形 JSON payload → 断连
 func TestDT1JSONPayloadError(t *testing.T) {
 	if _, err := runDT(t, 1, []byte("not-json")); err == nil {
 		t.Fatal("bad json must disconnect")

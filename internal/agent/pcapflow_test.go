@@ -338,9 +338,9 @@ func TestDT200StrictPayload(t *testing.T) {
 func TestDT200DirectionLockSemantics(t *testing.T) {
 	dir := t.TempDir()
 	writePcap(t, filepath.Join(dir, "lock.pcap"),
-		ipv4("10.11.0.1", "10.11.0.2", 17, udpSeg(1, 2)), // 流A: 默认 src=客户端
+		ipv4("10.11.0.1", "10.11.0.2", 17, udpSeg(1, 2)),                                            // 流A: 默认 src=客户端
 		ipv4("10.11.0.3", "10.11.0.4", 6, tcpSeg(5000, 80, 0x18, []byte("GET / HTTP/1.1\r\n\r\n"))), // 先锁 .3
-		ipv4("10.11.0.4", "10.11.0.3", 6, tcpSeg(80, 5000, 0x02, nil)), // 后到 SYN 不改
+		ipv4("10.11.0.4", "10.11.0.3", 6, tcpSeg(80, 5000, 0x02, nil)),                              // 后到 SYN 不改
 	)
 	flows := runDT200(t, dir)
 	if len(flows) != 2 {
