@@ -58,7 +58,7 @@ func readAutoupgrade() bool {
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "autoupgrade=") {
-			return strings.ToLower(line[len("autoupgrade="):]) == "on"
+			return strings.ToLower(strings.TrimSpace(line[len("autoupgrade="):])) == "on"
 		}
 	}
 	return true
@@ -69,6 +69,8 @@ func readAutoupgrade() bool {
 func SetAutoupgrade(state string) error { return setAutoupgrade(state) }
 
 func setAutoupgrade(state string) error {
+	type kv struct{ k, v string }
+	var order []kv
 	cfg := map[string]string{}
 	if data, err := os.ReadFile(filepath.Join(upgradeRoot, "config")); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
@@ -76,14 +78,25 @@ func setAutoupgrade(state string) error {
 			if line == "" || !strings.Contains(line, "=") {
 				continue
 			}
-			kv := strings.SplitN(line, "=", 2)
-			cfg[kv[0]] = kv[1]
+			parts := strings.SplitN(line, "=", 2)
+			k := strings.TrimSpace(parts[0])
+			v := strings.TrimSpace(parts[1])
+			if _, seen := cfg[k]; !seen {
+				order = append(order, kv{k, v})
+			}
+			cfg[k] = v
 		}
 	}
 	cfg["autoupgrade"] = state
 	var sb strings.Builder
-	for k, v := range cfg {
-		sb.WriteString(k + "=" + v + "\n")
+	for _, pair := range order {
+		if pair.k == "autoupgrade" {
+			pair.v = state
+		}
+		sb.WriteString(pair.k + "=" + pair.v + "\n")
+	}
+	if _, seen := cfg["autoupgrade"]; !seen {
+		sb.WriteString("autoupgrade=" + state + "\n")
 	}
 	return os.WriteFile(filepath.Join(upgradeRoot, "config"), []byte(sb.String()), 0o644)
 }
@@ -98,7 +111,7 @@ func isVersionDownloaded(version string) bool {
 func finalizePushedVersion(version, expectedSHA string) (bool, error) {
 	version = normalizeVersion(version)
 	if !versionRe.MatchString(version) {
-		return false, fmt.Errorf("version 非法: %q", version)
+		return false, fmt.Errorf("version 非法: '%s'", version)
 	}
 	expectedSHA = strings.ToLower(strings.TrimSpace(expectedSHA))
 	if len(expectedSHA) != 64 || !isHex64(expectedSHA) {
@@ -154,7 +167,9 @@ func switchTo(version string) bool {
 	current := filepath.Join(versionsDir(), "current")
 	target := filepath.Join(versionsDir(), version)
 	tmp := current + ".tmp"
-	os.Remove(tmp)
+	if fi, err := os.Lstat(tmp); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		os.Remove(tmp) // 仅清理残留软链（Python islink 语义；普通文件残留 → symlink 失败不重启）
+	}
 	if err := os.Symlink(target, tmp); err != nil {
 		return false
 	}
@@ -172,14 +187,14 @@ func switchTo(version string) bool {
 
 // applyPushedUpgrade dt20 同步段（_apply_pushed_upgrade 语义顺序）。
 // 返回响应字节；restartVersion 非空 → 后台 0.3s 后 switch_to。
-func applyPushedUpgrade(data []byte) ([]byte, string) {
+func applyPushedUpgrade(payload []byte) ([]byte, string) {
 	var p struct {
 		Version string `json:"version"`
 		SHA     string `json:"sha256"`
 		Force   bool   `json:"force"`
 	}
-	if err := json.Unmarshal(data, &p); err != nil {
-		return jsonMarshal(map[string]string{"error": "bad json"}), ""
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil, "" // Python json.loads 异常 → do() 冒泡 → 断连无响应
 	}
 	version := normalizeVersion(p.Version)
 	if !versionRe.MatchString(version) {
@@ -216,7 +231,7 @@ func applyPushedUpgrade(data []byte) ([]byte, string) {
 func restartAfterUpgrade(version string) {
 	time.Sleep(300 * time.Millisecond)
 	if !switchTo(version) {
-		log.Printf("升级切换失败：版本 %s 落盘后仍不可切换", version)
+		log.Printf("升级切换失败：版本 %s 落盘后仍不可切换（见上方日志）", version)
 	}
 }
 
