@@ -129,6 +129,8 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 			LatestVersion string `json:"latest_version"`
 			HasUpgrade    bool   `json:"has_upgrade"`
 		}{Version, Repo, ReleaseNotes, NotesVersion, NotesVersion != Version})
+	case 131: // 拨测（预检链 + 封堵/重定向）
+		return doBoce(payload)
 	case 200: // pcap 五元组提取（完整实现在 pcapflow 模块；此处先契约化错误路径）
 		return pcapFlowExtract(payload)
 	}
