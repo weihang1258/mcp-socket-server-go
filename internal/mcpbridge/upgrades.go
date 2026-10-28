@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -38,8 +39,17 @@ var (
 // VersionOK 版本号格式校验（防路径穿越）。
 func VersionOK(v string) bool { return versionRe.MatchString(v) }
 
-func httpClient(timeout int) *http.Client {
-	return &http.Client{Timeout: time.Duration(timeout) * time.Second}
+// httpClient proxy 非空时显式使用（对齐 httpx proxy=；空=环境变量/直连）。
+func httpClient(timeout int, proxy string) *http.Client {
+	t := &http.Transport{}
+	if proxy != "" {
+		if u, err := url.Parse(proxy); err == nil {
+			t.Proxy = http.ProxyURL(u)
+		}
+	} else {
+		t.Proxy = http.ProxyFromEnvironment
+	}
+	return &http.Client{Timeout: time.Duration(timeout) * time.Second, Transport: t}
 }
 
 // FetchLatestVersion 查最新版本；失败 ""（退避日志策略：首败 warning、后续 debug、恢复 info）。
@@ -47,7 +57,7 @@ func FetchLatestVersion(proxy string) string {
 	failStreakMu.Lock()
 	streak := failStreak
 	failStreakMu.Unlock()
-	resp, err := httpClient(10).Get(rawVersionBase)
+	resp, err := httpClient(10, proxy).Get(rawVersionBase)
 	if err != nil {
 		logFetchFail(err, streak+1)
 		return ""
@@ -83,9 +93,7 @@ func logFetchFail(err error, streak int) {
 	}
 	if streak == 1 {
 		log.Printf("版本查询失败: %v；后续按退避重试，期间不再刷失败日志", err)
-	} else {
-		log.Printf("版本查询失败（连续第 %d 次，退避 %ds）: %v", streak, steps[idx], err)
-	}
+	} // streak≥2 静默（Python debug 级不刷屏）
 	failStreakMu.Lock()
 	failStreak = streak
 	failStreakMu.Unlock()
@@ -150,8 +158,7 @@ func EnsureReleaseBinary(version, downloadDir, proxy string) (string, string, er
 
 // httpGet 全量 GET。
 func httpGet(url, proxy string, timeout int) ([]byte, error) {
-	_ = proxy // Ponytail: HTTP(S)_PROXY 走环境变量（net/http 默认读取）；显式 proxy 键由部署文档注明
-	resp, err := httpClient(timeout).Get(url)
+	resp, err := httpClient(timeout, proxy).Get(url)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +196,7 @@ func PushBinary(host, binaryPath, version string, httpPort, timeout int) (bool, 
 		return false, "", fmt.Errorf("推送失败（需靶机 1.7.0+ 开启 :9001）: %v", err)
 	}
 	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
-	resp, err := httpClient(timeout).Do(req)
+	resp, err := httpClient(timeout, "").Do(req)
 	if err != nil {
 		return false, "", fmt.Errorf("推送失败（需靶机 1.7.0+ 开启 :9001）: %v", err)
 	}
@@ -204,9 +211,15 @@ func PushBinary(host, binaryPath, version string, httpPort, timeout int) (bool, 
 	return true, staging, nil
 }
 
-// StartDailyCheck 每日兜底（先睡 24h；有新版记 1 条 info，绝不自动升级）。
+var dailyOnce sync.Once
+
+// StartDailyCheck 每日兜底（先睡 24h；有新版记 1 条 info，绝不自动升级；防重）。
 func StartDailyCheck(proxy string, getBridgeVersion func() string) {
-	go func() {
+	dailyOnce.Do(func() { dailyLoop(proxy, getBridgeVersion) })
+}
+
+func dailyLoop(proxy string, getBridgeVersion func() string) {
+	{
 		for {
 			time.Sleep(24 * time.Hour)
 			v := FetchLatestVersion(proxy)
@@ -217,7 +230,7 @@ func StartDailyCheck(proxy string, getBridgeVersion func() string) {
 			}
 			announceMu.Unlock()
 		}
-	}()
+	}
 }
 
 var _ = strconv.Itoa

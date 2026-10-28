@@ -28,7 +28,8 @@ func RunStdio(ctx context.Context, b *Bridge) error {
 // RunStreamableHTTP Streamable HTTP（端点 /mcp），绑定 cfg host:port（阻塞）。
 func RunStreamableHTTP(ctx context.Context, b *Bridge, host string, port int) error {
 	s := NewServer(b)
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, nil)
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s },
+		&mcp.StreamableHTTPOptions{DisableLocalhostProtection: true}) // 对齐 Python 显式关闭 rebinding 保护
 	addr := fmt.Sprintf("%s:%d", host, port)
 	log.Printf("MCP Streamable HTTP 监听 %s/mcp (log_level=%s)", addr, b.Cfg.LogLevel)
 	srv := &http.Server{Addr: addr, Handler: handler}

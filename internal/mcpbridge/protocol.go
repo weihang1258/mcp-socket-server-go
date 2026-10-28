@@ -112,33 +112,6 @@ func (c *Client) recvUntilTimeout(probe time.Duration) ([]byte, error) {
 	return out, nil
 }
 
-// recvGzip [4B i][gzip JSON]。
-func (c *Client) recvGzip() (map[string]any, error) {
-	head, err := c.recvN(4)
-	if err != nil {
-		return nil, err
-	}
-	n := binary.LittleEndian.Uint32(head)
-	gz, err := c.recvN(int(n))
-	if err != nil {
-		return nil, err
-	}
-	zr, err := gzip.NewReader(strings.NewReader(string(gz)))
-	if err != nil {
-		return nil, err
-	}
-	out, err := io.ReadAll(zr)
-	if err != nil {
-		return nil, err
-	}
-	var m map[string]any
-	if err := json.Unmarshal(out, &m); err != nil {
-		// 非 dict（如 null）→ 空 map 兜底由调用方处理
-		return nil, err
-	}
-	return m, nil
-}
-
 // recvGzipRaw 保留原始解析值（cmd_exec 可能收到 "null"）。
 func (c *Client) recvGzipRaw() (any, error) {
 	head, err := c.recvN(4)
@@ -164,27 +137,6 @@ func (c *Client) recvGzipRaw() (any, error) {
 		return nil, err
 	}
 	return m, nil
-}
-
-// recvFile [8B <Q][content]（3 可选解压 / 174 必解压）。
-func (c *Client) recvFile(gunzip bool) ([]byte, error) {
-	head, err := c.recvN(8)
-	if err != nil {
-		return nil, err
-	}
-	n := binary.LittleEndian.Uint64(head)
-	body, err := c.recvN(int(n))
-	if err != nil {
-		return nil, err
-	}
-	if !gunzip {
-		return body, nil
-	}
-	zr, err := gzip.NewReader(strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
-	}
-	return io.ReadAll(zr)
 }
 
 // recvLenPrefixedJSON [4B i][JSON]（131/200）。
@@ -251,24 +203,6 @@ func (c *Client) resBoolReq(dt int32, key, path string) (bool, error) {
 	}
 	return m.Res, nil
 }
-
-// PcapFlowExtract dt200 → 流列表。
-func (c *Client) PcapFlowExtract(dir string) ([]any, error) {
-	p, _ := json.Marshal(map[string]string{"pcap_dir": dir})
-	if err := c.send(200, p); err != nil {
-		return nil, err
-	}
-	m, err := c.recvLenPrefixedJSON()
-	if err != nil {
-		return nil, err
-	}
-	flows, _ := m["flows"].([]any)
-	_ = flows
-	// dt200 响应即数组——recvLenPrefixedJSON 解析 dict 会失败；单独处理：
-	return nil, errArrayNotObject
-}
-
-var errArrayNotObject = errors.New("array response")
 
 // PcapFlowExtractRaw dt200（数组响应）。
 func (c *Client) PcapFlowExtractRaw(dir string) ([]any, error) {
@@ -500,7 +434,7 @@ func (c *Client) SocketListen(action string, listenPort int, file string, maxByt
 			return nil, err
 		}
 		if head[0] == '{' {
-			rest, _ := c.recvUntilTimeout(300 * time.Millisecond)
+			rest, _ := c.recvUntilTimeout(500 * time.Millisecond)
 			raw := string(head) + string(rest)
 			msg := raw
 			var m map[string]string
@@ -525,15 +459,15 @@ func (c *Client) SocketListen(action string, listenPort int, file string, maxByt
 	return nil, fmt.Errorf("unknown action: %s", action)
 }
 
-func (c *Client) okOrErr(op string) ([]byte, error) {
+func (c *Client) okOrErr(op string) (string, error) {
 	b, err := c.recvUntilTimeout(300 * time.Millisecond)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if string(b) != "ok" {
-		return nil, fmt.Errorf("listen %s failed: %s", op, decodeListenError(b))
+		return "", fmt.Errorf("listen %s failed: %s", op, decodeListenError(b))
 	}
-	return b, nil
+	return "ok", nil
 }
 
 // UpgradeApply dt20（1.8.0+）：同步终态。
