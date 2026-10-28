@@ -1,0 +1,106 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestDefaultsZeroConfig(t *testing.T) {
+	os.Unsetenv("MCP_BIND_HOST")
+	os.Unsetenv("MCP_BIND_PORT")
+	os.Unsetenv("MCP_LOG_LEVEL")
+	os.Unsetenv("MCP_DEFAULT_TIMEOUT")
+	os.Unsetenv("SOCKET_SERVER_LOG")
+	cfg := Load("")
+	if cfg.Agent.TCPPort != 9000 {
+		t.Errorf("agent tcp_port want 9000 got %d", cfg.Agent.TCPPort)
+	}
+	if cfg.Agent.LogFile != "/var/log/socket_server.log" {
+		t.Errorf("agent log_file want default, got %q", cfg.Agent.LogFile)
+	}
+	if cfg.MCP.Bind.Host != "0.0.0.0" || cfg.MCP.Bind.Port != 8080 {
+		t.Errorf("mcp bind want 0.0.0.0:8080 got %s:%d", cfg.MCP.Bind.Host, cfg.MCP.Bind.Port)
+	}
+	if cfg.MCP.DBPath != "/var/lib/socketstack/mcp.db" {
+		t.Errorf("db_path want /var/lib/socketstack/mcp.db got %q", cfg.MCP.DBPath)
+	}
+	if cfg.MCP.BehindProxy {
+		t.Error("behind_proxy want false")
+	}
+	if cfg.MCP.Pool.MaxConnPerTarget != 5 || cfg.MCP.Pool.IdleTimeout != 600 ||
+		cfg.MCP.Pool.BorrowTimeout != 10 || cfg.MCP.Pool.MaxGlobalConcurrency != 50 {
+		t.Errorf("pool defaults wrong: %+v", cfg.MCP.Pool)
+	}
+	if cfg.MCP.AuditRetentionDays != 90 {
+		t.Errorf("audit_retention want 90 got %d", cfg.MCP.AuditRetentionDays)
+	}
+	if cfg.MCP.DefaultTimeout != 30 {
+		t.Errorf("default_timeout want 30 got %d", cfg.MCP.DefaultTimeout)
+	}
+	if len(cfg.MCP.CmdExecWhitelist) != 0 {
+		t.Errorf("whitelist want empty")
+	}
+}
+
+func TestYAMLOverride(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.yaml")
+	yaml := `
+agent:
+  tcp_port: 9500
+  log_file: /tmp/x.log
+mcp:
+  bind: {host: 127.0.0.1, port: 9090}
+  proxy: http://p:7897
+  cmd_exec_whitelist: ["git ", "ls "]
+`
+	if err := os.WriteFile(p, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Load(p)
+	if cfg.Agent.TCPPort != 9500 || cfg.Agent.LogFile != "/tmp/x.log" {
+		t.Errorf("agent override wrong: %+v", cfg.Agent)
+	}
+	if cfg.MCP.Bind.Host != "127.0.0.1" || cfg.MCP.Bind.Port != 9090 {
+		t.Errorf("bind override wrong: %+v", cfg.MCP.Bind)
+	}
+	if cfg.MCP.Proxy != "http://p:7897" {
+		t.Errorf("proxy wrong: %q", cfg.MCP.Proxy)
+	}
+	if len(cfg.MCP.CmdExecWhitelist) != 2 || cfg.MCP.CmdExecWhitelist[0] != "git " {
+		t.Errorf("whitelist wrong: %v", cfg.MCP.CmdExecWhitelist)
+	}
+	// 未覆盖键保持默认
+	if cfg.MCP.Pool.MaxConnPerTarget != 5 {
+		t.Errorf("pool default lost on override: %+v", cfg.MCP.Pool)
+	}
+}
+
+func TestEnvOverrideWhitelist(t *testing.T) {
+	t.Setenv("MCP_BIND_HOST", "10.0.0.1")
+	t.Setenv("MCP_BIND_PORT", "9999")
+	t.Setenv("MCP_LOG_LEVEL", "DEBUG")
+	t.Setenv("MCP_DEFAULT_TIMEOUT", "45")
+	t.Setenv("SOCKET_SERVER_LOG", "/tmp/ss.log")
+	cfg := Load("")
+	if cfg.MCP.Bind.Host != "10.0.0.1" || cfg.MCP.Bind.Port != 9999 {
+		t.Errorf("bind env wrong: %+v", cfg.MCP.Bind)
+	}
+	if cfg.MCP.LogLevel != "DEBUG" {
+		t.Errorf("log level env wrong: %q", cfg.MCP.LogLevel)
+	}
+	if cfg.MCP.DefaultTimeout != 45 {
+		t.Errorf("default_timeout env wrong: %d", cfg.MCP.DefaultTimeout)
+	}
+	if cfg.Agent.LogFile != "/tmp/ss.log" {
+		t.Errorf("SOCKET_SERVER_LOG wrong: %q", cfg.Agent.LogFile)
+	}
+}
+
+func TestMissingFileUsesDefaults(t *testing.T) {
+	cfg := Load("/nonexistent/c.yaml")
+	if cfg.Agent.TCPPort != 9000 {
+		t.Errorf("missing file should be zero-config, got %+v", cfg.Agent)
+	}
+}
