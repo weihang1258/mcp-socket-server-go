@@ -1,7 +1,7 @@
 # socketstack-go 合体重构方案（设计文档 v2.2）
 
 日期：2026-10-28（v2.2，第 2 轮对抗性复审修订；取代 v2.1）
-状态：待评审
+状态：实施中（agent 侧全量落地；待真机验收项见 §13）
 
 本文档是 **socket_server**（Python，v1.8.3，靶机侧内部服务）与 **mcp_socket_server**（Python，v0.3.2，中央 MCP 桥）两项目合并为单一 Go 项目的唯一方案来源。全部行为以两仓库源码逐文件通读推导，经两轮独立对抗性审查（5+3 个维度）交叉核验。
 
@@ -286,4 +286,6 @@ frame(字节层) → config/svc(含 serve 别名+unit 模板)
 | 9 | PLAYWRIGHT_BROWSERS_PATH 注入删除 | Go 无 playwright |
 | 10 | IPv6 TCP 客户端支持（Python client AF_INET-only） | 有意增强，对拍单独标注；wire 不变 |
 | 11 | mcp 默认 db_path/download_dir 改 /var/lib/socketstack 绝对路径 | systemd WorkingDirectory 需要绝对路径；语义不变 |
-| 12 | Python 死代码不移植（cache_cpus 族/get_tx_cpu/config_rx_thread_cpus/kill_all_chrome） | 全仓无调用点 |
+| 12 | Python 死代码不移植（cache_cpus 族/get_tx_cpu/config_rx_thread_cpus/kill_all_chrome/tcpdump_isrun/PcapStats/PacketBuffer/wait_until 族/_sniff_command） | 全仓无调用点 |
+| 13 | upgrade_run 轮询拆分对方括号 IPv6（`[fd00::5]:9000`）剥括号（Python rpartition 保留括号必败） | Go 行为更优；普通裸 v6 的 fd00::5 截断 quirk 仍照抄 |
+| 14 | 封堵拨测连接禁 keep-alive 显式配置（Python 靠每请求新 Session） | 语义等价，实现路径不同 |
