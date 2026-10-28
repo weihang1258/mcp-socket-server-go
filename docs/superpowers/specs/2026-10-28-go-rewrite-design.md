@@ -40,7 +40,7 @@
 - 不做 MCP 鉴权（对齐现状：内网信任 + DNS rebinding 保护关闭）。
 - **datatype 16（python_cmd）不复刻**：Go 无解释器；收到后回 `[4B i][gzip JSON {"error":"datatype 16 not supported"}]`（沿用 dt1 响应形态，`recv_gzip_response` 可解析，旧中央不挂死）。验收标注旧 e2e dt16/dt122 用例预期失败。
 - datatype 121/122/123 不复刻（源码已注释弃用）。
-- Python 源码中的**死代码不移植**（全仓 grep 无调用点）：capture.py 的 `cache_cpus/restore_cpus/remove_cpusfile/get_tx_cpu/config_rx_thread_cpus`、boce.py 的 `kill_all_chrome`。/tmp/cpus 缓存机制随其死亡，不进设计。
+- Python 源码中的**死代码不移植**（全仓 grep 无调用点；非穷尽列举，同型新增同理）：capture.py 的 `cache_cpus/restore_cpus/remove_cpusfile/get_tx_cpu/config_rx_thread_cpus/tcpdump_isrun`、replayer.py 的 `PcapStats/PacketBuffer`、netutils.py 的 `wait_until/wait_not_until/cur_time`、boce.py 的 `kill_all_chrome/_sniff_command`。/tmp/cpus 缓存机制随其死亡，不进设计。
 - 不删 Python 两仓库（参考实现 + 对拍 oracle）。
 
 ## 2. 权威协议契约（:9000 TCP）
@@ -91,7 +91,7 @@
 | 1 | 命令执行 | exec_cmd_subprocess：shell+str 时 root 剥裸 `sudo `（带选项/空命令不剥，仅 root）；env 清理：**删 LD_LIBRARY_PATH**（保留）+_PYI_*/_MEIPASS 前缀删除（Go 可省，§12）；wait=false → None → **照常回 "null" gzip 帧**；回 `[4B i][gzip {code,stdout,stderr}]` |
 | 3 | 文件下载 | 路径读连接级 filepath（payload 仅 gzip）；`[8B <Q][content]` |
 | 4 | routeinfo | `route -n` 解析（头 2 行 + zip）；非零退出 → RuntimeError → 断连无响应；route 缺失同理 |
-| 5 | 抓包开始 | **回退后契约：`{"res": bool}`**——失败 `{"res": false}` 无 error（1.7.2 error 通道已随 f13b65d 删除）；eth 空 → routeinfo 默认路由网卡（取不到 → false）；同 path 先停旧；清旧文件失败仅 warn |
+| 5 | 抓包开始 | **回退后契约：`{"res": bool}`**——失败 `{"res": false}` 无 error（1.7.2 error 通道已随 f13b65d 删除）；eth 空 → routeinfo() 取默认路由网卡（**route -n 失败 → RuntimeError 冒泡断连无响应；仅成功但无 Iface 才 false**）；同 path 先停旧；清旧文件失败仅 warn；**启动稳定窗：就绪信号 poll(10) 超时判失败；就绪后 0.5s 内查 _exc(ENETDOWN/ENODEV)/recv 线程存活，不存活 → error → false；失败回收链 stop_evt→join5→terminate→join3** |
 | 6 | 抓包停止 | **回退后契约：`{"res": bool}`**——成功 true；从未 start 幂等 true；停止失败 false（join 超时/子进程非零退出）。mcp 客户端四态解析分支保留为兼容死代码 |
 | 7/8 | isfile/isdir | `{"file"/"dir": path}` → `{"res":bool}` |
 | 9 | mkdir | `{"res":null}` |
@@ -110,25 +110,25 @@
 | 175 | 监听停止 | ss 为 None → `{"error":"未启动监听"}`；stop_server（terminate→join3→kill 链 + **对端口残留者逐个 `kill -9` 清扫**）后 3 轮：先查 `ss.pid()` 有 pid 才 sleep 0.5；**轮询后 `ss = None` 无条件执行（成功失败都清）**；成功 `b"ok"`；仍活 → `{"error":"停止监听失败，端口仍被占用"}` |
 | 200 | pcap 五元组 | **输出全部是字符串**：srcPort/destPort/protoType 均为 str（ICMP 端口 `"0"`；protoType "1"=TCP "2"=UDP "3"=SCTP "4"=ICMP/ICMPv6）；流键 = (ip, port字符串) 元组**字典序** sort + protoType；方向判定：首包默认 → SYN/SYN+ACK 修正 → HTTP 方法列表/`HTTP/1.` 响应行修正，一次锁定；边界：单层 VLAN 无 QinQ、IPv4 不验总长/分片、IPv6 固定 offset 6 不走扩展头；坏 pcap 跳过；`[4B i][JSON]` |
 
-**抓包（capture.py → Go）**：proto=0 创建 → 全部 setsockopt 就位 → 最后 `bind(eth, ETH_P_ALL)`；时间戳四级降级（SO_TIMESTAMPING HW|SW|RAW → RX_SW → SO_TIMESTAMPNS → monotonic；cmsg ts[0]==0 退化 ts[1] + warn 一次）；VLAN 还原（PACKET_AUXDATA；`tci!=0 OR VLAN_VALID`、tpid 默认 0x8100；offset 12 插 4B；**帧 <12B 原样返回护栏**）；SO_RCVBUF 32MB + getsockopt 截断验证；promisc 失败仅 warn；BPF（extended 非空）：exec `tcpdump -ddd` → 首行条数 + 逐行 `code jt jf k` → unix.SockFprog 注入 SO_ATTACH_FILTER（tcpdump 缺失/编译失败 = 抓包启动失败 res:false，agent 主服务不受影响）；停止：置 stop → drain 完队列再退（1s 超时轮）；join 10s 超时不关文件返回 false；tpacket_stats close 前读；落盘后 4 种 magic 识别 + 稳定排序重排（原子 replace）；pcap 写纳秒 magic 0xA1B23C4D、snaplen 65535。**goroutine 长驻循环强制 panic recover**（§12#2）。
+**抓包（capture.py → Go）**：proto=0 创建 → 全部 setsockopt 就位 → 最后 `bind(eth, ETH_P_ALL)`；时间戳四级降级（SO_TIMESTAMPING HW|SW|RAW → RX_SW → SO_TIMESTAMPNS → monotonic；cmsg ts[0]==0 退化 ts[1] + warn 一次）；VLAN 还原（PACKET_AUXDATA；`tci!=0 OR VLAN_VALID`、tpid 默认 0x8100；offset 12 插 4B；**帧 <12B 原样返回护栏**）；SO_RCVBUF 32MB + getsockopt 截断验证；promisc 失败仅 warn；BPF（extended 非空）：exec `tcpdump -ddd` → 首行条数 + 逐行 `code jt jf k` → unix.SockFprog 注入 SO_ATTACH_FILTER（**有意差异，源码为 scapy attach_filter，见 §12#4**；tcpdump 缺失/编译失败 = 抓包启动失败 res:false，agent 主服务不受影响）；停止：置 stop → drain 完队列再退（1s 超时轮）；join 10s 超时不关文件返回 false；tpacket_stats close 前读；落盘后 4 种 magic 识别 + 稳定排序重排（原子 replace）；pcap 写纳秒 magic 0xA1B23C4D、snaplen 65535。**goroutine 长驻循环强制 panic recover**（§12#2）。
 
-**单队列**：ethtool -l 查/`-L combined 1` 缩；IRQ 三路查找（msi_irqs → /proc/interrupts 名称匹配 → grep）；绑非 0 空闲 CPU（/proc/stat ≥99% 排除 + 已分配集合 + CPU0 保留）；禁 RPS/RFS；**全部 best-effort 失败仅 warn**；**运维语义：缩队列/绑 CPU/RPS 改动 stop 不还原，持续生效到下次手动调整**（类 docstring 明示，文档化到部署说明）。
+**单队列**：ethtool -l 查/`-L combined 1` 缩（**缩后 sleep(3)、绑定后 sleep(2)**）；IRQ 三路查找（**msi_irqs 目录取前 max(count*2,4) 个 → /proc/interrupts 名称匹配（含任意含 "mlx5" 的行）截断 [:count] → grep**）；绑非 0 空闲 CPU（/proc/stat ≥99% 排除 + 已分配集合 + CPU0 保留；**全忙回退选最后一个 CPU；选 CPU 异常回退 CPU1；同网卡已有绑定直接复用不重配**）；禁 RPS/RFS；**全部 best-effort 失败仅 warn**；**运维语义：缩队列/绑 CPU/RPS 改动 stop 不还原，持续生效到下次手动调整**（类 docstring 明示，文档化到部署说明）。
 
-**回放（replayer.py → Go）**：五元组（含 MAC）建流；**方向判定是 `if/elif/else` 链，非级联**：①双 hint 都提供 → 匹配则 uplink/downlink，**失配 → 记 log 并保持默认 uplink（不回退 SYN/反向流！）**；②否则 SYN 包 → uplink；③否则反向流已存在 → 反转；④默认 uplink；`directionless && no_tuple_modification && !force_build_flow` → 不建流直发；对称换向 force_* 改写；IPv4↔IPv6 互转（IP/TCP/UDP/ICMP 校验和重算；SCTP 不动）；VLAN 增改（已有 81 00 只换 TCI）；**非 IPv4/IPv6 以太帧跳过（不发送不计数）；解析失败帧 warn 跳过**；**读侧按 magic 选 ts_divisor（纳秒 magic→1e9，否则 1e6）——判错则限速节奏差 1000 倍**；AF_PACKET SOCK_RAW 发送（socket 缓存复用；需 root/CAP_NET_RAW）；mbps 每包+全局两级限速；pcap 缓存（微秒 magic 单/双文件）；字节统计 `max(orig_len, 60)`。
+**回放（replayer.py → Go）**：五元组（含 MAC）建流；**方向判定是 `if/elif/else` 链，非级联**：①双 hint 都提供 → 匹配则 uplink/downlink，**失配 → 记 log 并保持默认 uplink（不回退 SYN/反向流！）**；②否则 SYN 包 → uplink；③否则反向流已存在 → 反转；④默认 uplink；`directionless && no_tuple_modification && !force_build_flow` → 不建流直发；对称换向 force_* 改写；IPv4↔IPv6 互转（IP/TCP/UDP/ICMP 校验和重算；SCTP 不动）；VLAN 增改（已有 81 00 只换 TCI）；**非 IPv4/IPv6 以太帧跳过（不发送不计数）；解析失败帧 warn 跳过**；**读侧按 magic 选 ts_divisor（纳秒 magic→1e9，否则 1e6）——判错则限速节奏差 1000 倍**；**截断两态：记录头不完整（1-15B，读在 try 外）→ struct.error → `{"status":"error"}`；记录体截断/解析失败 → 逐帧 warn 跳过**；**跨族转换的 ICMP 分支是半成品（IPv6→IPv4 直接搬 ICMPv6 载荷、校验和不重算、IPv4 头 protocol 写 58；反向写 1）——照抄**；**回放侧 IPv6 同样固定 offset 6 不走扩展头**；AF_PACKET SOCK_RAW 发送（socket 缓存复用；需 root/CAP_NET_RAW）；mbps 每包+全局两级限速；pcap 缓存（微秒 magic 单/双文件）；字节统计 `max(orig_len, 60)`。
 
-**拨测（boce.py → Go）**：封堵 = net/http 并发（UA Chrome/120、allow_redirects=false、200=成功、time 累计）；重定向 = chromedp：**每次 goto 成功后固定 `sleep(3)`**；mode="弹窗"或未知模式每次 run_single 恒判失败（无实现）；判定仅两分支——framenavigated 跳转 URL 集合非空 / request 计数>1（**ERR_TOO_MANY_REDIRECTS 只是 goto 异常分支的日志，不是第三判定条件**）；**重试仅异常含 `"Connection is closed"` 时关 browser 重启重试一次，且首尝异常不计入 total/fail**；chromium 启动 11 args 逐项对齐 boce.py:201-213；chromium 自动下载：ensure_chromium **锁外快速路径 + `_browser_lock` 内 double-check**、npmmirror 查最新 revision、/opt/socket/config proxy=、**zip 下载到临时目录、`extractall` 到 /opt/socket（安装根的父目录）——Go `archive/zip` 无路径消毒，必须实现 zip-slip 防护（剥绝对路径/`..`，对齐 Python zipfile 行为）**、chmod 755、失败打印手动步骤；BrowserManager：close 失败也置 None + Go 侧显式 shutdown 钩子关闭 chromedp 上下文（替代 Python atexit）。
+**拨测（boce.py → Go）**：封堵 = net/http 并发（UA Chrome/120、allow_redirects=false、200=成功、time 累计）；重定向 = chromedp：**每次 goto 成功后固定 `sleep(3)`**；mode="弹窗"或未知模式每次 run_single 恒判失败（无实现）；判定仅两分支——framenavigated 跳转 URL 集合非空 / request 计数>1（**ERR_TOO_MANY_REDIRECTS 只是 goto 异常分支的日志，不是第三判定条件**）；**重试仅异常含 `"Connection is closed"` 时关 browser 重启重试一次；重试路径首尝仅追加 exceptions/counts 列表、total/fail/time 不增，且最终统计由 run_multiple 从 gather 结果整体覆写（重试调用计一次）**；chromium 启动 11 args 逐项对齐 boce.py:201-213；chromium 自动下载：ensure_chromium **锁外快速路径 + `_browser_lock` 内 double-check**、npmmirror 查最新 revision、/opt/socket/config proxy=、**zip 下载到临时目录、`extractall` 到 /opt/socket（安装根的父目录）——Go `archive/zip` 无路径消毒，必须实现 zip-slip 防护（剥绝对路径/`..`，对齐 Python zipfile 行为）**、chmod 755、失败打印手动步骤；BrowserManager：close 失败也置 None + Go 侧显式 shutdown 钩子关闭 chromedp 上下文（替代 Python atexit）。
 
-**:9001 HTTP 文件服务**：GET 流式 1MB 分块 + Content-Length 锁死；POST multipart 流式落盘（path 先到直写 `.part` + 原子 replace；file 先到临时文件后 move——upgrade_run 推 staging 依赖父目录自动 makedirs）；边界复刻：多 file 字段追加写首个句柄且 size 只报最后一段、path 值 4096 上限→400、伪命中分隔集合含 `--`/`\r\n`/裸 `\n`（自定义 reader，§12#8）、缺 path 时 400 发生在 body 全量消费后、realpath 归一化、boundary ≤256；http_port 读 /opt/socket/config（0=关闭，缺省 9001）；双栈 + IPv6 失败降级。
+**:9001 HTTP 文件服务**：**响应契约：响应头 `Server: socket_server-file/1.8.2`；GET 200 带 `Content-Type: application/octet-stream` + `Content-Disposition: attachment; filename="<basename>"`；错误统一 JSON 体 `{"error": msg}`（400/404/500）；POST 成功体 `{"ok":true,"path":<realpath>,"size":N}`**。GET 流式 1MB 分块 + Content-Length 锁死；POST multipart 流式落盘（path 先到直写 `.part` + 原子 replace；file 先到临时文件后 move——upgrade_run 推 staging 依赖父目录自动 makedirs）；边界复刻：多 file 字段追加写首个句柄且 size 只报最后一段、path 值 4096 上限→400、伪命中分隔集合含 `--`/`\r\n`/裸 `\n`（自定义 reader，§12#8）、缺 path 时 400 发生在 body 全量消费后、realpath 归一化、boundary ≤256；http_port 读 /opt/socket/config（0=关闭，缺省 9001）；双栈 + IPv6 失败降级。
 
-**socket_listen 内部（171-175 底座）**：host=None 双栈（V6ONLY=1/SO_REUSEADDR/backlog 128）；**每连接一线程收包入共享队列**；cachedata：启动即清 /tmp/socketbin，有数据累积、**队列空闲即整块落 `/tmp/socketbin/<epoch_us>.bin`、1s 轮询**；cleandata：**`while qsize: sleep(1)` 排空等待 + 1s**，清 `ss.data`，`rm -rf /tmp/socketbin/*`（→ dt172 后 dt174 回空流）；stop_server：terminate→join(3)→kill + 端口残留者 kill -9 清扫；start 后 sleep(5) 再验 pid。
+**socket_listen 内部（171-175 底座）**：**默认 port=30001**（dt171 payload 不带 port 时监听 :30001，pid 探测同端口）；host=None 双栈（V6ONLY=1/SO_REUSEADDR/backlog 128）；**每连接一线程收包入共享队列**；cachedata：启动即清 /tmp/socketbin，有数据累积、**队列空闲即整块落 `/tmp/socketbin/<epoch_us>.bin`、1s 轮询**；cleandata：**`while qsize: sleep(1)` 排空等待 + 1s**，清 `ss.data`，`rm -rf /tmp/socketbin/*`（→ dt172 后 dt174 回空流）；stop_server：terminate→join(3)→kill + 端口残留者 kill -9 清扫；start 后 sleep(5) 再验 pid。
 
 **服务化（supervisor/upgrader/autoupgrade → Go）**：路径逐字对齐：`/opt/socket/versions/<v>/socket_server`、`.staging/socket_server`、`current` 原子软链、/opt/socket/config 的 `autoupgrade=`（缺省 on，dt20 前实时读）与 `http_port=`/`proxy=`（§7）。
 
-**serve 启动编排（cli.py cmd_serve 顺序照抄）**：setup_environment → **ensure_unit_correct 自愈（失败仅 warn 不阻断）** → **:9001 先于阻塞的 TCP 主循环启动（整个 :9001 启动失败仅 warn，不影响 :9000——与内部 IPv6 降级是两层兜底）** → TCP 双栈阻塞。setup_environment：日志（显式 > SOCKET_SERVER_LOG > /var/log/socket_server.log；目录缺失跳过文件 handler）、rmem/wmem≥32MB、java：PATH 前插 + **无条件写 `JAVA_HOME=/usr/local/jdk1.8.0_202`**、防火墙命令组逐条保留；PLAYWRIGHT_BROWSERS_PATH 删除（§12#9）。
+**serve 启动编排（cli.py cmd_serve 顺序照抄）**：setup_environment → **ensure_unit_correct 自愈（失败仅 warn 不阻断）** → **:9001 先于阻塞的 TCP 主循环启动（整个 :9001 启动失败仅 warn，不影响 :9000——与内部 IPv6 降级是两层兜底）** → TCP 双栈阻塞。setup_environment：日志（显式 > SOCKET_SERVER_LOG > /var/log/socket_server.log；目录缺失跳过文件 handler）、rmem/wmem≥32MB、java：**找到 java 时**PATH 前插 + **硬编码写 `JAVA_HOME=/usr/local/jdk1.8.0_202`（不校验该路径存在；找不到 java 两者均不写）**、防火墙命令组逐条保留；PLAYWRIGHT_BROWSERS_PATH 删除（§12#9）。
 
 ## 4. mcp 侧 15 个 MCP 工具
 
-契约基准：参数名/类型/默认值/required/annotations 以 `server.py:262-786` 为逐行对拍契约。⚠ = 审查修正。
+契约基准：参数名/类型/默认值/required/annotations 以 `server.py:262-786` 为逐行对拍契约；表内加粗处为必须逐字复刻的 quirk/回退后契约。
 
 | # | 工具 | dt | 锁 | 危险 | 要点 |
 |---|---|---|---|---|---|
@@ -162,7 +162,7 @@
 ## 5. 模块结构（Go）
 
 ```
-cmd/socketstack/          # 入口: (无参)=mcp stdio | mcp serve | mcp serve | agent | serve(=agent 别名)
+cmd/socketstack/          # 入口: (无参)=mcp stdio | mcp serve | agent | serve(=agent 别名)
                           #       install|uninstall | agent|mcp enable|disable|start|stop|status
 internal/frame/           # 仅字节层: 常量/读写帧/长度校验（21-24 状态机归 agent，依赖连接级业务状态）
 internal/agent/           # server/handlers/netexec/capture/singlequeue/replayer
