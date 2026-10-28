@@ -16,6 +16,8 @@ type DoFunc func(cs *ConnState, dt int32, payload []byte) ([]byte, error)
 // Do datatype 分发（handlers 逐模块补齐）。
 func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 	switch dt {
+	case 3: // 文件下载：路径读连接级 filepath（payload 仅 {"gzip":bool}）；[8B <Q][content]
+		return downloadFile(cs, payload)
 	case 14: // 获版本号：json.dumps(VERSION) 带引号 JSON 字符串
 		return json.Marshal(Version)
 	case 200: // pcap 五元组提取（完整实现在 pcapflow 模块；此处先契约化错误路径）

@@ -1,6 +1,9 @@
 package agent
 
-import "sync/atomic"
+import (
+	"errors"
+	"sync/atomic"
+)
 
 // ConnState 连接级状态（设计 §2）。
 // Python protocol.setup() 只初始化 filepath="tmp"/content/bin_recv_flag/length；
@@ -31,3 +34,6 @@ func clientDisconnected() { activeClients.Add(-1) }
 
 // Clients 当前活跃连接数（dt20 升级判定用）。
 func Clients() int64 { return activeClients.Load() }
+
+// errNilFilepath dt3/dt24 在 filepath=None 时的断连错误（对齐 Python open(None)）。
+var errNilFilepath = errors.New("filepath is None (dt21 未提供)")

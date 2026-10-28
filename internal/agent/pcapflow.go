@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/binary"
 	"encoding/json"
 	"os"
 )
@@ -27,4 +30,38 @@ func extractPcapFlowFiveTuples(dir string) []map[string]string {
 // writeFileSync 写盘（dt24）；`^$` 已在上层转空。O_TRUNC 对齐 Python open("wb")。
 func writeFileSync(path string, data []byte) error {
 	return os.WriteFile(path, data, 0o644)
+}
+
+// downloadFile dt3：nil filepath = Python open(None) → 断连；读失败 → 断连。
+// gzip=true 时内容压缩后发（长度为压缩后长度，§2）。
+func downloadFile(cs *ConnState, payload []byte) ([]byte, error) {
+	var req struct {
+		Gzip bool `json:"gzip"`
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return nil, err
+	}
+	fp := cs.Filepath()
+	if fp == nil {
+		return nil, errNilFilepath
+	}
+	content, err := os.ReadFile(*fp)
+	if err != nil {
+		return nil, err
+	}
+	if req.Gzip {
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		if _, err := zw.Write(content); err != nil {
+			return nil, err
+		}
+		if err := zw.Close(); err != nil {
+			return nil, err
+		}
+		content = buf.Bytes()
+	}
+	out := make([]byte, 8+len(content))
+	binary.LittleEndian.PutUint64(out, uint64(len(content)))
+	copy(out[8:], content)
+	return out, nil
 }
