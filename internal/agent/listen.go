@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,9 +58,26 @@ type listenInstance struct {
 	lns     []net.Listener
 	conns   map[net.Conn]struct{}
 	q       chan []byte
+	dataMu  sync.Mutex // 保护 data（cachedata 写 / fetch/save 读）
 	data    []byte
 	stopped bool
 	wg      sync.WaitGroup
+}
+
+// appendData cachedata 侧追加（持 dataMu）。
+func (li *listenInstance) appendData(chunk []byte) {
+	li.dataMu.Lock()
+	li.data = append(li.data, chunk...)
+	li.dataMu.Unlock()
+}
+
+// dataCopy 读取侧快照（持 dataMu）。
+func (li *listenInstance) dataCopy() []byte {
+	li.dataMu.Lock()
+	defer li.dataMu.Unlock()
+	out := make([]byte, len(li.data))
+	copy(out, li.data)
+	return out
 }
 
 // listenStart 实现 dt171：ss 存活跳过 / 死了重启 / 无则新建。
@@ -93,6 +111,7 @@ func listenStart(payload []byte) ([]byte, error) {
 		} else {
 			ss = inst
 		}
+		time.Sleep(5 * time.Second) // Python start_server 同步 sleep(5) 再验 pid（wire 可观察）
 	}
 	pidList := ss.pids()
 	return json.Marshal(map[string]any{"pid": pidList})
@@ -104,20 +123,27 @@ func newListenInstance(host *string, port int) (*listenInstance, error) {
 		conns: map[net.Conn]struct{}{},
 		q:     make(chan []byte, 1024),
 	}
-	addrs := []string{fmt.Sprintf("0.0.0.0:%d", port)}
+	// 双栈必须 tcp4/tcp6 分开绑：net.Listen("tcp","0.0.0.0:p") 实际生成 AF_INET6
+	// 通配 socket，v6 再绑必 EADDRINUSE（复审 F1 实测复现）。
 	if host == nil {
-		addrs = append(addrs, fmt.Sprintf("[::]:%d", port))
+		ln4, err := net.Listen("tcp4", fmt.Sprintf("0.0.0.0:%d", port))
+		if err != nil {
+			inst.shutdown()
+			return nil, err
+		}
+		inst.lns = append(inst.lns, ln4)
+		if ln6, err := net.Listen("tcp6", fmt.Sprintf("[::]:%d", port)); err == nil {
+			inst.lns = append(inst.lns, ln6) // IPv6 失败降级仅 IPv4（对齐 Python）
+		}
 	} else if *host != "" {
-		addrs = []string{net.JoinHostPort(*host, strconv.Itoa(port))}
-	}
-	for _, a := range addrs {
-		ln, err := net.Listen("tcp", a) // Go tcp6 自动 V6ONLY=1（复审已核）
+		ln, err := net.Listen("tcp", net.JoinHostPort(*host, strconv.Itoa(port)))
 		if err != nil {
 			inst.shutdown()
 			return nil, err
 		}
 		inst.lns = append(inst.lns, ln)
 	}
+	// host 非空但非法（如 ""）：无监听 → 死对象（Python detect_ip_version ValueError）
 	// accept 循环 + 每连接收包 goroutine（每连接一线程，对齐注释语义）
 	inst.wg.Add(1)
 	go func() {
@@ -158,8 +184,7 @@ func newListenInstance(host *string, port int) (*listenInstance, error) {
 	}()
 	// cachedata：队列空且有待写块 → 整块落 <epoch_us>.bin；1s 轮询（quirk 节奏）
 	os.MkdirAll(socketbinDir(), 0o755)
-	os.RemoveAll(socketbinDir())
-	os.MkdirAll(socketbinDir(), 0o755)
+	clearDir(socketbinDir()) // Python rm -rf /tmp/socketbin/*：只清内容保目录
 	inst.wg.Add(1)
 	go func() {
 		defer inst.wg.Done()
@@ -168,7 +193,7 @@ func newListenInstance(host *string, port int) (*listenInstance, error) {
 			select {
 			case chunk := <-inst.q:
 				pending = append(pending, chunk...)
-				inst.data = append(inst.data, chunk...)
+				inst.appendData(chunk)
 				continue
 			case <-time.After(1 * time.Second):
 			}
@@ -243,8 +268,8 @@ func listenClean() ([]byte, error) {
 		time.Sleep(1 * time.Second)
 	}
 	time.Sleep(1 * time.Second)
-	ss.data = nil
-	os.RemoveAll(socketbinDir())
+	ss.dataReset()
+	clearDir(socketbinDir())
 	return []byte("ok"), nil
 }
 
@@ -261,7 +286,7 @@ func listenSave(payload []byte) ([]byte, error) {
 	if ss == nil || len(ss.pids()) == 0 {
 		return []byte("error"), nil
 	}
-	if err := os.WriteFile(p.File, ss.data, 0o644); err != nil {
+	if err := os.WriteFile(p.File, ss.dataCopy(), 0o644); err != nil {
 		return nil, err
 	}
 	return []byte("ok"), nil
@@ -277,7 +302,7 @@ func listenFetch() ([]byte, error) {
 	}
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
-	zw.Write(ss.data)
+	zw.Write(ss.dataCopy())
 	zw.Close()
 	out := make([]byte, 8+buf.Len())
 	binary.LittleEndian.PutUint64(out, uint64(buf.Len()))
@@ -309,4 +334,22 @@ func listenStop() ([]byte, error) {
 		return []byte("ok"), nil
 	}
 	return json.Marshal(map[string]string{"error": "停止监听失败，端口仍被占用"})
+}
+
+// dataReset 清空已收数据（dt172，持锁）。
+func (li *listenInstance) dataReset() {
+	li.dataMu.Lock()
+	li.data = nil
+	li.dataMu.Unlock()
+}
+
+// clearDir 清目录内容保目录（Python rm -rf dir/* 语义）。
+func clearDir(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		os.RemoveAll(filepath.Join(dir, e.Name()))
+	}
 }

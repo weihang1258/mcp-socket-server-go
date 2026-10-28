@@ -29,6 +29,9 @@ func pcapFlowExtract(payload []byte) ([]byte, error) {
 	if !ok {
 		return nil, errors.New("pcap_flow_extract: missing pcap_dir")
 	}
+	if strings.TrimSpace(string(dirBytes)) == "null" {
+		return nil, errors.New("pcap_dir null: isdir(None) TypeError")
+	}
 	var dir string
 	if err := json.Unmarshal(dirBytes, &dir); err != nil {
 		return nil, err
@@ -106,14 +109,12 @@ func extractPcapFlowFiveTuples(pcapDir string) []flowJSON {
 					break // 记录头不完整 → 停止该文件
 				}
 				inclLen := binary.LittleEndian.Uint32(hdr[8:])
-				pkt := make([]byte, inclLen)
-				if _, err := io.ReadFull(f, pkt); err != nil {
-					break // 记录体截断 → 停止（保留已解析流）
+				var pktBuf bytes.Buffer
+				if n, err := io.CopyN(&pktBuf, f, int64(inclLen)); err != nil || n != int64(inclLen) {
+					break // 记录体截断 → 停止（保留已解析流）；CopyN 不做巨分配
 				}
-				lastNew = nil
-				parsePacket(pkt, flows)
-				if lastNew != nil {
-					flowOrder = append(flowOrder, lastNew)
+				if newFlow := parsePacket(pktBuf.Bytes(), flows); newFlow != nil {
+					flowOrder = append(flowOrder, newFlow) // 插入序（Python dict）
 				}
 			}
 		}()
@@ -131,16 +132,16 @@ func extractPcapFlowFiveTuples(pcapDir string) []flowJSON {
 	return results
 }
 
-// parsePacket 单包解析（逐条对齐 pcap_flow.py 内循环）。
-func parsePacket(pkt []byte, flows map[string]*pcapFlow) {
+// parsePacket 单包解析（逐条对齐 pcap_flow.py 内循环）；返回新建的流（无则 nil）。
+func parsePacket(pkt []byte, flows map[string]*pcapFlow) *pcapFlow {
 	if len(pkt) < 14 {
-		return
+		return nil
 	}
 	ethType := binary.BigEndian.Uint16(pkt[12:14])
 	payload := pkt[14:]
 	if ethType == 0x8100 { // 单层 VLAN
 		if len(payload) < 4 {
-			return
+			return nil
 		}
 		ethType = binary.BigEndian.Uint16(payload[2:4])
 		payload = payload[4:]
@@ -151,7 +152,7 @@ func parsePacket(pkt []byte, flows map[string]*pcapFlow) {
 	switch {
 	case ethType == 0x0800:
 		if len(payload) < 20 {
-			return
+			return nil
 		}
 		ihl := int(payload[0]&0x0F) * 4
 		proto = payload[9]
@@ -162,14 +163,14 @@ func parsePacket(pkt []byte, flows map[string]*pcapFlow) {
 		}
 	case ethType == 0x86DD:
 		if len(payload) < 40 {
-			return
+			return nil
 		}
 		proto = payload[6] // 固定 offset 6，不走扩展头（quirk）
 		srcIP = ipv6String(payload[8:24])
 		dstIP = ipv6String(payload[24:40])
 		trans = payload[40:]
 	default:
-		return
+		return nil
 	}
 
 	var protoType string
@@ -183,14 +184,14 @@ func parsePacket(pkt []byte, flows map[string]*pcapFlow) {
 	case 1, 58:
 		protoType = "4"
 	default:
-		return
+		return nil
 	}
 
 	var src, dst tuple2
 	flags := byte(0)
 	if protoType == "1" || protoType == "2" || protoType == "3" {
 		if len(trans) < 4 {
-			return
+			return nil
 		}
 		sport := binary.BigEndian.Uint16(trans[:2])
 		dport := binary.BigEndian.Uint16(trans[2:4])
@@ -209,13 +210,14 @@ func parsePacket(pkt []byte, flows map[string]*pcapFlow) {
 	}
 	key := a.ip + "\x00" + a.port + "\x00" + b.ip + "\x00" + b.port + "\x00" + protoType
 	flow := flows[key]
+	isNew := false
 	if flow == nil {
 		flow = &pcapFlow{firstSrc: src, firstDst: dst, client: src, protoType: protoType}
 		flows[key] = flow
-		lastNew = flow // 新建流经包级变量回传（parsePacket 单 goroutine 调用）
+		isNew = true
 	}
 	if flow.finalized {
-		return
+		return nil
 	}
 	// 方向信号：SYN → 发起方；SYN+ACK → 接收方；HTTP 方法 → 请求方；HTTP/1. → 响应接收方
 	var signaled tuple2
@@ -244,10 +246,11 @@ func parsePacket(pkt []byte, flows map[string]*pcapFlow) {
 		flow.client = signaled
 		flow.finalized = true
 	}
+	if isNew {
+		return flow // 新建流返回给调用方进 flowOrder（无包级状态，并发安全）
+	}
+	return nil
 }
-
-// lastNew parsePacket 新建流时暂存（单连接处理 goroutine 内串行调用，无竞争）。
-var lastNew *pcapFlow
 
 func tupleLess(a, b tuple2) bool {
 	if a.ip != b.ip {
@@ -269,10 +272,22 @@ func ipv4String(b []byte) string { // inet_ntoa
 	return net.IP(b).String()
 }
 
-func ipv6String(b []byte) string { // inet_ntop AF_INET6
+func ipv6String(b []byte) string { // inet_ntop AF_INET6：v4-mapped 保留 ::ffff: 前缀
+	if is4in6(b) {
+		return "::ffff:" + ipv4String(b[12:16])
+	}
 	ip := net.IP(make([]byte, 16))
 	copy(ip, b)
 	return ip.String()
+}
+
+func is4in6(b []byte) bool {
+	for i := 0; i < 10; i++ {
+		if b[i] != 0 {
+			return false
+		}
+	}
+	return b[10] == 0xFF && b[11] == 0xFF
 }
 
 func itoa(u uint16) string { return strconv.FormatUint(uint64(u), 10) }

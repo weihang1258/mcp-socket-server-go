@@ -5,6 +5,8 @@ import (
 	"compress/gzip"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -38,6 +40,16 @@ func cmdExec(payload []byte) ([]byte, error) {
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, err
 	}
+	var raw1 map[string]json.RawMessage
+	json.Unmarshal(payload, &raw1)
+	if _, ok := raw1["args"]; !ok {
+		return nil, errors.New("exec_cmd_subprocess missing args") // Python TypeError
+	}
+	for k := range raw1 {
+		if k != "args" && k != "cwd" && k != "env" && k != "wait" {
+			return nil, fmt.Errorf("exec_cmd_subprocess unexpected kwarg %q", k)
+		}
+	}
 	wait := true
 	if p.Wait != nil {
 		wait = *p.Wait
@@ -60,7 +72,7 @@ func cmdExec(payload []byte) ([]byte, error) {
 		// 异步：Start 不等（Python Popen 不 communicate → 返回 None）；
 		// Start 失败 = Python Popen 抛异常 → except → {code:-1,...} gzip JSON（非 "null"）
 		if code, _, stderr = execCmdWith(args, p.Cwd, env, false); code == -1 {
-			return errGzipFrame(code, stderr)
+			return errGzipFrame(code, "", stderr) // 复审 F4：stderr 进 stderr 字段
 		}
 		return gzipFrame([]byte("null")), nil
 	}

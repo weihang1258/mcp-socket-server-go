@@ -129,6 +129,35 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 			LatestVersion string `json:"latest_version"`
 			HasUpgrade    bool   `json:"has_upgrade"`
 		}{Version, Repo, ReleaseNotes, NotesVersion, NotesVersion != Version})
+	case 5: // 抓包开始：{"res":bool}（回退后契约，无 error）
+		var p struct {
+			Eth         string `json:"eth"`
+			Path        string `json:"path"`
+			Extended    string `json:"extended"`
+			SingleQueue *bool  `json:"single_queue"`
+		}
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return nil, err
+		}
+		sq := true
+		if p.SingleQueue != nil {
+			sq = *p.SingleQueue
+		}
+		if p.Path == "" {
+			p.Path = "/home/tmp/tmp.pcap"
+		}
+		return json.Marshal(resBool(tcpdumpStart(p.Eth, p.Path, p.Extended, sq)))
+	case 6: // 抓包停止：{"res":bool}；幂等（未在抓 res:true）
+		var p struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return nil, err
+		}
+		if p.Path == "" {
+			p.Path = "/home/tmp/tmp.pcap"
+		}
+		return json.Marshal(resBool(tcpdumpStop(p.Path)))
 	case 131: // 拨测（预检链 + 封堵/重定向）
 		return doBoce(payload)
 	case 200: // pcap 五元组提取（完整实现在 pcapflow 模块；此处先契约化错误路径）

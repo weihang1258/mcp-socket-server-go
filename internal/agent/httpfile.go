@@ -369,12 +369,8 @@ func handleFilePOST(w http.ResponseWriter, r *http.Request) {
 			length = n
 		}
 	}
-	if length == 0 {
+	if length <= 0 { // Python length<=0 一律 "empty body"
 		sendErrorJSON(w, 400, "empty body")
-		return
-	}
-	if length < 0 {
-		sendErrorJSON(w, 400, "bad content-length")
 		return
 	}
 	boundary := boundaryFromContentType(r.Header.Get("Content-Type"))
@@ -441,7 +437,7 @@ func handleFilePOST(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		tempPath = "" // 已搬运，别在 defer 里删掉
-	} else {
+	} else if fh != nil {
 		fh.Close()
 		fh = nil
 		if err := os.Rename(partPath, dest); err != nil {
