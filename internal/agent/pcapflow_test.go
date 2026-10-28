@@ -289,3 +289,69 @@ func TestDT200LexicographicFlowKey(t *testing.T) {
 		t.Fatalf("lexicographic key flow wrong: %v", flows[0])
 	}
 }
+
+// IHL 越界防护：截断帧 IHL=15（>实际长度）不得 panic（Python payload[ihl:] 得 b""）
+func TestDT200IHLBoundGuard(t *testing.T) {
+	dir := t.TempDir()
+	p := make([]byte, 20) // 仅 IP 头位置，IHL 字段声明 15*4=60B
+	p[0] = 0x4F           // v4, IHL=15
+	p[9] = 6              // TCP
+	ip := ipv4("10.9.9.1", "10.9.9.2", 6, nil)
+	copy(ip[14:], p) // 覆盖 IP 头为 IHL=15 版本
+	writePcap(t, filepath.Join(dir, "ihl.pcap"), ip)
+	flows := runDT200(t, dir) // 不 panic 即通过（trans 空 → TCP 跳过）
+	if len(flows) != 0 {
+		t.Fatalf("ihl-truncated packet should yield no flow: %v", flows)
+	}
+}
+
+// 多流输出顺序确定（Python dict 插入序）
+func TestDT200OrderDeterministic(t *testing.T) {
+	dir := t.TempDir()
+	writePcap(t, filepath.Join(dir, "ord.pcap"),
+		ipv4("10.10.0.1", "10.10.0.2", 17, udpSeg(1, 2)),
+		ipv4("10.10.0.3", "10.10.0.4", 17, udpSeg(3, 4)),
+		ipv4("10.10.0.5", "10.10.0.6", 17, udpSeg(5, 6)),
+	)
+	first := runDT200(t, dir)
+	for i := 0; i < 10; i++ {
+		again := runDT200(t, dir)
+		for j := range again {
+			if again[j]["srcIp"] != first[j]["srcIp"] {
+				t.Fatalf("order unstable at %d: %v vs %v", j, first[j], again[j])
+			}
+		}
+	}
+}
+
+// dt200 payload 严格性：未知键/缺 pcap_dir → 断连（Python **data TypeError）
+func TestDT200StrictPayload(t *testing.T) {
+	if _, err := runDT(t, 200, []byte(`{"pcap_dir":"/tmp","extra":1}`)); err == nil {
+		t.Fatal("unknown key must disconnect")
+	}
+	if _, err := runDT(t, 200, []byte(`{}`)); err == nil {
+		t.Fatal("missing pcap_dir must disconnect")
+	}
+}
+
+// UDP 载荷 "GET " 不触发 HTTP 方向信号（仅 proto==6 才查）；HTTP 信号先到即锁定
+func TestDT200DirectionLockSemantics(t *testing.T) {
+	dir := t.TempDir()
+	writePcap(t, filepath.Join(dir, "lock.pcap"),
+		ipv4("10.11.0.1", "10.11.0.2", 17, udpSeg(1, 2)), // 流A: 默认 src=客户端
+		ipv4("10.11.0.3", "10.11.0.4", 6, tcpSeg(5000, 80, 0x18, []byte("GET / HTTP/1.1\r\n\r\n"))), // 先锁 .3
+		ipv4("10.11.0.4", "10.11.0.3", 6, tcpSeg(80, 5000, 0x02, nil)), // 后到 SYN 不改
+	)
+	flows := runDT200(t, dir)
+	if len(flows) != 2 {
+		t.Fatalf("want 2 flows, got %v", flows)
+	}
+	for _, f := range flows {
+		if f["protoType"] == "2" && f["srcIp"] != "10.11.0.1" {
+			t.Fatalf("udp default direction wrong: %v", f)
+		}
+		if f["protoType"] == "1" && f["srcIp"] != "10.11.0.3" {
+			t.Fatalf("HTTP signal must lock before late SYN: %v", f)
+		}
+	}
+}

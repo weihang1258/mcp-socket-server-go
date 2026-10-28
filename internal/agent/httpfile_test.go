@@ -89,7 +89,7 @@ func TestHTTPGET(t *testing.T) {
 	req = httptest.NewRequest("GET", "/files?path="+filepath.Join(dir, "nope"), nil)
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-	if w.Code != 404 || !strings.Contains(w.Body.String(), `"error"`) {
+	if w.Code != 404 || !strings.Contains(w.Body.String(), "file not found") {
 		t.Fatalf("404 JSON: %d %s", w.Code, w.Body.String())
 	}
 	// 400 缺 path
@@ -265,7 +265,21 @@ func TestHTTPPOSTPathTooLarge(t *testing.T) {
 	fw.Write([]byte("q"))
 	mw.Close()
 	w := httpPost(t, h, &buf, mw.FormDataContentType())
-	if w.Code != 400 {
-		t.Fatalf("want 400, got %d", w.Code)
+	if w.Code != 400 || !strings.Contains(w.Body.String(), "field value too large") {
+		t.Fatalf("want 400 field value too large, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// GET query 字面 %（非法转义）：Python 宽容保留原样 → 应取到文件名含 % 的文件
+func TestHTTPGETLiteralPercent(t *testing.T) {
+	dir := t.TempDir()
+	name := "50%off.txt"
+	os.WriteFile(filepath.Join(dir, name), []byte("pct"), 0o644)
+	h := FileServerHandler()
+	req := httptest.NewRequest("GET", "/files?path="+filepath.Join(dir, name), nil) // 未编码 %
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("literal %% must be lenient (Python unquote keeps invalid), got %d %s", w.Code, w.Body.String())
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -17,13 +18,22 @@ import (
 // pcapFlowExtract dt200 响应契约：payload 畸形 JSON → error（断连）；
 // 正常 → [4B i][JSON 流列表]（Python struct.pack("i", len(res)) + res）。
 func pcapFlowExtract(payload []byte) ([]byte, error) {
-	var req struct {
-		PcapDir string `json:"pcap_dir"`
-	}
-	if err := json.Unmarshal(payload, &req); err != nil {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
 		return nil, err
 	}
-	flows := extractPcapFlowFiveTuples(req.PcapDir)
+	if len(raw) != 1 { // **data 多余键/缺 pcap_dir → Python TypeError → 断连
+		return nil, errors.New("pcap_flow_extract: expected exactly {pcap_dir}")
+	}
+	dirBytes, ok := raw["pcap_dir"]
+	if !ok {
+		return nil, errors.New("pcap_flow_extract: missing pcap_dir")
+	}
+	var dir string
+	if err := json.Unmarshal(dirBytes, &dir); err != nil {
+		return nil, err
+	}
+	flows := extractPcapFlowFiveTuples(dir)
 	body, err := json.Marshal(flows)
 	if err != nil {
 		return nil, err
@@ -52,8 +62,18 @@ type pcapFlow struct {
 // 双向流分组 + 方向一次锁定（首包默认 → SYN/SYN+ACK → HTTP 方法/响应行）。
 // 输出字段全为字符串；流键 = (ip, port字符串) 元组字典序（"10"<"9" 照抄）；
 // 单层 VLAN；IPv4 不验总长/分片；IPv6 固定 offset 6 不走扩展头；坏文件跳过。
-func extractPcapFlowFiveTuples(pcapDir string) []map[string]string {
-	results := []map[string]string{}
+// flowJSON 键序对齐 Python 字典插入序（pcap,srcIp,srcPort,destIp,destPort,protoType）。
+type flowJSON struct {
+	Pcap      string `json:"pcap"`
+	SrcIp     string `json:"srcIp"`
+	SrcPort   string `json:"srcPort"`
+	DestIp    string `json:"destIp"`
+	DestPort  string `json:"destPort"`
+	ProtoType string `json:"protoType"`
+}
+
+func extractPcapFlowFiveTuples(pcapDir string) []flowJSON {
+	results := []flowJSON{}
 	var pcaps []string
 	if fi, err := os.Stat(pcapDir); err != nil || !fi.IsDir() {
 		return results
@@ -68,6 +88,7 @@ func extractPcapFlowFiveTuples(pcapDir string) []map[string]string {
 	for _, pcapPath := range pcaps {
 		pcapName := filepath.Base(pcapPath)
 		flows := map[string]*pcapFlow{}
+		var flowOrder []*pcapFlow
 		func() {
 			f, err := os.Open(pcapPath)
 			if err != nil {
@@ -89,21 +110,21 @@ func extractPcapFlowFiveTuples(pcapDir string) []map[string]string {
 				if _, err := io.ReadFull(f, pkt); err != nil {
 					break // 记录体截断 → 停止（保留已解析流）
 				}
+				lastNew = nil
 				parsePacket(pkt, flows)
+				if lastNew != nil {
+					flowOrder = append(flowOrder, lastNew)
+				}
 			}
 		}()
-		for _, flow := range flows {
+		for _, flow := range flowOrder { // Python dict 插入序（首现顺序），输出确定
 			src, dst := flow.firstSrc, flow.firstDst
 			if flow.client != flow.firstSrc {
 				src, dst = flow.firstDst, flow.firstSrc
 			}
-			results = append(results, map[string]string{
-				"pcap":      pcapName,
-				"srcIp":     src.ip,
-				"srcPort":   src.port,
-				"destIp":    dst.ip,
-				"destPort":  dst.port,
-				"protoType": flow.protoType,
+			results = append(results, flowJSON{
+				Pcap: pcapName, SrcIp: src.ip, SrcPort: src.port,
+				DestIp: dst.ip, DestPort: dst.port, ProtoType: flow.protoType,
 			})
 		}
 	}
@@ -136,7 +157,9 @@ func parsePacket(pkt []byte, flows map[string]*pcapFlow) {
 		proto = payload[9]
 		srcIP = ipv4String(payload[12:16])
 		dstIP = ipv4String(payload[16:20])
-		trans = payload[ihl:]
+		if ihl <= len(payload) { // Python payload[ihl:] 越界得 b""，ICMP 仍建流——等价防护
+			trans = payload[ihl:]
+		}
 	case ethType == 0x86DD:
 		if len(payload) < 40 {
 			return
@@ -189,6 +212,7 @@ func parsePacket(pkt []byte, flows map[string]*pcapFlow) {
 	if flow == nil {
 		flow = &pcapFlow{firstSrc: src, firstDst: dst, client: src, protoType: protoType}
 		flows[key] = flow
+		lastNew = flow // 新建流经包级变量回传（parsePacket 单 goroutine 调用）
 	}
 	if flow.finalized {
 		return
@@ -221,6 +245,9 @@ func parsePacket(pkt []byte, flows map[string]*pcapFlow) {
 		flow.finalized = true
 	}
 }
+
+// lastNew parsePacket 新建流时暂存（单连接处理 goroutine 内串行调用，无竞争）。
+var lastNew *pcapFlow
 
 func tupleLess(a, b tuple2) bool {
 	if a.ip != b.ip {

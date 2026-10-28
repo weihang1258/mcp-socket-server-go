@@ -17,3 +17,4 @@ coverage.txt
 .vscode/
 *.swp
 .DS_Store
+.claude/worktrees/

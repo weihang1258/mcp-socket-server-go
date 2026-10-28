@@ -103,6 +103,16 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		return json.Marshal(Version)
 	case 15: // 解压 zip：恒回裸 b"ok"（unzip 缺失/失败也 ok）
 		return unzipCmd(payload)
+	case 171: // socket监听-启动
+		return listenStart(payload)
+	case 172: // socket监听-清理数据
+		return listenClean()
+	case 173: // socket监听-保存数据
+		return listenSave(payload)
+	case 174: // socket监听-传输数据流
+		return listenFetch()
+	case 175: // socket监听-停止监听
+		return listenStop()
 	case 18: // ensure_command：PATH 查找 → {"res":bool}
 		var p struct {
 			Cmd string `json:"cmd"`

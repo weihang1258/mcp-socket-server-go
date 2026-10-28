@@ -26,6 +26,9 @@ const httpServerVersion = "socket_server-file/1.8.2"
 // readHTTPPortFrom 读 config 的 http_port= 行；缺省 9001；显式 0 = 关闭。
 func readHTTPPortFrom(path string) int {
 	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("读 http_port 配置失败(%v),用默认 9001", err)
+	}
 	if err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(line)
@@ -43,6 +46,25 @@ func readHTTPPortFrom(path string) int {
 
 // ReadHTTPPort 生产入口：读 /opt/socket/config。
 func ReadHTTPPort() int { return readHTTPPortFrom("/opt/socket/config") }
+
+// queryGetPath 宽容取 path 参数：& 拆分 + 双重解码（parse_qs 阶段 +→空格/%XX，
+// 二次 unquote 仅 %XX；非法转义原样保留——Python unquote 语义，400 分支为死代码）。
+func queryGetPath(rawQuery string) string {
+	for _, pair := range strings.Split(rawQuery, "&") {
+		if !strings.HasPrefix(pair, "path=") {
+			continue
+		}
+		v := pair[len("path="):]
+		if dec, err := url.QueryUnescape(v); err == nil {
+			v = dec
+		}
+		if dec, err := url.PathUnescape(v); err == nil {
+			v = dec
+		}
+		return v
+	}
+	return ""
+}
 
 // httpNormalize realpath 归一化：词法消 ../ + 绝对化 + 已存在部分的符号链接解析。
 func httpNormalize(path string) string {
@@ -188,7 +210,25 @@ func (c *capSink) value() string {
 
 // parseMultipartStream multipart 全量解析（Python parse_multipart_stream 同构）。
 // openFile(pathVal) 由调用方提供落盘策略；返回 path/size/filename/fileSeen。
-func parseMultipartStream(body io.Reader, contentLength int64, boundary string, openFile func(pathVal string) io.WriteCloser) (pathVal string, size int64, fileSeen bool, err error) {
+// openFileFunc 落盘策略回调；创建失败返回 error（OSError 类 → 500）。
+type openFileFunc func(pathVal string) (io.WriteCloser, error)
+
+// errWriteRec 包装写错误记录（ENOSPC/EIO → 500，Python _sink OSError 冒泡语义）。
+type errWriteRec struct {
+	w   io.WriteCloser
+	err *error
+}
+
+func (e errWriteRec) Write(p []byte) (int, error) {
+	n, err := e.w.Write(p)
+	if err != nil && *e.err == nil {
+		*e.err = err
+	}
+	return n, err
+}
+func (e errWriteRec) Close() error { return e.w.Close() }
+
+func parseMultipartStream(body io.Reader, contentLength int64, boundary string, openFile openFileFunc) (pathVal string, size int64, fileSeen bool, err error) {
 	br := newBodyReader(body, contentLength)
 	delim := append([]byte("\r\n--"), boundary...)
 	br.fill(len(boundary) + 4)
@@ -226,17 +266,29 @@ func parseMultipartStream(body io.Reader, contentLength int64, boundary string, 
 			if err := br.streamValue(delim, func(p []byte) { sink.Write(p) }); err != nil {
 				return "", 0, false, err
 			}
+			if sink.total > 4096 { // 超限错误被 streamValue 吞进 sink——显式检查
+				return "", 0, false, fmt.Errorf("%w: field value too large", errMultipart)
+			}
 			pathVal = sink.value()
 		case "file":
 			if fh == nil {
-				fh = openFile(pathVal) // path 晚到（非常规顺序）时 openFile 收 ""
+				var openErr error
+				fh, openErr = openFile(pathVal) // path 晚到（非常规顺序）时 openFile 收 ""
+				if openErr != nil {
+					return "", 0, false, openErr // OSError 类 → 500
+				}
 			}
+			var writeErr error
+			rec := errWriteRec{w: fh, err: &writeErr}
 			var seg int64
 			if err := br.streamValue(delim, func(p []byte) {
 				seg += int64(len(p))
-				fh.Write(p)
+				rec.Write(p)
 			}); err != nil {
 				return "", 0, false, err
+			}
+			if writeErr != nil {
+				return "", 0, false, writeErr // 写盘失败冒泡（Python OSError → 500）
 			}
 			size = seg // 多 file 字段：只报最后一段（quirk）
 			fileSeen = true
@@ -266,8 +318,7 @@ func fieldName(headers string) string {
 
 // FileServerHandler :9001 处理器（GET /files 下载流式；POST /files 上传流式）。
 func FileServerHandler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/files", func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", httpServerVersion)
 		switch r.Method {
 		case http.MethodGet:
@@ -275,10 +326,9 @@ func FileServerHandler() http.Handler {
 		case http.MethodPost:
 			handleFilePOST(w, r)
 		default:
-			sendErrorJSON(w, 400, "bad method")
+			sendErrorJSON(w, 501, "Unsupported method")
 		}
 	})
-	return mux
 }
 
 func sendErrorJSON(w http.ResponseWriter, code int, msg string) {
@@ -288,19 +338,14 @@ func sendErrorJSON(w http.ResponseWriter, code int, msg string) {
 }
 
 func handleFileGET(w http.ResponseWriter, r *http.Request) {
-	q, err := url.ParseQuery(r.URL.RawQuery)
-	if err != nil {
-		sendErrorJSON(w, 400, "bad query")
-		return
-	}
-	raw := q.Get("path")
+	raw := queryGetPath(r.URL.RawQuery)
 	if raw == "" {
 		sendErrorJSON(w, 400, "missing path parameter")
 		return
 	}
 	path := httpNormalize(raw)
 	fi, err := os.Stat(path)
-	if err != nil || fi.IsDir() {
+	if err != nil || !fi.Mode().IsRegular() { // Python isfile：仅常规文件
 		sendErrorJSON(w, 404, fmt.Sprintf("file not found: %s", path))
 		return
 	}
@@ -314,7 +359,7 @@ func handleFileGET(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(path)))
 	w.WriteHeader(200)
-	io.Copy(w, io.LimitReader(f, fi.Size())) // 1MB 分块由 net/http 缓冲实现，流式等价
+	io.CopyBuffer(w, io.LimitReader(f, fi.Size()), make([]byte, 1<<20)) // 1MB 分块流式
 }
 
 func handleFilePOST(w http.ResponseWriter, r *http.Request) {
@@ -324,7 +369,11 @@ func handleFilePOST(w http.ResponseWriter, r *http.Request) {
 			length = n
 		}
 	}
-	if length <= 0 {
+	if length == 0 {
+		sendErrorJSON(w, 400, "empty body")
+		return
+	}
+	if length < 0 {
 		sendErrorJSON(w, 400, "bad content-length")
 		return
 	}
@@ -348,9 +397,9 @@ func handleFilePOST(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
-	openFile := func(pathVal string) io.WriteCloser {
+	openFile := func(pathVal string) (io.WriteCloser, error) {
 		if fh != nil {
-			return fh // 多 file 字段续写首个句柄
+			return fh, nil // 多 file 字段续写首个句柄
 		}
 		if pathVal != "" {
 			dest := httpNormalize(pathVal)
@@ -358,26 +407,26 @@ func handleFilePOST(w http.ResponseWriter, r *http.Request) {
 			part := dest + ".part"
 			f, err := os.Create(part)
 			if err != nil {
-				return errWriter{err}
+				return nil, err
 			}
 			fh, partPath = f, part
-			return f
+			return f, nil
 		}
 		tmp, err := os.CreateTemp("", "socketstack-upload-*")
 		if err != nil {
-			return errWriter{err}
+			return nil, err
 		}
 		fh, tempPath = tmp, tmp.Name()
-		return tmp
+		return tmp, nil
 	}
 
 	pathVal, size, fileSeen, err := parseMultipartStream(r.Body, length, boundary, openFile)
 	if err != nil {
-		if strings.Contains(err.Error(), "field value too large") || errors.Is(err, errMultipart) {
-			sendErrorJSON(w, 400, err.Error())
+		if errors.Is(err, errMultipart) {
+			sendErrorJSON(w, 400, err.Error()) // ValueError 类（畸形/超限）
 			return
 		}
-		sendErrorJSON(w, 400, err.Error())
+		sendErrorJSON(w, 500, fmt.Sprintf("write failed: %v", err)) // OSError 类
 		return
 	}
 	if pathVal == "" {
@@ -387,7 +436,7 @@ func handleFilePOST(w http.ResponseWriter, r *http.Request) {
 	dest := httpNormalize(pathVal)
 	if tempPath != "" {
 		os.MkdirAll(filepath.Dir(dest), 0o777)
-		if err := os.Rename(tempPath, dest); err != nil {
+		if err := moveFile(tempPath, dest); err != nil { // rename 优先，EXDEV 回退 copy+unlink
 			sendErrorJSON(w, 500, fmt.Sprintf("write failed: %v", err))
 			return
 		}
@@ -407,10 +456,31 @@ func handleFilePOST(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `{"ok":true,"path":%q,"size":%d}`, dest, size)
 }
 
-type errWriter struct{ err error }
-
-func (e errWriter) Write([]byte) (int, error) { return 0, e.err }
-func (e errWriter) Close() error              { return e.err }
+// moveFile shutil.move 等价：同盘 rename，跨盘（EXDEV）copy+unlink 兜底。
+func moveFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.CopyBuffer(out, in, make([]byte, 1<<20)); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(dst)
+		return err
+	}
+	return os.Remove(src)
+}
 
 // boundaryFromContentType 提取 boundary（缺失/超长 256 → ""）。
 func boundaryFromContentType(ct string) string {
@@ -421,7 +491,7 @@ func boundaryFromContentType(ct string) string {
 			if b != "" && len(b) <= 256 {
 				return b
 			}
-			return ""
+			continue // 首个 boundary= 无效继续扫后续段（Python 循环语义）
 		}
 	}
 	return ""
