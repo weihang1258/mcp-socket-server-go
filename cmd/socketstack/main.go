@@ -40,7 +40,27 @@ func main() {
 		return
 	}
 	switch args[0] {
-	case "agent", "serve": // serve = agent 别名（Python unit ExecStart 兼容）
+	case "serve": // serve = agent 别名（Python unit ExecStart 兼容）
+		runAgent(args[1:])
+	case "agent":
+		if len(args) > 1 {
+			switch args[1] {
+			case "start", "stop", "status", "enable", "disable":
+				svcDispatch("agent", args[1])
+				return
+			case "autoupgrade":
+				if len(args) < 3 || (args[2] != "on" && args[2] != "off") {
+					fmt.Fprintln(os.Stderr, "用法: socketstack agent autoupgrade on|off")
+					os.Exit(2)
+				}
+				if err := agentSetAutoupgrade(args[2]); err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(1)
+				}
+				fmt.Printf("自动升级已%s\n", map[string]string{"on": "开启", "off": "关闭"}[args[2]])
+				return
+			}
+		}
 		runAgent(args[1:])
 	case "mcp":
 		runMCP(args[1:])

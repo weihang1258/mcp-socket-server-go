@@ -65,6 +65,9 @@ func readAutoupgrade() bool {
 }
 
 // setAutoupgrade 写回（保留其他键，对齐 autoupgrade.set_autoupgrade）。
+// SetAutoupgrade 导出（CLI 用）。
+func SetAutoupgrade(state string) error { return setAutoupgrade(state) }
+
 func setAutoupgrade(state string) error {
 	cfg := map[string]string{}
 	if data, err := os.ReadFile(filepath.Join(upgradeRoot, "config")); err == nil {

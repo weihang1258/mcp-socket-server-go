@@ -151,3 +151,8 @@ var (
 )
 
 var _ = errors.New
+
+// agentSetAutoupgrade 写 /opt/socket/config 的 autoupgrade 键（转发 agent 包）。
+func agentSetAutoupgrade(state string) error {
+	return agent.SetAutoupgrade(state)
+}
