@@ -287,7 +287,7 @@ frame(字节层) → config/svc(含 serve 别名+unit 模板)
 | 8 | multipart 伪命中含裸 `\n`（Go 标准库不容忍） | 自定义 multipart reader 保留 Python 行为；差分用例 |
 | 9 | PLAYWRIGHT_BROWSERS_PATH 注入删除 | Go 无 playwright |
 | 10 | IPv6 TCP 客户端支持（Python client AF_INET-only） | 有意增强，对拍单独标注；wire 不变 |
-| 11 | mcp 默认 db_path/download_dir 改 /var/lib/socketstack 绝对路径 | systemd WorkingDirectory 需要绝对路径；语义不变 |
+| 11 | mcp 默认 db_path/download_dir 改 /var/lib/socketstack 绝对路径 | systemd WorkingDirectory 需要绝对路径；语义不变。**连带**：该目录在全新机器上不存在，`OpenRegistry/OpenAudit` 会先 `mkdirForFile` 自建父目录，mcp 单元另加 `StateDirectory=socketstack`（Python 默认 `./mcp_socket_server.db` 靠 cwd 必然存在，踩不到这条） |
 | 12 | Python 死代码不移植（cache_cpus 族/get_tx_cpu/config_rx_thread_cpus/kill_all_chrome/tcpdump_isrun/PcapStats/PacketBuffer/wait_until 族/_sniff_command） | 全仓无调用点 |
 | 13 | upgrade_run 轮询拆分对方括号 IPv6（`[fd00::5]:9000`）剥括号（Python rpartition 保留括号必败） | Go 行为更优；普通裸 v6 的 fd00::5 截断 quirk 仍照抄 |
 | 14 | 封堵拨测连接禁 keep-alive 显式配置（Python 靠每请求新 Session） | 语义等价，实现路径不同 |
