@@ -416,6 +416,64 @@ func TestChromiumProxySemantics(t *testing.T) {
 	})
 }
 
+// no_proxy 命中即直连（requests should_bypass_proxies 语义）
+func TestChromiumProxyNoProxyBypass(t *testing.T) {
+	prev := upgradeRoot
+	defer func() { upgradeRoot = prev }()
+	upgradeRoot = t.TempDir() // 无 config proxy=
+
+	t.Setenv("http_proxy", "http://p:1")
+	req := func(rawurl string) *http.Request {
+		r, _ := http.NewRequest("GET", rawurl, nil)
+		return r
+	}
+
+	t.Run("精确 host 命中", func(t *testing.T) {
+		t.Setenv("no_proxy", "registry.npmmirror.com")
+		if u, _ := chromiumProxyFunc()(req("http://registry.npmmirror.com/x")); u != nil {
+			t.Fatalf("命中 no_proxy 须直连: %v", u)
+		}
+		if u, _ := chromiumProxyFunc()(req("http://other.com/x")); u == nil {
+			t.Fatal("未命中须走代理")
+		}
+	})
+	t.Run("后缀命中", func(t *testing.T) {
+		t.Setenv("no_proxy", ".npmmirror.com")
+		if u, _ := chromiumProxyFunc()(req("http://a.b.npmmirror.com/x")); u != nil {
+			t.Fatalf("后缀须命中: %v", u)
+		}
+	})
+	t.Run("星号全部绕过", func(t *testing.T) {
+		t.Setenv("no_proxy", "*")
+		if u, _ := chromiumProxyFunc()(req("http://anything.com/x")); u != nil {
+			t.Fatalf("* 须全部直连: %v", u)
+		}
+	})
+	t.Run("带端口条目", func(t *testing.T) {
+		t.Setenv("no_proxy", "h.com:8080")
+		if u, _ := chromiumProxyFunc()(req("http://h.com:8080/x")); u != nil {
+			t.Fatalf("带端口条目须命中: %v", u)
+		}
+	})
+	t.Run("大写 NO_PROXY 也生效", func(t *testing.T) {
+		os.Unsetenv("no_proxy")
+		t.Setenv("NO_PROXY", "registry.npmmirror.com")
+		if u, _ := chromiumProxyFunc()(req("http://registry.npmmirror.com/x")); u != nil {
+			t.Fatalf("NO_PROXY 须生效: %v", u)
+		}
+	})
+	t.Run("config 显式 proxy 不被 no_proxy 绕开", func(t *testing.T) {
+		dir := t.TempDir()
+		upgradeRoot = dir
+		os.WriteFile(filepath.Join(dir, "config"), []byte("proxy=http://cfg:9\n"), 0o644)
+		t.Setenv("no_proxy", "registry.npmmirror.com")
+		u, _ := chromiumProxyFunc()(req("http://registry.npmmirror.com/x"))
+		if u == nil || u.Host != "cfg:9" {
+			t.Fatalf("显式配置须优先于 no_proxy: %v", u)
+		}
+	})
+}
+
 // ---- 测试辅助 ----
 
 // wantFileMode 解压出的普通文件权限：CPython extractall 用 open(wb) → 0666 & ~umask。

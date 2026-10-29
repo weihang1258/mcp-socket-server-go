@@ -297,14 +297,18 @@ func (c *readDeadlineConn) Read(p []byte) (int, error) {
 }
 
 // chromiumProxyFunc config 的 proxy= 显式则用（无 scheme 自动补 http://，对齐
-// requests adapters.py prepend_scheme_if_needed）；否则取环境变量，**小写优先**
-// （requests.utils: os.environ.get(k) or os.environ.get(k.upper())），且不读 NO_PROXY。
+// requests adapters.py prepend_scheme_if_needed）；否则取环境变量并遵守 no_proxy
+// （requests Session.merge_environment_settings → get_environ_proxies → should_bypass_proxies：
+// 命中 no_proxy 即返回 {} = 直连）。大小写冲突时**小写优先**（utils: get(k) or get(k.upper())）。
 func chromiumProxyFunc() func(*http.Request) (*url.URL, error) {
 	return func(req *http.Request) (*url.URL, error) {
 		if p := readSocketConfigProxy(); p != "" {
 			if u := parseProxyURL(p); u != nil {
-				return u, nil
+				return u, nil // 显式配置不参与 no_proxy 绕过（与 requests proxies= 一致）
 			}
+		}
+		if noProxyBypass(req.URL) {
+			return nil, nil
 		}
 		lower, upper := "http_proxy", "HTTP_PROXY"
 		if req.URL.Scheme == "https" {
@@ -319,6 +323,40 @@ func chromiumProxyFunc() func(*http.Request) (*url.URL, error) {
 		}
 		return nil, nil
 	}
+}
+
+// noProxyBypass requests should_bypass_proxies 的等价实现：
+// no_proxy（小写优先）逗号分隔；"*" 表示全部绕过；条目可比对 host 或其后缀
+// （前导 "." 视作后缀），可带端口。
+func noProxyBypass(u *url.URL) bool {
+	raw := os.Getenv("no_proxy")
+	if raw == "" {
+		raw = os.Getenv("NO_PROXY")
+	}
+	if raw == "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.ToLower(strings.TrimSpace(entry))
+		if entry == "" {
+			continue
+		}
+		if entry == "*" {
+			return true
+		}
+		if u.Port() != "" && strings.Contains(entry, ":") && entry == strings.ToLower(u.Host) {
+			return true
+		}
+		entry = strings.TrimPrefix(entry, ".")
+		if h, _, err := net.SplitHostPort(entry); err == nil {
+			entry = h
+		}
+		if host == entry || strings.HasSuffix(host, "."+entry) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseProxyURL 无 scheme 时补 http://（"10.0.0.1:7897" → http://10.0.0.1:7897）。
