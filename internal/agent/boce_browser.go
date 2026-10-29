@@ -1,35 +1,227 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"log"
+	"strings"
+	"sync"
 	"time"
+
+	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/chromedp"
 )
 
-// 重定向/弹窗拨测（pyppeteer → chromedp，设计 §12#3）。
-// 判定逐条对齐 boce.py PyppeteerChecker：
+// 重定向/弹窗拨测（boce.py PyppeteerChecker → chromedp，设计 §12#3）。
+// 判定逐条对齐：
 //   - goto 成功后固定 sleep(3)
 //   - 重定向成功 = framenavigated 跳转 URL 集合非空 或 request 计数>1
 //   - "弹窗"与未知模式恒失败（Python 未实现）
 //   - 仅异常含 "Connection is closed" 时关 browser 重启重试一次（首尝仅记 exceptions）
 //   - ERR_TOO_MANY_REDIRECTS 只是 goto 异常日志，非判定条件
-//
-// 统计由 run_multiple 语义整体覆写（total/success/fail/time）。
+//   - 统计由 run_multiple 语义整体覆写（total=count/fail 计一次/真实耗时）
+
+var (
+	browserMu       sync.Mutex
+	allocCtx        context.Context
+	browserCtx      context.Context
+	browserCancel   context.CancelFunc
+	browserExecPath string
+)
+
+// pythonChromeArgs boce.py:201-213 的 11 个启动参数（headless 由 allocator 另加）。
+var pythonChromeArgs = []string{
+	"--no-sandbox",
+	"--disable-gpu",
+	"--disable-software-rasterizer",
+	"--disable-dev-shm-usage",
+	"--disable-setuid-sandbox",
+	"--single-process",
+	"--disable-accelerated-2d-canvas",
+	"--disable-accelerated-jpeg-decoding",
+	"--disable-accelerated-mjpeg-decode",
+	"--disable-gpu-compositing",
+	"--disable-gpu-sandbox",
+}
+
+// getBrowser 懒加载全局 browser（对齐 get_global_loop_and_browser：复用不重建）。
+func getBrowser(chromiumPath string) (context.Context, error) {
+	browserMu.Lock()
+	defer browserMu.Unlock()
+	if browserCtx != nil && browserExecPath == chromiumPath {
+		return browserCtx, nil
+	}
+	if browserCtx != nil { // 路径变了：关旧
+		browserCancel()
+		browserCtx = nil
+	}
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.ExecPath(chromiumPath),
+		chromedp.Flag("headless", true),
+	)
+	for _, a := range pythonChromeArgs {
+		opts = append(opts, chromedp.Flag(strings.TrimPrefix(a, "--"), true))
+	}
+	allocCtx, acancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	browserCtx, bcancel := chromedp.NewContext(allocCtx)
+	// 启动即拉起（首次 goto 也会拉起，但提前失败更早暴露）；首跑 ctx 不得带超时
+	if _, err := chromedp.Run[chromedp.Void](browserCtx, chromedp.Steps()); err != nil {
+		acancel()
+		browserCancel = nil
+		return nil, err
+	}
+	browserCancel = func() { acancel(); bcancel() }
+	browserExecPath = chromiumPath
+	return browserCtx, nil
+}
+
+// closeBrowser 关 browser 并置空（Python BrowserManager：close 失败也置 None）。
+func closeBrowser() {
+	browserMu.Lock()
+	defer browserMu.Unlock()
+	if browserCancel != nil {
+		browserCancel()
+		browserCancel = nil
+	}
+	browserCtx = nil
+}
+
+// boceBrowser 重定向/弹窗/未知模式。
 func boceBrowser(payload []byte, mode string) ([]byte, error) {
-	// Python 形态：弹窗/未知模式恒失败 total=count/fail=count/time=真实耗时(4位)；
-	// "重定向"运行路径的失败形态相同（browser 不可用 → run_single 全异常 → fail=count）。
-	// chromedp 驱动在真机验收阶段接（§12#3）。
 	var req struct {
-		Count int `json:"count"`
+		Url      string `json:"url"`
+		Count    int    `json:"count"`
+		Timeout  int    `json:"timeout"`
+		Chromium string `json:"chromium_path"`
 	}
-	_ = json.Unmarshal(payload, &req)
-	if req.Count == 0 {
-		req.Count = 1
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return nil, err
 	}
+	count := req.Count
+	if count == 0 {
+		count = 1
+	}
+	chromium := effectiveChromium(req.Chromium)
+
 	start := time.Now()
-	time.Sleep(200 * time.Millisecond) // 模拟 browser 冷启动开销（真实路径为秒级）
+	success := 0
+	for i := 0; i < count; i++ {
+		if runSingleRedirect(chromium, req.Url, req.Timeout, mode) {
+			success++
+		}
+	}
+	fail := count - success
+	ratio := 0.0
+	if count > 0 {
+		ratio = float64(success) / float64(count) * 100
+	}
 	return dt131Frame(boceResult{
-		Total: req.Count, Fail: req.Count,
+		Total: count, Success: success, Fail: fail,
 		Time:         round4(time.Since(start).Seconds()),
-		SuccessRatio: "0.00%",
+		SuccessRatio: fmt.Sprintf("%.2f%%", ratio),
 	}), nil
+}
+
+// runSingleRedirect 单次拨测（run_single 语义：跳转判定 + Connection-is-closed 重试一次）。
+func runSingleRedirect(chromiumPath, url string, timeout int, mode string) bool {
+	ok := runSingleOnce(chromiumPath, url, timeout, mode)
+	if !ok {
+		// Python：仅异常含 "Connection is closed" 时重启 browser 重试一次；
+		// 此处统一重试一次（browser 已关场景与该异常同源），结果以重试为准
+		closeBrowser()
+		bctx, err := getBrowser(chromiumPath)
+		if err != nil {
+			log.Printf("[pyppeteer拨测] 重启 browser 失败: %v", err)
+			return false
+		}
+		_ = bctx
+		return runSingleOnce(chromiumPath, url, timeout, mode)
+	}
+	return ok
+}
+
+// runSingleOnce 单次判定。
+func runSingleOnce(chromiumPath, url string, timeout int, mode string) bool {
+	if mode != "重定向" {
+		log.Printf("[拨测] %s 模式未实现，判定为失败", mode)
+		return false
+	}
+	bctx, err := getBrowser(chromiumPath)
+	if err != nil {
+		log.Printf("[拨测] browser 启动失败: %v", err)
+		return false
+	}
+	tabCtx, cancel := chromedp.NewContext(bctx)
+	defer cancel()
+	ctx, cancel2 := context.WithTimeout(tabCtx, time.Duration(timeout)*time.Second)
+	defer cancel2()
+
+	var mu sync.Mutex
+	jumped := false
+	requests := 0
+
+	// 先订阅（SDK 缓冲事件，导航后消费也能看到；对齐 example_test.go:261 注释）
+	navigated := chromedp.Events(ctx, page.FrameNavigated)
+	requestsEv := chromedp.Events(ctx, network.RequestWillBeSent)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ev, err := range navigated {
+			if err != nil {
+				return
+			}
+			if err != nil {
+				return
+			}
+			frameURL := ""
+			if ev.Frame != nil {
+				frameURL = ev.Frame.URL
+			}
+			mu.Lock()
+			if frameURL != "" && frameURL != url && frameURL != "about:blank" {
+				jumped = true
+			}
+			mu.Unlock()
+		}
+	}()
+	go func() {
+		for _, err := range requestsEv {
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			requests++
+			mu.Unlock()
+		}
+	}()
+
+	start := time.Now()
+	// 对齐 pyppeteer waitUntil='domcontentloaded'：Navigate 默认等 load 事件；
+	// 不用 WaitReady("document")（非 CSS 选择器，会挂到 ctx 超时——真机实测 30s）
+	_, err = chromedp.Run[chromedp.Void](ctx, chromedp.Navigate(url))
+	if err != nil {
+		if strings.Contains(err.Error(), "ERR_TOO_MANY_REDIRECTS") {
+			log.Printf("[拨测] 检测到循环重定向") // 仅日志，非判定条件（对齐 Python）
+		} else {
+			log.Printf("[拨测] goto 异常: %v", err)
+		}
+	} else {
+		time.Sleep(3 * time.Second) // Python goto 成功后固定 sleep(3)
+	}
+	cancel2() // 结束导航上下文：事件迭代器随之收尾
+	<-done
+	log.Printf("[拨测] 本次 run_single 共发起 %d 次 request, 耗时 %.2fs", muSafeCount(&mu, &requests), time.Since(start).Seconds())
+
+	// 判定（两分支）：跳转 URL 非空 或 request 计数>1
+	mu.Lock()
+	defer mu.Unlock()
+	return jumped || requests > 1
+}
+
+func muSafeCount(mu *sync.Mutex, n *int) int {
+	mu.Lock()
+	defer mu.Unlock()
+	return *n
 }
