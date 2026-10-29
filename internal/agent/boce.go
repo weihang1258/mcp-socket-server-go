@@ -2,6 +2,7 @@ package agent
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -256,43 +257,79 @@ func readSocketConfigProxy() string {
 	return ""
 }
 
-// chromiumTransport 每操作超时语义（对齐 requests(timeout=N)：连接/握手/首字节各自限时，
-// 不对整个传输设总时限——36MB 目录列表与 500MB zip 在慢链路上靠总时限必然失败）。
-// 基线用 DefaultTransport 克隆：config 无 proxy= 时仍走 HTTP_PROXY/HTTPS_PROXY 环境变量。
+// chromiumTransport 超时语义对齐 requests(timeout=N)：
+//   - N 是**逐次 socket 操作**的超时——连接、握手、等首字节、以及**每次 read 等待**，
+//     都不是整个传输的总时限（36MB 目录列表真机 5.8s，慢链路 36s，总时限必败）。
+//   - Go 的 ResponseHeaderTimeout 只管到响应头；头一到位，body 就再无 deadline，
+//     故 dial 时给 conn 包一层 readDeadlineConn，每次 Read 前重设 deadline。
+//
+// 基线用 DefaultTransport 克隆：config 无 proxy= 时仍走 HTTP_PROXY/HTTPS_PROXY。
 func chromiumTransport(timeout int) *http.Transport {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	d := time.Duration(timeout) * time.Second
-	tr.Proxy = http.ProxyFromEnvironment
-	tr.DialContext = (&net.Dialer{Timeout: min(d, 20*time.Second)}).DialContext
+	dialer := &net.Dialer{Timeout: min(d, 20*time.Second)}
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		c, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return &readDeadlineConn{Conn: c, timeout: d}, nil
+	}
 	tr.TLSHandshakeTimeout = d
 	tr.ResponseHeaderTimeout = d
 	tr.IdleConnTimeout = 90 * time.Second
-	// requests 语义对齐：config 的 proxy= 显式则用；否则读 HTTP_PROXY/HTTPS_PROXY，
-	// 且**不读 NO_PROXY**（requests 传 proxies="" 时同样绕过 no_proxy，由 requests.utils 直接取环境变量）。
-	// Go 的 ProxyFromEnvironment 会读 NO_PROXY，故自行解析。
-	tr.Proxy = func(req *http.Request) (*url.URL, error) {
+	tr.Proxy = chromiumProxyFunc()
+	return tr
+}
+
+// readDeadlineConn 每次 Read 前重设 deadline（requests 的 read timeout 语义：
+// 计时从"开始等下一批字节"算起，数据持续到达就持续续期）。
+type readDeadlineConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c *readDeadlineConn) Read(p []byte) (int, error) {
+	if err := c.Conn.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Read(p)
+}
+
+// chromiumProxyFunc config 的 proxy= 显式则用（无 scheme 自动补 http://，对齐
+// requests adapters.py prepend_scheme_if_needed）；否则取环境变量，**小写优先**
+// （requests.utils: os.environ.get(k) or os.environ.get(k.upper())），且不读 NO_PROXY。
+func chromiumProxyFunc() func(*http.Request) (*url.URL, error) {
+	return func(req *http.Request) (*url.URL, error) {
 		if p := readSocketConfigProxy(); p != "" {
-			if u, err := url.Parse(p); err == nil {
+			if u := parseProxyURL(p); u != nil {
 				return u, nil
 			}
 		}
-		env := os.Getenv("HTTP_PROXY")
+		lower, upper := "http_proxy", "HTTP_PROXY"
 		if req.URL.Scheme == "https" {
-			env = os.Getenv("HTTPS_PROXY")
+			lower, upper = "https_proxy", "HTTPS_PROXY"
 		}
-		if env == "" {
-			env = os.Getenv("http_proxy")
-			if req.URL.Scheme == "https" {
-				env = os.Getenv("https_proxy")
+		for _, k := range []string{lower, upper} {
+			if v := os.Getenv(k); v != "" {
+				if u := parseProxyURL(v); u != nil {
+					return u, nil
+				}
 			}
 		}
-		if env == "" {
-			return nil, nil
-		}
-		return url.Parse(env)
+		return nil, nil
 	}
-	// ponytail: body 中途停摆无总时限（requests 同样只有 per-read 超时）；真出现卡死再包 context 截止
-	return tr
+}
+
+// parseProxyURL 无 scheme 时补 http://（"10.0.0.1:7897" → http://10.0.0.1:7897）。
+func parseProxyURL(raw string) *url.URL {
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		return u
+	}
+	if u, err := url.Parse("http://" + raw); err == nil {
+		return u
+	}
+	return nil
 }
 
 // fetcher 带 proxy 语义的 HTTP client（总时限不限，超时由 transport 逐操作控制）。

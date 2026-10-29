@@ -369,7 +369,9 @@ func TestReplayerSendUnavailableFailsFast(t *testing.T) {
 	if m["status"] != "error" || !strings.Contains(m["message"], "AF_PACKET") {
 		t.Fatalf("发送层不可用须回 error JSON（不得静默空回放）: %s", resp)
 	}
-	// 不得回看起来健康的 stats（total_packets>0 但 total_bytes=0）
+	// 不得回看起来健康的 stats（total_packets>0 但 total_bytes=0）。
+	// 注意：prepare 成功后逐包发送失败仍会回 stats（total_bytes=0）——这与 Python 一致
+	//（Python 逐包失败只 return 不计数，最终同样给 stats），不在此断言。
 	var s map[string]any
 	if json.Unmarshal(resp, &s) == nil && s["total_packets"] != nil {
 		t.Fatalf("不得返回 stats: %s", resp)

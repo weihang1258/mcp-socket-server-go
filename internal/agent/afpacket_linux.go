@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -203,7 +204,12 @@ type rawPacketSender struct {
 	ifindex int
 }
 
-var sendSockets = map[string]*rawPacketSender{}
+// sendSockets 按网卡缓存发送 socket（裸 TCP 多连接可并发发 dt0 → 必须加锁；
+// 对照 capture.go 的 capturesMu）。fd 常驻不关：数量按网卡数有界（§12#26）。
+var (
+	sendMu      sync.Mutex
+	sendSockets = map[string]*rawPacketSender{}
+)
 
 // replaySendLinux 回放发送实现（export 给 replaySendFn 替换；root/CAP_NET_RAW）。
 func replaySendLinux(iface string, pkt []byte) error {
@@ -217,6 +223,8 @@ func replaySendLinux(iface string, pkt []byte) error {
 
 // replaySenderFor 按网卡取/建发送 socket（缓存复用，对齐 Python _uplink_socket/_downlink_socket）。
 func replaySenderFor(iface string) (*rawPacketSender, error) {
+	sendMu.Lock()
+	defer sendMu.Unlock()
 	if s, ok := sendSockets[iface]; ok {
 		return s, nil
 	}

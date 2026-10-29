@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -31,6 +32,9 @@ func TestEnsureChromiumDownloadE2E(t *testing.T) {
 		// 目录列表混入非数字项 → 须取数值最大者 123（max(key=int)）
 		w.Write([]byte(`[{"name":"120/"},{"name":"abc/"},{"name":"123/"}]`))
 	}, func(w http.ResponseWriter, revision string) {
+		if revision != "123" {
+			t.Errorf("须下载数值最大的 revision 123，实际 %q", revision)
+		}
 		writeZip(t, w, map[string]string{"chrome-linux/chrome": "#!/bin/sh\nexit 0\n"})
 	})
 	defer srv.Close()
@@ -48,6 +52,9 @@ func TestEnsureChromiumDownloadE2E(t *testing.T) {
 	}
 	if !chromiumUsable(target) {
 		t.Fatal("落盘后 chromiumUsable 须为 true")
+	}
+	if len(requested) != 1 {
+		t.Fatalf("目录列表须只查一次（锁内 double-check），实际 %d 次: %v", len(requested), requested)
 	}
 }
 
@@ -91,9 +98,9 @@ func TestEnsureChromiumZipSlipBlocked(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(installRoot, "sub", "a.js")); err != nil {
 		t.Fatalf("嵌套目录未解压: %v", err)
 	}
-	// CPython extractall 不复刻 external_attr：普通文件恒 0666&~umask（0o644），目录 0o755
-	if fi, err := os.Stat(filepath.Join(installRoot, "sub", "a.js")); err != nil || fi.Mode().Perm() != 0o644 {
-		t.Fatalf("文件权限须 0o644（忽略 zip external_attr）: %v %v", fi.Mode().Perm(), err)
+	// CPython extractall 不复刻 external_attr：普通文件恒 0666&~umask
+	if fi, err := os.Stat(filepath.Join(installRoot, "sub", "a.js")); err != nil || fi.Mode().Perm() != wantFileMode() {
+		t.Fatalf("文件权限须 %v（忽略 zip external_attr）: %v %v", wantFileMode(), fi.Mode().Perm(), err)
 	}
 	if fi, err := os.Stat(filepath.Join(installRoot, "sub")); err != nil || !fi.IsDir() {
 		t.Fatalf("子目录缺失: %v", err)
@@ -225,8 +232,8 @@ func TestEnsureChromiumIgnoresZipFileModes(t *testing.T) {
 		t.Fatal("下载应成功")
 	}
 	for name, want := range map[string]fs.FileMode{
-		"chrome":   0o755,                // 主目标被显式 chmod 755
-		"libro.so": 0o644, "tool": 0o644, // 其余按 CPython 语义 0666&~umask
+		"chrome":   0o755,                                  // 主目标被显式 chmod 755（chmod 不受 umask 影响）
+		"libro.so": wantFileMode(), "tool": wantFileMode(), // 其余按 CPython 语义 0666&~umask
 	} {
 		fi, err := os.Stat(filepath.Join(installRoot, name))
 		if err != nil {
@@ -311,7 +318,109 @@ func TestChromiumTransportUsesEnvProxyWhenNoConfig(t *testing.T) {
 	}
 }
 
+// body 中途停摆必须有 read 超时（requests(timeout=N) 的 N 就是 read timeout）：
+// 服务器发完响应头 + 半截 body 后停住 → 客户端须在 ~N 秒内失败，不得永久挂住
+// （挂住会一直持有 chromiumDownloadMu，之后该 agent 上所有 boce 都排死）。
+// body 中途停摆必须有 read 超时（requests(timeout=N) 的 N 就是 read timeout）：
+// 服务器发完响应头 + 半截 body 后停住 → 客户端须在 ~N 秒内失败，不得永久挂住
+// （挂住会一直持有 chromiumDownloadMu，之后该 agent 上所有 boce 都排死）。
+func TestFetcherBodyStallTimesOut(t *testing.T) {
+	prevRoot := upgradeRoot
+	defer func() { upgradeRoot = prevRoot }()
+	upgradeRoot = t.TempDir() // 隔离本机 /opt/socket/config 的 proxy=
+
+	stall := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(200)
+		f := w.(http.Flusher)
+		w.Write(make([]byte, 100))
+		f.Flush()
+		<-stall // 停摆：剩下的字节永远不来（测试结束即释放，避免 Close 卡等 handler）
+	}))
+	defer srv.Close()
+	defer close(stall)
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		resp, err := fetcher(1).Get(srv.URL)
+		if err != nil {
+			done <- err
+			return
+		}
+		defer resp.Body.Close()
+		_, err = io.ReadAll(resp.Body)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("停摆的 body 须报超时错误")
+		}
+		if el := time.Since(start); el > 3*time.Second {
+			t.Fatalf("read 超时过晚（%v），timeout=1 应在 ~1s 内失败", el)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("body 停摆时请求永久挂起——缺 read deadline")
+	}
+}
+
+// requests 语义细节（复核实测对齐）：
+//   - config proxy= 无 scheme 自动补 http://（adapters.py prepend_scheme_if_needed）
+//   - 大小写同时设置时**小写优先**（utils: os.environ.get(k) or get(k.upper())）
+//   - 只设大写也能用；只设 https 的不影响 http 请求
+func TestChromiumProxySemantics(t *testing.T) {
+	dir := t.TempDir()
+	prev := upgradeRoot
+	defer func() { upgradeRoot = prev }()
+	upgradeRoot = dir
+
+	reqHTTP, _ := http.NewRequest("GET", "http://example.invalid/", nil)
+	reqHTTPS, _ := http.NewRequest("GET", "https://example.invalid/", nil)
+
+	t.Run("config 无 scheme 自动补 http://", func(t *testing.T) {
+		os.WriteFile(filepath.Join(dir, "config"), []byte("proxy=10.0.0.1:7897\n"), 0o644)
+		u, err := chromiumProxyFunc()(reqHTTP)
+		if err != nil || u == nil || u.Scheme != "http" || u.Host != "10.0.0.1:7897" {
+			t.Fatalf("无 scheme 须补 http://: u=%v err=%v", u, err)
+		}
+		os.Remove(filepath.Join(dir, "config"))
+	})
+	t.Run("小写优先于大写", func(t *testing.T) {
+		t.Setenv("http_proxy", "http://lower:1")
+		t.Setenv("HTTP_PROXY", "http://upper:2")
+		u, _ := chromiumProxyFunc()(reqHTTP)
+		if u == nil || u.Host != "lower:1" {
+			t.Fatalf("小写须优先: u=%v", u)
+		}
+	})
+	t.Run("只设小写", func(t *testing.T) {
+		t.Setenv("http_proxy", "http://lower:1")
+		os.Unsetenv("HTTP_PROXY")
+		u, _ := chromiumProxyFunc()(reqHTTP)
+		if u == nil || u.Host != "lower:1" {
+			t.Fatalf("小写单独生效: u=%v", u)
+		}
+	})
+	t.Run("HTTPS_PROXY 不影响 http 请求", func(t *testing.T) {
+		os.Unsetenv("http_proxy")
+		os.Unsetenv("HTTP_PROXY")
+		t.Setenv("HTTPS_PROXY", "http://sec:3")
+		if u, _ := chromiumProxyFunc()(reqHTTP); u != nil {
+			t.Fatalf("http 请求不得用 HTTPS_PROXY: %v", u)
+		}
+		if u, _ := chromiumProxyFunc()(reqHTTPS); u == nil || u.Host != "sec:3" {
+			t.Fatalf("https 请求须用 HTTPS_PROXY: %v", u)
+		}
+	})
+}
+
 // ---- 测试辅助 ----
+
+// wantFileMode 解压出的普通文件权限：CPython extractall 用 open(wb) → 0666 & ~umask。
+// 按当前进程 umask 推算，避免在 umask 077 的机器上误报（windows 无 Umask，见下）。
+func wantFileMode() fs.FileMode { return fs.FileMode(0o666 &^ currentUmask()) }
 
 func overrideChromiumPaths(t *testing.T, installDir string) func() {
 	t.Helper()
