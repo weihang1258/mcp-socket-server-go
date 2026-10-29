@@ -22,6 +22,13 @@ var replaySendFn = func(iface string, pkt []byte) error {
 	return errors.New("AF_PACKET 发送未启用（需 Linux + CAP_NET_RAW）")
 }
 
+// replayPrepareFn 对齐 Python replay_files 开头的 _setup_sockets()：发送层整体不可用时
+// 立即报错（dt0 → {"status":"error"}），而不是逐包失败却回一份"看着健康"的空 stats
+// （Python 此时 total_packets 也不会增长，因为异常在循环之前抛出）。
+var replayPrepareFn = func(upIface, downIface string) error {
+	return errors.New("AF_PACKET 发送未启用（需 Linux + CAP_NET_RAW）")
+}
+
 // ---- 五元组与流表 ----
 
 type tuple5 struct {
@@ -514,6 +521,9 @@ func replayFiles(payload []byte) ([]byte, error) {
 		forceSport: req.ForceSport, forceDport: req.ForceDport,
 		forceBuildFlow: req.ForceBuild, clientHint: req.ClientHint, serverHint: req.ServerHint,
 		flowTable: map[tuple5Key]*flowInfo5{},
+	}
+	if err := replayPrepareFn(req.UpIface, req.DownIface); err != nil {
+		return dt0Error(err), nil // 对应 Python _setup_sockets() 异常 → except → error JSON
 	}
 	r.startTime = nowSec()
 	var totalBytesSent int

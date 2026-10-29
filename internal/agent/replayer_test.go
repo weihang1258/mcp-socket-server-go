@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -343,10 +344,44 @@ func TestReplayerNsMagic(t *testing.T) {
 
 var replaySender *fakeSender
 
+// 发送层整体不可用（无 AF_PACKET 的平台/无权限进程）：Python 在 replay_files 开头
+// _setup_sockets() 直接抛异常 → dt0 回 {"status":"error"}，不会跑出一个"看着成功"的空回放。
+// Go 侧发包器懒创建，等价语义靠 replayFile 首包失败前置检查落实。
+func TestReplayerSendUnavailableFailsFast(t *testing.T) {
+	const unavail = "AF_PACKET 发送未启用（需 Linux + CAP_NET_RAW）"
+	prevSend, prevPrep := replaySendFn, replayPrepareFn
+	replaySendFn = func(iface string, pkt []byte) error { return errors.New(unavail) }
+	replayPrepareFn = func(up, down string) error { return errors.New(unavail) }
+	t.Cleanup(func() { replaySendFn, replayPrepareFn = prevSend, prevPrep })
+
+	dir := t.TempDir()
+	pcapPath := filepath.Join(dir, "one.pcap")
+	writeReplayPcap(t, pcapPath, int(1e6), ipv4("10.20.0.1", "10.20.0.2", 6, tcpSeg(1000, 80, 0x02, nil)))
+
+	resp, err := runDT(t, 0, mustJSON(t, map[string]any{
+		"pcaps": []string{pcapPath}, "uplink_iface": "u", "downlink_iface": "d",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]string
+	json.Unmarshal(resp, &m)
+	if m["status"] != "error" || !strings.Contains(m["message"], "AF_PACKET") {
+		t.Fatalf("发送层不可用须回 error JSON（不得静默空回放）: %s", resp)
+	}
+	// 不得回看起来健康的 stats（total_packets>0 但 total_bytes=0）
+	var s map[string]any
+	if json.Unmarshal(resp, &s) == nil && s["total_packets"] != nil {
+		t.Fatalf("不得返回 stats: %s", resp)
+	}
+}
+
 func resetReplaySender(t *testing.T) {
 	t.Helper()
 	replaySender = &fakeSender{}
 	prev := replaySendFn
 	replaySendFn = func(iface string, pkt []byte) error { return replaySender.send(iface, pkt) }
-	t.Cleanup(func() { replaySendFn = prev; replaySender = nil })
+	prevPrep := replayPrepareFn
+	replayPrepareFn = func(up, down string) error { return nil } // 假发送器不需要真 socket
+	t.Cleanup(func() { replaySendFn = prev; replayPrepareFn = prevPrep; replaySender = nil })
 }

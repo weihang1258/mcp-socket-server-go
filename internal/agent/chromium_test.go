@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestEnsureChromiumDownloadE2E(t *testing.T) {
@@ -234,6 +235,79 @@ func TestEnsureChromiumIgnoresZipFileModes(t *testing.T) {
 		if fi.Mode().Perm() != want {
 			t.Errorf("%s 权限 %v，want %v", name, fi.Mode().Perm(), want)
 		}
+	}
+}
+
+// 慢链路语义（对齐 requests(timeout=N) 的逐操作超时）：整体传输远超 timeout 仍须成功。
+// 目录列表真机 36MB/5.8s——若用 Client.Timeout 总时限则慢机必败。
+func TestEnsureChromiumSlowBodyNoTotalDeadline(t *testing.T) {
+	root := t.TempDir()
+	defer overrideChromiumPaths(t, filepath.Join(root, "opt", "socket", "chrome-linux"))()
+
+	srv := newNPMMirrorServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// 分 5 段写、每段间隔 500ms：总耗时 ~2.5s，明显超过下面传入的 1s。
+		// per-op 超时（connect/握手/首字节）不受影响；总时限（Client.Timeout）必失败。
+		f := w.(http.Flusher)
+		w.Write([]byte(`[{"name":"1/"},`))
+		f.Flush()
+		for i := 0; i < 3; i++ {
+			time.Sleep(500 * time.Millisecond)
+			w.Write([]byte(`{"name":"x"},`))
+			f.Flush()
+		}
+		time.Sleep(500 * time.Millisecond)
+		w.Write([]byte(`{"name":"2/"}]`))
+	}, func(w http.ResponseWriter, revision string) {
+		if revision != "2" {
+			t.Errorf("revision 应为 2（列表最大数字）: %q", revision)
+		}
+		writeZip(t, w, map[string]string{"chrome-linux/chrome": "#!/bin/sh\n"})
+	})
+	defer srv.Close()
+	npmmirrorBase = "http://" + srv.Addr
+
+	if !fetcherHTTP(1) {
+		t.Fatal("慢速响应超过 timeout 不应整体失败（仅逐操作超时）")
+	}
+	if !ensureChromiumDownload(chromeInstallDir + "/chrome") {
+		t.Fatal("慢链路下载应成功")
+	}
+}
+
+// 直取目录列表校验 transport 超时语义（1s per-op 上限，1.2s 总长须通过）。
+func fetcherHTTP(timeoutSeconds int) bool {
+	resp, err := fetcher(timeoutSeconds).Get(npmmirrorBase + "/")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, err = io.ReadAll(resp.Body)
+	return err == nil
+}
+
+// config 无 proxy= 时须继承环境变量代理（Python trust_env）。
+func TestChromiumTransportUsesEnvProxyWhenNoConfig(t *testing.T) {
+	dir := t.TempDir()
+	prev := upgradeRoot
+	defer func() { upgradeRoot = prev }()
+	upgradeRoot = dir // 无 config 文件
+
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:7897")
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
+	tr := chromiumTransport(10)
+	req, _ := http.NewRequest("GET", "http://example.invalid/", nil)
+	if tr.Proxy == nil {
+		t.Fatal("无 config 时 Proxy 不得为 nil（须继承环境变量）")
+	}
+	u, err := tr.Proxy(req)
+	if err != nil || u == nil || u.Port() != "7897" {
+		t.Fatalf("环境变量代理未生效: u=%v err=%v", u, err)
+	}
+	// config 里的 proxy= 优先于环境变量
+	os.WriteFile(filepath.Join(dir, "config"), []byte("proxy=http://127.0.0.1:9999\n"), 0o644)
+	u2, err := chromiumTransport(10).Proxy(req)
+	if err != nil || u2 == nil || u2.Port() != "9999" {
+		t.Fatalf("config proxy 须优先: u=%v err=%v", u2, err)
 	}
 }
 

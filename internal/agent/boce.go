@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -255,15 +256,48 @@ func readSocketConfigProxy() string {
 	return ""
 }
 
-// fetcher 带 proxy= 的 HTTP client（空 proxy → 走环境变量/直连）。
-func fetcher(timeout int) *http.Client {
-	c := &http.Client{Timeout: time.Duration(timeout) * time.Second}
-	if p := readSocketConfigProxy(); p != "" {
-		if u, err := url.Parse(p); err == nil {
-			c.Transport = &http.Transport{Proxy: http.ProxyURL(u)}
+// chromiumTransport 每操作超时语义（对齐 requests(timeout=N)：连接/握手/首字节各自限时，
+// 不对整个传输设总时限——36MB 目录列表与 500MB zip 在慢链路上靠总时限必然失败）。
+// 基线用 DefaultTransport 克隆：config 无 proxy= 时仍走 HTTP_PROXY/HTTPS_PROXY 环境变量。
+func chromiumTransport(timeout int) *http.Transport {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	d := time.Duration(timeout) * time.Second
+	tr.Proxy = http.ProxyFromEnvironment
+	tr.DialContext = (&net.Dialer{Timeout: min(d, 20*time.Second)}).DialContext
+	tr.TLSHandshakeTimeout = d
+	tr.ResponseHeaderTimeout = d
+	tr.IdleConnTimeout = 90 * time.Second
+	// requests 语义对齐：config 的 proxy= 显式则用；否则读 HTTP_PROXY/HTTPS_PROXY，
+	// 且**不读 NO_PROXY**（requests 传 proxies="" 时同样绕过 no_proxy，由 requests.utils 直接取环境变量）。
+	// Go 的 ProxyFromEnvironment 会读 NO_PROXY，故自行解析。
+	tr.Proxy = func(req *http.Request) (*url.URL, error) {
+		if p := readSocketConfigProxy(); p != "" {
+			if u, err := url.Parse(p); err == nil {
+				return u, nil
+			}
 		}
+		env := os.Getenv("HTTP_PROXY")
+		if req.URL.Scheme == "https" {
+			env = os.Getenv("HTTPS_PROXY")
+		}
+		if env == "" {
+			env = os.Getenv("http_proxy")
+			if req.URL.Scheme == "https" {
+				env = os.Getenv("https_proxy")
+			}
+		}
+		if env == "" {
+			return nil, nil
+		}
+		return url.Parse(env)
 	}
-	return c
+	// ponytail: body 中途停摆无总时限（requests 同样只有 per-read 超时）；真出现卡死再包 context 截止
+	return tr
+}
+
+// fetcher 带 proxy 语义的 HTTP client（总时限不限，超时由 transport 逐操作控制）。
+func fetcher(timeout int) *http.Client {
+	return &http.Client{Transport: chromiumTransport(timeout)}
 }
 
 // fetchLatestChromiumRevision 拉目录列表，取 name 为纯数字中最大者（max(key=int)）。

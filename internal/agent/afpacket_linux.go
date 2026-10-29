@@ -207,28 +207,51 @@ var sendSockets = map[string]*rawPacketSender{}
 
 // replaySendLinux 回放发送实现（export 给 replaySendFn 替换；root/CAP_NET_RAW）。
 func replaySendLinux(iface string, pkt []byte) error {
-	s, ok := sendSockets[iface]
-	if !ok {
-		fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, 0)
-		if err != nil {
-			return err
-		}
-		ifaceObj, err := net.InterfaceByName(iface)
-		if err != nil {
-			unix.Close(fd)
-			return err
-		}
-		if err := unix.Bind(fd, &unix.SockaddrLinklayer{Ifindex: ifaceObj.Index}); err != nil {
-			unix.Close(fd)
-			return err
-		}
-		s = &rawPacketSender{fd: fd, ifindex: ifaceObj.Index}
-		sendSockets[iface] = s
+	s, err := replaySenderFor(iface)
+	if err != nil {
+		return err
 	}
 	addr := &unix.SockaddrLinklayer{Ifindex: s.ifindex}
 	return unix.Sendto(s.fd, pkt, 0, addr)
 }
 
+// replaySenderFor 按网卡取/建发送 socket（缓存复用，对齐 Python _uplink_socket/_downlink_socket）。
+func replaySenderFor(iface string) (*rawPacketSender, error) {
+	if s, ok := sendSockets[iface]; ok {
+		return s, nil
+	}
+	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, 0)
+	if err != nil {
+		return nil, err
+	}
+	ifaceObj, err := net.InterfaceByName(iface)
+	if err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+	if err := unix.Bind(fd, &unix.SockaddrLinklayer{Ifindex: ifaceObj.Index}); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+	s := &rawPacketSender{fd: fd, ifindex: ifaceObj.Index}
+	sendSockets[iface] = s
+	return s, nil
+}
+
+// prepareReplaySockets 对齐 Python _setup_sockets()：上行必建；下行仅在 iface 不同时建。
+func prepareReplaySockets(upIface, downIface string) error {
+	if _, err := replaySenderFor(upIface); err != nil {
+		return err
+	}
+	if downIface != upIface {
+		if _, err := replaySenderFor(downIface); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func init() {
 	replaySendFn = replaySendLinux
+	replayPrepareFn = prepareReplaySockets
 }
