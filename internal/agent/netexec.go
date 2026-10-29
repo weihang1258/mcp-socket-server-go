@@ -119,8 +119,8 @@ func ensureCommand(cmd, installCmd string) bool {
 	if _, err := exec.LookPath(cmd); err == nil {
 		return true
 	}
-	if installCmd != "" { // Python：subprocess.run(install_cmd, shell=True) 后复查（netutils.py ensure_command）
-		execCmdWith(installCmd, "", cleanEnv(os.Environ()), true)
+	if installCmd != "" { // Python：裸 subprocess.run(install_cmd, shell=True)——全量继承环境（netutils.py:201，不经清理）
+		execCmdWith(installCmd, "", os.Environ(), true)
 		_, err := exec.LookPath(cmd)
 		return err == nil
 	}

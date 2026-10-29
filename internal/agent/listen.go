@@ -55,6 +55,7 @@ func stopListenForTest() {
 
 type listenInstance struct {
 	port    int
+	host    *string // 构造参数留存：死实例分支 start_server 用旧配置重启（Python 同语义）
 	mu      sync.Mutex
 	lns     []net.Listener
 	conns   map[net.Conn]struct{}
@@ -81,40 +82,44 @@ func (li *listenInstance) dataCopy() []byte {
 	return out
 }
 
-// listenStart 实现 dt171：ss 存活跳过 / 死了重启 / 无则新建。
-// 无条件回 {"pid":[...]}——bind 失败也回（可能为空）列表，不报错（回退后契约）。
+// listenStart 实现 dt171（handlers.py:381-389 三分支）：
+// 存活 → pass（payload 值与类型都不碰）；死实例 → 用旧 host/port 重启（payload 不展开）；
+// 无 ss → SocketServerListen(**data)（唯一键检查点）。无条件回 {"pid":[...]}（bind 失败也回，quirk）。
 func listenStart(payload []byte) ([]byte, error) {
-	// Python：已存活分支不展开 **data（`if ss and ss.pid(): pass`）；未运行才构造 → 键检查限此路径
 	listenMu.Lock()
 	defer listenMu.Unlock()
-	needKeys := ss == nil || len(ss.pids()) == 0
-	if needKeys {
-		if err := strictKeys(payload, "host", "port"); err != nil {
+	switch {
+	case ss != nil && len(ss.pids()) > 0:
+		// 存活：pass
+	case ss != nil:
+		// 死实例 start_server()：旧配置重启，本次 payload 完全不展开
+		ss.shutdown()
+		inst, err := newListenInstance(ss.host, ss.port)
+		if err != nil {
+			log.Printf("listen start 失败: %v", err)
+			ss = &listenInstance{port: ss.port, host: ss.host, conns: map[net.Conn]struct{}{}, q: make(chan []byte, 1024)}
+		} else {
+			ss = inst
+		}
+		time.Sleep(5 * time.Second) // Python start_server 同步 sleep(5) 再验 pid（wire 可观察）
+	default:
+		if err := strictKeys("SocketServerListen", payload, "host", "port"); err != nil {
 			return nil, err
 		}
-	}
-	var p struct {
-		Host *string `json:"host"`
-		Port int     `json:"port"`
-	}
-	if err := json.Unmarshal(payload, &p); err != nil {
-		return nil, err
-	}
-	if p.Port == 0 {
-		p.Port = 30001 // SocketServerListen 默认端口
-	}
-
-	if ss != nil && len(ss.pids()) > 0 {
-		// 存活：跳过
-	} else if ss != nil {
-		ss.shutdown()
-		ss = nil
-	}
-	if ss == nil {
+		var p struct {
+			Host *string `json:"host"`
+			Port int     `json:"port"`
+		}
+		if err := json.Unmarshal(payload, &p); err != nil {
+			return nil, err
+		}
+		if p.Port == 0 {
+			p.Port = 30001 // SocketServerListen 默认端口
+		}
 		inst, err := newListenInstance(p.Host, p.Port)
 		if err != nil {
 			log.Printf("listen start 失败: %v", err)
-			ss = &listenInstance{port: p.Port, conns: map[net.Conn]struct{}{}, q: make(chan []byte, 1024)}
+			ss = &listenInstance{port: p.Port, host: p.Host, conns: map[net.Conn]struct{}{}, q: make(chan []byte, 1024)}
 			// start_server 吞异常返回 None；ss 残留死对象 → pid() 照常解析（quirk）
 		} else {
 			ss = inst
@@ -128,6 +133,7 @@ func listenStart(payload []byte) ([]byte, error) {
 func newListenInstance(host *string, port int) (*listenInstance, error) {
 	inst := &listenInstance{
 		port:  port,
+		host:  host,
 		conns: map[net.Conn]struct{}{},
 		q:     make(chan []byte, 1024),
 	}
@@ -281,15 +287,24 @@ func listenClean() ([]byte, error) {
 	return []byte("ok"), nil
 }
 
-// listenSave dt173：未启动 → b"error"；成功写盘 → b"ok"；缺 file 键 → error 断连。
+// listenSave dt173（handlers.py:408-420）：json.loads 在 ss 判定**之前**——
+// 非法 JSON 无条件断连；未启动 → b"error"（键不查）；运行中 data_writefile(**data)
+// 未知/缺 file 键 → TypeError 断连。
 func listenSave(payload []byte) ([]byte, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return nil, err // json.loads 先行 → 非法 JSON 无条件断连
+	}
 	listenMu.Lock()
 	defer listenMu.Unlock()
 	if ss == nil || len(ss.pids()) == 0 {
-		return []byte("error"), nil // Python：未运行先回 b"error"，不展开 **data
+		return []byte("error"), nil // 未运行先回 b"error"，不展开 **data
 	}
-	if err := strictKeys(payload, "file"); err != nil {
+	if err := strictKeys("data_writefile", payload, "file"); err != nil {
 		return nil, err // data_writefile(**data) TypeError → 断连
+	}
+	if err := requireKeys("data_writefile", payload, "file"); err != nil {
+		return nil, err
 	}
 	var p struct {
 		File string `json:"file"`

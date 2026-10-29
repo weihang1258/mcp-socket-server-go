@@ -290,3 +290,8 @@ frame(字节层) → config/svc(含 serve 别名+unit 模板)
 | 13 | upgrade_run 轮询拆分对方括号 IPv6（`[fd00::5]:9000`）剥括号（Python rpartition 保留括号必败） | Go 行为更优；普通裸 v6 的 fd00::5 截断 quirk 仍照抄 |
 | 14 | 封堵拨测连接禁 keep-alive 显式配置（Python 靠每请求新 Session） | 语义等价，实现路径不同 |
 | 15 | mcp 默认 bind 端口 8080 → **9010**（2026-10-29 用户指定） | MCP_BIND_PORT env 仍可覆盖回任意端口 |
+| 16 | dt1 stdout/stderr/encoding 键收编白名单但**值语义接线差异**：Go 恒 PIPE+utf-8（Python 原样传 Popen——encoding=null→bytes→json.dumps TypeError 断连、stdout=null→继承父 fd） | 桥自身 dt1 只发 args/cwd/wait；暴露面仅第三方移植客户端 |
+| 17 | boce 弹窗/未知模式**零流量副作用**：Python 判定在 goto 之后（真实导航+耗 timeout+3s），Go 预检模式后秒回 false | 恒失败语义相同；对目标不产生访问流量 |
+| 18 | chromedp Navigate 等 load（pyppeteer domcontentloaded）；timeout ctx 覆盖 tab 创建（Python 只罩 goto） | 判定通常不受影响（jumped 先置位）；冷启+小 timeout 时 Go 先败 |
+| 19 | chromium_path 变更：Go 关旧建新；Python 忽略变更沿用旧 browser 直至自然死亡 | Go 行为更合理；wire 不可观察（响应形态一致） |
+| 20 | 无 atexit 关 browser：Go 进程退出不杀 chromium 子进程，孤儿可能累积 | 运维级；Python boce.py:289-298 atexit 注册（活代码）；必要时加 Pdeathsig |

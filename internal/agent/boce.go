@@ -28,6 +28,7 @@ var ensureChromiumFn func(chromiumPath string) bool
 func setEnsureChromium(f func(string) bool) { ensureChromiumFn = f }
 
 // effectiveChromium 测试环境变量优先，其次 payload，再默认。
+// payloadPath 显式空串按 Python data.get 语义保留（isfile("") 假 → 下载失败），不走默认。
 func effectiveChromium(payloadPath string) string {
 	if p := os.Getenv("SOCKETSTACK_TEST_CHROMIUM"); p != "" {
 		return p
@@ -67,17 +68,35 @@ func doBoce(payload []byte) ([]byte, error) {
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, err
 	}
-	// Python 透传语义：count=0 → range(0) 0 次；thread_count=0 → ValueError 断连；
-	// timeout=0 → requests 立即超时全 fail。chromium_path=null → TypeError 断连。
-	if v, ok := raw["thread_count"]; ok && strings.TrimSpace(string(v)) == "0" {
-		return nil, errors.New("max_workers must be greater than 0") // ValueError 冒泡
+	// 缺省键对齐 Python boce() 签名（boce.py:460）：count=1 / timeout=3 / mode="封堵"。
+	// 显式 count<=0 → range(count) 空 → total=0（Python run_multiple 空结果集）。
+	count := 1
+	if _, ok := raw["count"]; ok {
+		count = req.Count
+		if count < 0 {
+			count = 0
+		}
+	}
+	timeout := 3
+	if _, ok := raw["timeout"]; ok {
+		timeout = req.Timeout
+	}
+	mode := "封堵"
+	if _, ok := raw["mode"]; ok {
+		mode = req.Mode
+	}
+
+	// chromium 预检链（全模式执行，对齐 handlers.py 顺序）；chromium_path 键缺失才走默认，
+	// 显式空串保留（Python data.get 原样返回 "" → isfile 假 → 下载失败）
+	chromium := defaultChromiumPath
+	if _, ok := raw["chromium_path"]; !ok {
+		chromium = effectiveChromium("")
+	} else if string(raw["chromium_path"]) != "null" {
+		chromium = req.Chromium
 	}
 	if v, ok := raw["chromium_path"]; ok && strings.TrimSpace(string(v)) == "null" {
 		return nil, errors.New("os.path.isfile(None) TypeError") // 冒泡断连
 	}
-
-	// chromium 预检链（全模式执行，对齐 handlers.py 顺序）
-	chromium := effectiveChromium(req.Chromium)
 	if !chromiumUsable(chromium) {
 		log.Printf("chromium 不存在: %s，尝试自动下载...", chromium)
 		fn := ensureChromiumFn
@@ -109,13 +128,22 @@ func doBoce(payload []byte) ([]byte, error) {
 		}
 	}
 
-	// 拨测分派
-	switch req.Mode {
-	case "封堵":
-		out := boceBlock(req.Url, req.Count, req.Interval, req.ThreadCount, req.Timeout)
+	// 拨测分派（Python boce.py:466-476）：缺省/封堵 → RequestChecker（requests）；
+	// 重定向/弹窗/未知 → PyppeteerChecker。thread_count 校验仅封堵分支生效
+	//（max_workers ValueError 只在 RequestChecker.run_multiple 抛）
+	switch mode {
+	case "封堵", "":
+		tc := 1
+		if _, ok := raw["thread_count"]; ok {
+			tc = req.ThreadCount
+			if tc <= 0 {
+				return nil, errors.New("max_workers must be greater than 0") // ValueError 冒泡
+			}
+		}
+		out := boceBlock(req.Url, count, req.Interval, tc, timeout)
 		return dt131Frame(out), nil
 	default:
-		return boceBrowser(payload, req.Mode) // chromedp 实现（boce_browser.go）
+		return boceBrowser(payload, mode, count, timeout) // chromedp 实现（boce_browser.go）
 	}
 }
 

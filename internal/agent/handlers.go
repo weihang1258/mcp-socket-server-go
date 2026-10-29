@@ -38,7 +38,10 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		}
 		return json.Marshal(m)
 	case 7: // isfile：{"file": path} → {"res":bool}；**data 未知键 TypeError → 断连
-		if err := strictKeys(payload, "file"); err != nil {
+		if err := strictKeys("isfile", payload, "file"); err != nil {
+			return nil, err
+		}
+		if err := requireKeys("isfile", payload, "file"); err != nil {
 			return nil, err
 		}
 		var p struct {
@@ -50,7 +53,10 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		fi, err := os.Stat(p.File)
 		return json.Marshal(resBool(err == nil && !fi.IsDir()))
 	case 8: // isdir：{"dir": path} → {"res":bool}；**data 未知键 → 断连
-		if err := strictKeys(payload, "dir"); err != nil {
+		if err := strictKeys("isdir", payload, "dir"); err != nil {
+			return nil, err
+		}
+		if err := requireKeys("isdir", payload, "dir"); err != nil {
 			return nil, err
 		}
 		var p struct {
@@ -62,7 +68,10 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		fi, err := os.Stat(p.Dir)
 		return json.Marshal(resBool(err == nil && fi.IsDir()))
 	case 9: // mkdir：os.makedirs 语义——已存在 → FileExistsError → 断连（quirk）；递归创建；未知键 → 断连
-		if err := strictKeys(payload, "dir"); err != nil {
+		if err := strictKeys("mkdir", payload, "dir"); err != nil {
+			return nil, err
+		}
+		if err := requireKeys("mkdir", payload, "dir"); err != nil {
 			return nil, err
 		}
 		var p struct {
@@ -79,17 +88,24 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		}
 		return json.Marshal(resNull())
 	case 10: // 改 MTU：解析两种格式；不等则设置 + sleep 5s；ifconfig 缺失 → 断连；未知键 → 断连
-		if err := strictKeys(payload, "eth", "value"); err != nil {
+		if err := strictKeys("mtu", payload, "eth", "value"); err != nil {
+			return nil, err
+		}
+		if err := requireKeys("mtu", payload, "eth"); err != nil {
 			return nil, err
 		}
 		var p struct {
 			Eth   string `json:"eth"`
-			Value int    `json:"value"`
+			Value *int   `json:"value"`
 		}
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return nil, err
 		}
-		set, err := setMTU(p.Eth, p.Value)
+		value := 2000 // Python mtu(eth, value=2000) 默认值（netutils.py:113）
+		if p.Value != nil {
+			value = *p.Value
+		}
+		set, err := setMTU(p.Eth, value)
 		if err != nil {
 			return nil, err
 		}
@@ -114,7 +130,10 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 	case 14: // 获版本号：json.dumps(VERSION) 带引号 JSON 字符串
 		return json.Marshal(Version)
 	case 15: // 解压 zip：恒回裸 b"ok"（unzip 缺失/失败也 ok）；**data 未知键 → 断连
-		if err := strictKeys(payload, "file", "outdir", "passwd", "overwrite"); err != nil {
+		if err := strictKeys("unzip", payload, "file", "outdir", "passwd", "overwrite"); err != nil {
+			return nil, err
+		}
+		if err := requireKeys("unzip", payload, "file"); err != nil {
 			return nil, err
 		}
 		return unzipCmd(payload)
@@ -129,7 +148,10 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 	case 175: // socket监听-停止监听
 		return listenStop()
 	case 18: // ensure_command：which → 装后复查（install_cmd shell 跑一次再查）；未知键 → 断连
-		if err := strictKeys(payload, "cmd", "install_cmd"); err != nil {
+		if err := strictKeys("ensure_command", payload, "cmd", "install_cmd"); err != nil {
+			return nil, err
+		}
+		if err := requireKeys("ensure_command", payload, "cmd"); err != nil {
 			return nil, err
 		}
 		var p struct {
@@ -151,7 +173,7 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 	case 0: // pcap 回放：truthy 校验固定文案；stats JSON 裸文本
 		return replayFiles(payload)
 	case 5: // 抓包开始：{"res":bool}（回退后契约，无 error）；严格键（**data TypeError）
-		if err := strictKeys(payload, "eth", "path", "extended", "single_queue"); err != nil {
+		if err := strictKeys("tcpdump", payload, "eth", "path", "extended", "single_queue"); err != nil {
 			return nil, err
 		}
 		var p struct {
@@ -176,7 +198,7 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		}
 		return json.Marshal(resBool(ok))
 	case 6: // 抓包停止：严格键
-		if err := strictKeys(payload, "path"); err != nil {
+		if err := strictKeys("tcpdump_stop", payload, "path"); err != nil {
 			return nil, err
 		}
 		var p struct {
@@ -203,8 +225,9 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 	return nil, nil
 }
 
-// strictKeys 校验 payload 键白名单（Python **data 未知键 TypeError → 断连）。
-func strictKeys(payload []byte, allowed ...string) error {
+// strictKeys 校验 payload 键白名单（Python **data 未知键 TypeError → 断连）；
+// fn 仅用于错误文案对齐 Python TypeError 的真实函数名。
+func strictKeys(fn string, payload []byte, allowed ...string) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return err
@@ -215,7 +238,22 @@ func strictKeys(payload []byte, allowed ...string) error {
 	}
 	for k := range raw {
 		if !set[k] {
-			return fmt.Errorf("%s() got unexpected keyword argument %q", "tcpdump", k)
+			return fmt.Errorf("%s() got unexpected keyword argument %q", fn, k)
+		}
+	}
+	return nil
+}
+
+// requireKeys 缺必需键/值为 null → TypeError（Python **data 缺位置参数 → 断连）。
+func requireKeys(fn string, payload []byte, required ...string) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return err
+	}
+	for _, k := range required {
+		r, ok := raw[k]
+		if !ok || string(r) == "null" {
+			return fmt.Errorf("%s() missing required argument: '%s'", fn, k)
 		}
 	}
 	return nil

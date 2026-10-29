@@ -30,93 +30,150 @@ type execExitError = exec.ExitError
 // - env 键存在时**整替换**子进程环境（Python dict(os.environ if env is None else env)）
 // - wait=false → 立即返回 None → json "null" 仍回 gzip 帧（quirk）
 // - 响应 [4B i][gzip JSON {code,stdout,stderr}]；执行异常 → {code:-1,stderr:str(e)}
+// pyTruthy Python 真值语义（wait/shell/use_run 数值/字符串/容器都按 Python 真值）。
+func pyTruthy(raw json.RawMessage) bool {
+	switch string(raw) {
+	case "null", "false", "0":
+		return false
+	case "true":
+		return true
+	}
+	var f float64
+	if json.Unmarshal(raw, &f) == nil {
+		return f != 0
+	}
+	var str string
+	if json.Unmarshal(raw, &str) == nil {
+		return str != ""
+	}
+	var arr []json.RawMessage
+	if json.Unmarshal(raw, &arr) == nil {
+		return len(arr) > 0
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) == nil {
+		return len(obj) > 0
+	}
+	return false
+}
+
+// jsonTypeName Python 类型名（{code:-1} 兜底消息用）。
+func jsonTypeName(raw json.RawMessage) string {
+	switch string(raw) {
+	case "null":
+		return "NoneType"
+	case "true", "false":
+		return "bool"
+	}
+	var f float64
+	if json.Unmarshal(raw, &f) == nil {
+		return "int"
+	}
+	var str string
+	if json.Unmarshal(raw, &str) == nil {
+		return "str"
+	}
+	var arr []json.RawMessage
+	if json.Unmarshal(raw, &arr) == nil {
+		return "list"
+	}
+	return "dict"
+}
+
+// badType Python exec_cmd_subprocess 内 TypeError → except 兜底帧（连接存活）。
+func badType(msg string) ([]byte, error) { return errGzipFrame(-1, "", msg) }
+
 func cmdExec(payload []byte) ([]byte, error) {
-	// netutils.py:64 签名全键：shell/stdout/stderr/encoding/use_run 合法（本实现仅接线差异项）
-	var p struct {
-		Args   json.RawMessage   `json:"args"`
-		Cwd    string            `json:"cwd"`
-		Env    map[string]string `json:"env"`
-		Wait   *bool             `json:"wait"`
-		Shell  *bool             `json:"shell"`
-		UseRun *bool             `json:"use_run"`
-	}
-	if err := json.Unmarshal(payload, &p); err != nil {
-		return nil, err
-	}
 	var raw1 map[string]json.RawMessage
-	json.Unmarshal(payload, &raw1)
+	if err := json.Unmarshal(payload, &raw1); err != nil {
+		return nil, err // handlers 层 json.loads 异常 → 断连
+	}
 	if _, ok := raw1["args"]; !ok {
-		return nil, errors.New("exec_cmd_subprocess missing args") // Python TypeError
+		return nil, errors.New("exec_cmd_subprocess() missing required argument: 'args'")
 	}
 	for k := range raw1 {
 		switch k {
 		case "args", "cwd", "env", "wait", "shell", "stdout", "stderr", "encoding", "use_run":
 		default:
-			return nil, fmt.Errorf("exec_cmd_subprocess unexpected kwarg %q", k)
+			return nil, fmt.Errorf("exec_cmd_subprocess() got unexpected keyword argument %q", k)
 		}
 	}
+	// 值类型错误发生在 Python try 块内 → except 兜底 {code:-1,stderr}，连接存活（netutils.py:84）
+	args, argsIsStr := raw1["args"], false
+	var argsStr string
+	var argv []string
+	if string(args) == "null" {
+		return badType("'NoneType' object is not iterable") // args=null
+	}
+	if err := json.Unmarshal(args, &argsStr); err == nil {
+		argsIsStr = true
+	} else if err := json.Unmarshal(args, &argv); err != nil {
+		return badType("'" + jsonTypeName(args) + "' object is not iterable") // args=5/true/{}
+	}
 	wait := true
-	if p.Wait != nil {
-		wait = *p.Wait
+	if r, ok := raw1["wait"]; ok {
+		wait = pyTruthy(r)
 	}
 	shell := true // Python 默认 shell=True
-	if p.Shell != nil {
-		shell = *p.Shell
+	if r, ok := raw1["shell"]; ok {
+		shell = pyTruthy(r)
 	}
-	useRun := p.UseRun != nil && *p.UseRun
+	useRun := false
+	if r, ok := raw1["use_run"]; ok {
+		useRun = pyTruthy(r)
+	}
 	// use_run 分支无视 wait：subprocess.run 阻塞 → {code,stdout,stderr}
 	if useRun {
 		wait = true
 	}
-
-	// args 二态：字符串（shell 路径）或列表（argv 路径，Python isinstance(args, str) 为假）
-	var argsStr string
-	var argv []string
-	if len(p.Args) > 0 && p.Args[0] == '"' {
-		if err := json.Unmarshal(p.Args, &argsStr); err != nil {
-			return nil, err
+	cwd := ""
+	if r, ok := raw1["cwd"]; ok && string(r) != "null" {
+		if err := json.Unmarshal(r, &cwd); err != nil {
+			return badType("expected str, bytes or os.PathLike object, not " + jsonTypeName(r))
 		}
-	} else if err := json.Unmarshal(p.Args, &argv); err != nil {
-		return nil, err
-	}
-	if argsStr != "" && os.Geteuid() == 0 {
-		argsStr = stripSudoPrefix(argsStr) // 仅 shell+str 路径剥 sudo（Python 同条件）
 	}
 	env := cleanEnv(os.Environ())
-	if p.Env != nil {
-		env = cleanEnv(envMapToSlice(p.Env))
+	if r, ok := raw1["env"]; ok && string(r) != "null" {
+		var em map[string]string
+		if err := json.Unmarshal(r, &em); err != nil {
+			return badType("env: expected dict, got " + jsonTypeName(r))
+		}
+		env = cleanEnv(envMapToSlice(em))
+	}
+
+	// 形态归一（Python subprocess 语义）：
+	//   列表+shell: ['/bin/sh','-c'] + args（sh -c cmd 其余作 $0…）；空列表 → sh -c 缺参（code 2）
+	//   列表+!shell: argv 直执行；空列表 → Popen([]) IndexError
+	//   字符串+shell: sh -c（root 剥裸 sudo——仅此路径，netutils.py:67）
+	//   字符串+!shell: 整串当可执行名 → 必 FileNotFoundError → {code:-1}
+	switch {
+	case argsIsStr && shell:
+		if os.Geteuid() == 0 {
+			argsStr = stripSudoPrefix(argsStr)
+		}
+		argv = []string{"sh", "-c", argsStr}
+	case argsIsStr:
+		argv = []string{argsStr}
+	case len(argv) == 0 && shell:
+		argv = []string{"sh", "-c"}
+	case len(argv) == 0:
+		return badType("list index out of range")
+	case shell:
+		argv = append([]string{"sh", "-c", argv[0]}, argv[1:]...)
 	}
 
 	var code int
 	var stdout, stderr string
-	switch {
-	case argv != nil && !shell:
-		// Python shell=False + 列表：argv 直执行（无 sh -c）
-		if wait || useRun {
-			code, stdout, stderr = execArgvWait(argv, p.Cwd, env)
-		} else {
-			if code, _, stderr = execArgvStart(argv, p.Cwd, env); code == -1 {
-				return errGzipFrame(code, "", stderr)
-			}
-			return gzipFrame([]byte("null")), nil
-		}
-	default:
-		args := argsStr
-		if argv != nil { // shell=True + 列表：Python 视作单命令名（args[0]），罕见路径按 shell 拼接
-			args = argv[0]
-		}
-		if wait {
-			code, stdout, stderr = execCmdWith(args, p.Cwd, env, true)
-		} else {
-			// 异步：Start 不等（Python Popen 不 communicate → 返回 None）；
-			// Start 失败 = Python Popen 抛异常 → except → {code:-1,...} gzip JSON（非 "null"）
-			if code, _, stderr = execCmdWith(args, p.Cwd, env, false); code == -1 {
-				return errGzipFrame(code, "", stderr) // 复审 F4：stderr 进 stderr 字段
-			}
-			return gzipFrame([]byte("null")), nil
-		}
+	if wait {
+		code, stdout, stderr = execArgvWait(argv, cwd, env)
+		return errGzipFrame(code, stdout, stderr)
 	}
-	return errGzipFrame(code, stdout, stderr)
+	// 异步：Start 不等（Python Popen 不 communicate → 返回 None）；
+	// Start 失败 = Python Popen 抛异常 → except → {code:-1,...} gzip JSON（非 "null"）
+	if code, _, stderr = execArgvStart(argv, cwd, env); code == -1 {
+		return errGzipFrame(code, "", stderr) // 复审 F4：stderr 进 stderr 字段
+	}
+	return gzipFrame([]byte("null")), nil
 }
 
 // execArgvWait execCmdArgs 带工作目录/环境的 argv 变体（dt1 shell=false 路径）。
@@ -225,18 +282,21 @@ func gzipFrame(body []byte) []byte {
 // unzipCmd dt15：unzip 可用性检查失败静默返回；list-args 防注入；
 // cwd=dirname(file)；恒回 b"ok"（unzip 缺失/执行失败也不影响）。
 func unzipCmd(payload []byte) ([]byte, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return nil, err
+	}
 	var p struct {
-		File      string `json:"file"`
-		Outdir    string `json:"outdir"`
-		Passwd    string `json:"passwd"`
-		Overwrite *bool  `json:"overwrite"`
+		File   string `json:"file"`
+		Outdir string `json:"outdir"`
+		Passwd string `json:"passwd"`
 	}
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, err
 	}
 	overwrite := true
-	if p.Overwrite != nil {
-		overwrite = *p.Overwrite
+	if r, ok := raw["overwrite"]; ok {
+		overwrite = pyTruthy(r) // Python truthiness：null → falsy 不加 -o（netutils.py:239）
 	}
 	if code, _, _ := execCmdArgs("unzip", "-v"); code != 0 { // Python 实跑 unzip -v 且要求 exit 0
 		return []byte("ok"), nil // quirk：缺失/不可用静默返回，仍 ok
