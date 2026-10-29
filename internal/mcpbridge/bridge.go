@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -171,12 +173,27 @@ func (m *LockManager) ReleaseTarget(target string, class Lk, key string) {
 
 // ---- 注册表（registry.py 移植）----
 
+// mkdirForFile 建 db 文件的父目录。默认 db_path 是 /var/lib/socketstack/mcp.db
+// （§12#11 有意改绝对路径），全新机器上目录不存在——sqlite 只会回
+// "unable to open database file: out of memory (14)"，看不出真因。
+// 纯文件名（无目录部分，如 Python 默认的 ./x.db）直接跳过。
+func mkdirForFile(path string) error {
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	return os.MkdirAll(dir, 0o755)
+}
+
 type Registry struct {
 	mu   sync.Mutex
 	conn *sql.DB
 }
 
 func OpenRegistry(dbPath string) (*Registry, error) {
+	if err := mkdirForFile(dbPath); err != nil {
+		return nil, err
+	}
 	conn, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
@@ -371,6 +388,9 @@ type Audit struct {
 }
 
 func OpenAudit(dbPath string, retentionDays int) (*Audit, error) {
+	if err := mkdirForFile(dbPath); err != nil {
+		return nil, err
+	}
 	conn, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err

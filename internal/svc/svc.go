@@ -48,6 +48,10 @@ func AgentUnitContent(execPath string) string {
 	return strings.ReplaceAll(agentUnitTemplate, "{exec_path}", execPath)
 }
 
+// MCPUnitContent mcp 单元。StateDirectory 让 systemd 在 ExecStart 前建好
+// /var/lib/socketstack（默认 db_path/download_dir 的父目录，§12#11 改的绝对路径）。
+// 没有它，全新机器上首次启动会因目录不存在直接 Fatal（sqlite 报的
+// "unable to open database file: out of memory" 还看不出真因）。
 func MCPUnitContent() string {
 	return `[Unit]
 Description=socketstack MCP Bridge
@@ -56,6 +60,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/var/lib/socketstack
+StateDirectory=socketstack
 ExecStart=` + BinPath + ` mcp serve
 Restart=on-failure
 

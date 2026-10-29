@@ -41,6 +41,7 @@ func TestMCPUnitContent(t *testing.T) {
 		"ExecStart=/usr/local/bin/socketstack mcp serve",
 		"Restart=on-failure",
 		"WorkingDirectory=/var/lib/socketstack",
+		"StateDirectory=socketstack", // systemd 建 /var/lib/socketstack，否则首次启动 Fatal
 		"WantedBy=multi-user.target",
 	} {
 		if !strings.Contains(got, want) {

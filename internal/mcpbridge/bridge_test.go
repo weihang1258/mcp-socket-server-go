@@ -192,3 +192,30 @@ func TestAuditConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// 默认 db_path 是 /var/lib/socketstack/mcp.db（§12#11 有意改成绝对路径），全新机器上
+// 该目录不存在。Python 默认 ./mcp_socket_server.db 因 cwd 必存在而踩不到，Go 这条改动
+// 把它变成硬崩（log.Fatalf "unable to open database file"）。Open 层须自建父目录。
+func TestOpenRegistryCreatesMissingParentDir(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "a", "b", "fresh.db")
+	r, err := OpenRegistry(db)
+	if err != nil {
+		t.Fatalf("父目录缺失时须自建: %v", err)
+	}
+	defer r.Close()
+	if _, err := os.Stat(db); err != nil {
+		t.Fatalf("db 文件未创建: %v", err)
+	}
+}
+
+func TestOpenAuditCreatesMissingParentDir(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "x", "y", "fresh.db")
+	a, err := OpenAudit(db, 90)
+	if err != nil {
+		t.Fatalf("父目录缺失时须自建: %v", err)
+	}
+	defer a.Close()
+	if _, err := os.Stat(db); err != nil {
+		t.Fatalf("db 文件未创建: %v", err)
+	}
+}
