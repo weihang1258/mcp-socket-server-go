@@ -516,7 +516,13 @@ func TestChromiumProxyNoProxyBypass(t *testing.T) {
 		defer func() { upgradeRoot = prev }()
 		upgradeRoot = dir
 		t.Setenv("HTTP_PROXY", "http://env:1") // 有 env 也不得静默改用
-		for _, bad := range []string{"http://", "h.com:", "::::bad", "%zz"} {
+		for _, bad := range []string{
+			"http://", "h.com:", "::::bad", "%zz",
+			// 端口越界：requests 抛 Port out of range 0-65535；Atoi 只看数字形态会放过
+			"h.com:65536", "h.com:99999", "h.com:-1", "h.com:0",
+			// 未加方括号的 IPv6：Go 会把它整个当 host，requests 的 urlsplit 也解析不了
+			"::1:8080",
+		} {
 			os.WriteFile(filepath.Join(dir, "config"), []byte("proxy="+bad+"\n"), 0o644)
 			u, err := chromiumProxyFunc()(req("http://example.invalid/x"))
 			if err == nil || u != nil {

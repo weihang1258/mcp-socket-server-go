@@ -414,13 +414,19 @@ func parseProxyURL(raw string) *url.URL {
 	return nil
 }
 
-// usableProxyURL host 必须解析出主机名；带端口时端口须为数字；"h.com:" 这类尾冒号视为坏值。
+// usableProxyURL host 必须解析出主机名；端口须为 1-65535 的数字；"h.com:" 这类尾冒号
+// 与未加方括号的 IPv6（"::1:8080" 会被整个当成 host）都视为坏值——requests 对前者
+// 抛 InvalidProxyURL、对越界端口抛 Port out of range，这里对齐成"不可用"。
 func usableProxyURL(u *url.URL) bool {
 	if u.Hostname() == "" || strings.HasSuffix(u.Host, ":") {
 		return false
 	}
+	if strings.Count(u.Host, ":") > 1 && !strings.HasPrefix(u.Host, "[") {
+		return false // 裸 IPv6 缺方括号，host/port 无从拆
+	}
 	if p := u.Port(); p != "" {
-		if _, err := strconv.Atoi(p); err != nil {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 1 || n > 65535 {
 			return false
 		}
 	}

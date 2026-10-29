@@ -126,7 +126,10 @@ func TestSendSocketStaleClassification(t *testing.T) {
 		// 归为 stale 会让持续 down 的网卡每包重建一次 socket（实测 built 1→2→3→4）。
 		{unix.ENETDOWN, false},
 		{unix.EBADF, true},
-		{unix.EINVAL, true},
+		// EINVAL 的真实来源是帧短于以太头（真机实测 len 0/1/5/13 → EINVAL，14 → nil），
+		// 不是句柄失效——replayFile 已有 len<14 护栏，但别的入口直接调时若把它当 stale
+		// 就会每包 drop+重建一次（AF_PACKET close 实测 28ms/次）。
+		{unix.EINVAL, false},
 		{unix.ENODEV, true},
 		{unix.ENOBUFS, false},
 		{nil, false},
@@ -162,9 +165,6 @@ func TestReplaySendSelfHealsOnStaleErrno(t *testing.T) {
 		sendMu.Lock()
 		sendSockets, openSendSocket, sendToFn = savedSockets, savedOpen, savedSendTo
 		sendMu.Unlock()
-		rebuildBackoffMu.Lock()
-		rebuildBackoffAt = nil
-		rebuildBackoffMu.Unlock()
 	})
 
 	if err := replaySendLinux("lo", make([]byte, 16)); err != nil {
@@ -185,45 +185,6 @@ func TestReplaySendSelfHealsOnStaleErrno(t *testing.T) {
 	}
 }
 
-// 网卡长期不可用（重建持续失败）时不得每包都建 socket：冷却期内跳过重建。
-func TestReplaySendRebuildBackoff(t *testing.T) {
-	sendMu.Lock()
-	savedSockets, savedOpen, savedSendTo := sendSockets, openSendSocket, sendToFn
-	sendSockets = map[string]*rawPacketSender{}
-	var attempts atomic.Int32
-	openSendSocket = func(iface string) (*rawPacketSender, error) {
-		if attempts.Add(1) == 1 {
-			return &rawPacketSender{fd: -1, ifindex: 7}, nil // 首次建成功
-		}
-		return nil, unix.ENODEV // 之后的重建恒失败（网卡长期不存在）
-	}
-	sendToFn = func(fd int, pkt []byte, ifindex int) error { return unix.ENXIO }
-	sendMu.Unlock()
-	t.Cleanup(func() {
-		sendMu.Lock()
-		sendSockets, openSendSocket, sendToFn = savedSockets, savedOpen, savedSendTo
-		sendMu.Unlock()
-		rebuildBackoffMu.Lock()
-		rebuildBackoffAt = nil
-		rebuildBackoffMu.Unlock()
-	})
-
-	// 首次：建成功 → 发送 ENXIO → drop → 重建失败（attempts=2）
-	if err := replaySendLinux("lo", make([]byte, 16)); err == nil {
-		t.Fatal("重建失败须返回错误")
-	}
-	first := attempts.Load()
-	if first != 2 {
-		t.Fatalf("首次应建 1 次 + 重建失败 1 次 = 2，实际 %d", first)
-	}
-	for i := 0; i < 5; i++ {
-		replaySendLinux("lo", make([]byte, 16))
-	}
-	if got := attempts.Load(); got != first {
-		t.Fatalf("冷却期内不得重复重建：首次 %d 次，5 次调用后 %d 次", first, got)
-	}
-}
-
 // 网卡持续 down：不得重建 socket（ENETDOWN 是链路状态，不是句柄失效）。
 // 真机实测绑定 down 的网卡成功、网卡 up 回来后同一句柄立刻可发。
 func TestReplaySendDownIfaceDoesNotRebuild(t *testing.T) {
@@ -241,9 +202,6 @@ func TestReplaySendDownIfaceDoesNotRebuild(t *testing.T) {
 		sendMu.Lock()
 		sendSockets, openSendSocket, sendToFn = savedSockets, savedOpen, savedSendTo
 		sendMu.Unlock()
-		rebuildBackoffMu.Lock()
-		rebuildBackoffAt = nil
-		rebuildBackoffMu.Unlock()
 	})
 
 	for i := 0; i < 3; i++ {
@@ -301,9 +259,6 @@ func TestReplaySendConcurrentStaleNoPacketLost(t *testing.T) {
 		sendMu.Lock()
 		sendSockets, openSendSocket, sendToFn = savedSockets, savedOpen, savedSendTo
 		sendMu.Unlock()
-		rebuildBackoffMu.Lock()
-		rebuildBackoffAt = nil
-		rebuildBackoffMu.Unlock()
 	})
 
 	if _, err := replaySenderFor("lo"); err != nil {
@@ -335,5 +290,43 @@ func TestReplaySendConcurrentStaleNoPacketLost(t *testing.T) {
 	}
 	if got := okSends.Load(); got != 2 {
 		t.Fatalf("两个包都须成功送达（各自一次重试），实际成功 %d 次", got)
+	}
+}
+
+// 网卡回来之后必须**立刻**能发：不得有冷却期黑洞。
+// 换序（先查网卡再建 socket）后，网卡不存在时每次重试只有 InterfaceByName 的成本
+// （实测 17µs/包），低于恢复延迟，所以冷却整段删掉——它换来的是「网卡刚回来那 2 秒
+// 整段回放作废」，代价远大于收益。
+func TestReplaySendRecoversImmediatelyAfterIfaceReturns(t *testing.T) {
+	sendMu.Lock()
+	savedSockets, savedOpen, savedSendTo := sendSockets, openSendSocket, sendToFn
+	sendSockets = map[string]*rawPacketSender{}
+	var gone atomic.Bool
+	gone.Store(true) // 起始状态：网卡不存在
+	openSendSocket = func(iface string) (*rawPacketSender, error) {
+		if gone.Load() {
+			return nil, errors.New("no such network interface")
+		}
+		return &rawPacketSender{fd: -1, ifindex: 7}, nil
+	}
+	sendToFn = func(fd int, pkt []byte, ifindex int) error { return nil }
+	sendMu.Unlock()
+	t.Cleanup(func() {
+		sendMu.Lock()
+		sendSockets, openSendSocket, sendToFn = savedSockets, savedOpen, savedSendTo
+		sendMu.Unlock()
+	})
+
+	if err := replaySendLinux("lo", make([]byte, 16)); err == nil {
+		t.Fatal("网卡不存在时须报错")
+	}
+	// 网卡回来：紧接着的下一包就得成功，不能等冷却
+	gone.Store(false)
+	start := time.Now()
+	if err := replaySendLinux("lo", make([]byte, 16)); err != nil {
+		t.Fatalf("网卡恢复后第一包即须成功，实际: %v", err)
+	}
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Fatalf("恢复后首包耗时 %v（存在冷却黑洞？）", d)
 	}
 }
