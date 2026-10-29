@@ -240,7 +240,9 @@ socketstack agent autoupgrade on|off
 3. **反向对拍（agent 侧）**：Python test_e2e.py / mcp mock 作 oracle 打 Go agent 不改一行；覆盖全部 dt + 全部 quirk 行；dt4 断连、dt16 错误帧、131 运行时断连、dt22>8B、dt24 无前置单列用例；e2e 中 dt16/dt122 预期失败标注。
 4. **深模块差分**：capture/pcapflow/replayer 与 Python 输出逐字段 diff（dt200 字符串类型与字典序；回放 hint 失配不回退用例；ts_divisor 纳秒/微秒限速节奏）；chromedp vs pyppeteer 同跳转样例集；`tcpdump -ddd` 注入匹配验证；multipart LF 结尾容忍；zip-slip 防护用例。
 5. **升级闭环**：三链各一轮 + `serve` 别名双向验证（Go 二进制被 Python unit 拉起 / Python 二进制被回滚 unit 拉起）+ 180s 轮询窗口 + 升级后首个调用失败一次的 quirk 验证。
-6. **真实 e2e**：15 工具 + agent 全 dt 人工验收；IPv6 靶机路径（Python 客户端 AF_INET-only 基线单独标注）；`go test -race` 全量（ss/boce/browser 单例、池、SQLite 并发写）。
+6. **真实 e2e**：15 工具 + agent 全 dt 人工验收；IPv6 靶机路径（Python 客户端 AF_INET-only 基线单独标注）；`go test -race` 全量（ss/boce/browser 单例、池、SQLite 并发写）；跨平台 `go build`/`go vet` 矩阵（linux/amd64·arm64、darwin/amd64·arm64、windows/amd64）。
+
+**验收结果（2026-10-29）**：1-6 全项通过——反向 oracle 38+13（Go/Python 双跑）、15 工具 e2e 双实现、三链升级闭环（Python 1.8.3 ↔ Go 1.9.x）、chromedp 拨测 4 例、AF_PACKET 抓包/回放、chromium 自动下载真机（r1730241 / 536MB）、`-race` 6 包、跨平台矩阵 5 组合。
 
 ## 10. 实施顺序（TDD）
 
@@ -297,3 +299,6 @@ frame(字节层) → config/svc(含 serve 别名+unit 模板)
 | 20 | 无 atexit 关 browser：Go 进程退出不杀 chromium 子进程，孤儿可能累积 | 运维级；Python boce.py:289-298 atexit 注册（活代码）；必要时加 Pdeathsig |
 | 21 | dt171 死实例重启前 `shutdown()` 会 kill -9 端口上的**外来占用者**（Python start_server 不杀、bind 失败回空 pid 列表） | 早期 stop_server 清扫语义的连带效应；仅"死实例+端口被外人占"场景可观察 |
 | 22 | dt1 args 为多键 dict 时按 key 排序迭代（Python dict 插入序不可由 JSON 稳定还原） | 单键 dict（真实用法）行为确定且对齐；多键顺序差异属输入病态 |
+| 23 | chromium 下载并发：Python `_browser_lock` 串行阻塞；Go 同样阻塞串行 + 等锁 double-check | 语义一致（后到者复用先到者结果），无差异，仅记录实现路径 |
+| 24 | zip 解压：Go `unzipInto` 复刻 CPython `zipfile.extractall` 路径消毒（`..` 段丢弃、绝对路径去首斜杠、空段丢弃），但不复刻符号链接条目与 0o600→umask 权限细节 | chromium 包内无符号链接（真机 `/opt/socket/chrome-linux` 实测 0 个）；文件权限由 chmod 755 主目标兜底 |
+| 25 | mcp HTTP 绑定用 `net.JoinHostPort`（Python uvicorn `host:port` 直拼） | `mcp.bind.host` 配 v6 字面量时 Go 可用、Python 会 "too many colons"；默认 0.0.0.0 无差别 |
