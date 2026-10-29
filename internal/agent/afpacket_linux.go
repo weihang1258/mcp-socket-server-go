@@ -84,7 +84,7 @@ func openPacketSocketLinux(eth string) (pktSource, error) {
 		log.Printf("网卡 %s 开启 promisc 失败: %v（仍可抓本机流量）", eth, err)
 	}
 	// bind 最后做：此时才注册收包 hook，杜绝未过滤窗口
-	addr := &unix.SockaddrLinklayer{Protocol: 0x0003, Ifindex: iface.Index} // ETH_P_ALL
+	addr := &unix.SockaddrLinklayer{Protocol: htonsUint16(0x0003), Ifindex: iface.Index} // ETH_P_ALL（x/sys 不转字节序，必须 htons——真机验收实锤）
 	if err := unix.Bind(fd, addr); err != nil {
 		unix.Close(fd)
 		return nil, fmt.Errorf("bind(%s, ETH_P_ALL): %w", eth, err)
@@ -165,6 +165,14 @@ var _ = os.Geteuid
 
 func init() {
 	openPacketSocketFn = openPacketSocketLinux
+}
+
+// htonsUint16 x/sys SockaddrLinklayer.Protocol 不做字节序转换（raw 为网络序 BE16），
+// 小端主机必须手动转（真机验收实锤：直传 0x0003 → 内核读到 0x0300 → 永远收不到包）。
+func htonsUint16(v uint16) uint16 {
+	b := make([]byte, 2)
+	binary.BigEndian.PutUint16(b, v)
+	return binary.LittleEndian.Uint16(b)
 }
 
 // setsockoptPointer 通用指针 setsockopt。
