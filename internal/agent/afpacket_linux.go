@@ -228,6 +228,16 @@ func replaySenderFor(iface string) (*rawPacketSender, error) {
 	if s, ok := sendSockets[iface]; ok {
 		return s, nil
 	}
+	s, err := openSendSocket(iface) // 注入点（测试替换，免 root）
+	if err != nil {
+		return nil, err
+	}
+	sendSockets[iface] = s
+	return s, nil
+}
+
+// openSendSocket AF_PACKET 发送 socket 创建（测试用 openSendSocketFn 注入）。
+var openSendSocket = func(iface string) (*rawPacketSender, error) {
 	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, 0)
 	if err != nil {
 		return nil, err
@@ -241,9 +251,7 @@ func replaySenderFor(iface string) (*rawPacketSender, error) {
 		unix.Close(fd)
 		return nil, err
 	}
-	s := &rawPacketSender{fd: fd, ifindex: ifaceObj.Index}
-	sendSockets[iface] = s
-	return s, nil
+	return &rawPacketSender{fd: fd, ifindex: ifaceObj.Index}, nil
 }
 
 // prepareReplaySockets 对齐 Python _setup_sockets()：上行必建；下行仅在 iface 不同时建。

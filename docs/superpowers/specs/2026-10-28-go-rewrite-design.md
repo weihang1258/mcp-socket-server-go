@@ -304,5 +304,6 @@ frame(字节层) → config/svc(含 serve 别名+unit 模板)
 | 25 | mcp HTTP 绑定用 `net.JoinHostPort`（Python uvicorn `host:port` 直拼） | `mcp.bind.host` 配 v6 字面量时 Go 可用、Python 会 "too many colons"；默认 0.0.0.0 无差别 |
 | 26 | 回放发送 socket 常驻缓存（`sendSockets`，按 iface 名，加锁）：Python `replay_files` 末尾 `_cleanup_sockets()` 每次回放建/关 | fd 数量按网卡数有界（≤2×N），换来免每次重建；网卡删除重建（ifindex 变化）时会 ENETDOWN，需重启 agent |
 | 27 | chromium 并发下载冲突：Python `_browser_lock` 串行；Go 同样阻塞串行 + 锁内 double-check | 语义一致（后到者复用先到者结果） |
+| 30 | `no_proxy` 后缀用**标签边界**匹配（`host==e \|\| HasSuffix(host, "."+e)`）；Python requests 用裸 `endswith`，故 `no_proxy=mirror.com` 在 Python 会命中 `notmirror.com`，Go 不会 | Go 更接近 curl/wget；Python 的裸后缀匹配本身是缺陷，且真实环境不会配成这种形式 |
 | 29 | chromium 代理解析完全自实现（config `proxy=` 优先 → 无 scheme 自动补 `http://` → 环境变量小写优先 → 遵守 `no_proxy`/`NO_PROXY`） | 不用 `http.ProxyFromEnvironment`（其大小写优先级与 requests 不同，且无法在前面插入 config 覆盖）；no_proxy 语义有 6 组单测守护 |
 | 28 | 首字节后 body 停摆按 requests 语义处理：Go 在 dial 时给 conn 包 `readDeadlineConn`（每次 Read 前重设 deadline），等效 requests 的 read timeout；**不是**总传输时限 | 36MB 目录列表/500MB zip 在慢链路上必须能传完 |

@@ -284,6 +284,8 @@ func chromiumTransport(timeout int) *http.Transport {
 
 // readDeadlineConn 每次 Read 前重设 deadline（requests 的 read timeout 语义：
 // 计时从"开始等下一批字节"算起，数据持续到达就持续续期）。
+// 注意：仅适用于**一次性请求**的 Transport（当前 fetcher 每次新建）。若将来把 Transport
+// 提成包级复用，HTTP/2 的空闲读循环会被这里的 deadline 判定为连接故障而拆连接。
 type readDeadlineConn struct {
 	net.Conn
 	timeout time.Duration
@@ -326,8 +328,11 @@ func chromiumProxyFunc() func(*http.Request) (*url.URL, error) {
 }
 
 // noProxyBypass requests should_bypass_proxies 的等价实现：
-// no_proxy（小写优先）逗号分隔；"*" 表示全部绕过；条目可比对 host 或其后缀
-// （前导 "." 视作后缀），可带端口。
+//   - no_proxy（小写优先）、逗号分隔、去空格
+//   - "*" 全部绕过
+//   - 目标是 IPv4 字面量时支持 CIDR（requests 的 is_valid_cidr/address_in_network），
+//     否则按裸 IP 精确匹配
+//   - 其余按 host 或 host:port 后缀匹配（见后缀边界说明）
 func noProxyBypass(u *url.URL) bool {
 	raw := os.Getenv("no_proxy")
 	if raw == "" {
@@ -337,22 +342,43 @@ func noProxyBypass(u *url.URL) bool {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
-	for _, entry := range strings.Split(raw, ",") {
-		entry = strings.ToLower(strings.TrimSpace(entry))
+	if host == "" {
+		return true // requests：hostname 为 None（如 file://）直接绕过
+	}
+	if strings.TrimSpace(raw) == "*" {
+		return true
+	}
+	hostWithPort := host
+	if p := u.Port(); p != "" {
+		hostWithPort += ":" + p
+	}
+	ip := net.ParseIP(host)
+	isV4 := ip != nil && ip.To4() != nil
+
+	for _, entry := range strings.Split(strings.ReplaceAll(raw, " ", ""), ",") {
+		entry = strings.ToLower(entry)
 		if entry == "" {
 			continue
 		}
-		if entry == "*" {
-			return true
+		if isV4 {
+			if _, cidr, err := net.ParseCIDR(entry); err == nil {
+				if cidr.Contains(ip) {
+					return true
+				}
+				continue
+			}
+			if entry == host { // 裸 IP 精确匹配（requests 同一分支）
+				return true
+			}
+			continue // IPv4 目标不再走后缀匹配
 		}
-		if u.Port() != "" && strings.Contains(entry, ":") && entry == strings.ToLower(u.Host) {
-			return true
+		// 后缀匹配：Python 用裸 endswith（无标签边界，故 no_proxy=mirror.com 会命中
+		// notmirror.com）；Go 侧保留标签边界语义（§12#30），更接近 curl/wget。
+		e := strings.TrimPrefix(entry, ".")
+		if h, _, err := net.SplitHostPort(e); err == nil {
+			e = h
 		}
-		entry = strings.TrimPrefix(entry, ".")
-		if h, _, err := net.SplitHostPort(entry); err == nil {
-			entry = h
-		}
-		if host == entry || strings.HasSuffix(host, "."+entry) {
+		if host == e || strings.HasSuffix(host, "."+e) || hostWithPort == entry {
 			return true
 		}
 	}

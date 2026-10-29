@@ -8,6 +8,7 @@ package agent
 import (
 	"archive/zip"
 	"context"
+	"errors"
 	"io"
 	"io/fs"
 	"net"
@@ -341,27 +342,40 @@ func TestFetcherBodyStallTimesOut(t *testing.T) {
 	defer srv.Close()
 	defer close(stall)
 
-	done := make(chan error, 1)
+	type outcome struct {
+		headersOK bool
+		err       error
+	}
+	done := make(chan outcome, 1)
 	start := time.Now()
 	go func() {
 		resp, err := fetcher(1).Get(srv.URL)
 		if err != nil {
-			done <- err
+			done <- outcome{false, err}
 			return
 		}
 		defer resp.Body.Close()
 		_, err = io.ReadAll(resp.Body)
-		done <- err
+		done <- outcome{true, err} // 走到这里说明响应头已到位，失败只能来自 body 读
 	}()
 	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("停摆的 body 须报超时错误")
+	case o := <-done:
+		// 必须先拿到响应头——否则本测测的是 header 超时，不是 body 读超时，
+		// 被测语义就漂移了（ResponseHeaderTimeout 调短也能让弱断言通过）。
+		if !o.headersOK {
+			t.Fatalf("响应头阶段就失败了，未覆盖 body 停摆场景: %v", o.err)
 		}
-		if el := time.Since(start); el > 3*time.Second {
+		if o.err == nil {
+			t.Fatal("停摆的 body 须报错")
+		}
+		var ne net.Error
+		if !errors.As(o.err, &ne) || !ne.Timeout() {
+			t.Fatalf("须为 net.Error 超时，实际 %T: %v", o.err, o.err)
+		}
+		if el := time.Since(start); el > 2*time.Second {
 			t.Fatalf("read 超时过晚（%v），timeout=1 应在 ~1s 内失败", el)
 		}
-	case <-time.After(4 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("body 停摆时请求永久挂起——缺 read deadline")
 	}
 }
@@ -460,6 +474,21 @@ func TestChromiumProxyNoProxyBypass(t *testing.T) {
 		t.Setenv("NO_PROXY", "registry.npmmirror.com")
 		if u, _ := chromiumProxyFunc()(req("http://registry.npmmirror.com/x")); u != nil {
 			t.Fatalf("NO_PROXY 须生效: %v", u)
+		}
+	})
+	t.Run("IPv4 CIDR", func(t *testing.T) {
+		t.Setenv("no_proxy", "10.0.0.0/8,192.168.1.5")
+		if u, _ := chromiumProxyFunc()(req("http://10.12.34.56/x")); u != nil {
+			t.Fatalf("CIDR 须命中: %v", u)
+		}
+		if u, _ := chromiumProxyFunc()(req("http://192.168.1.5/x")); u != nil {
+			t.Fatalf("裸 IP 须精确命中: %v", u)
+		}
+		if u, _ := chromiumProxyFunc()(req("http://11.0.0.1/x")); u == nil {
+			t.Fatal("CIDR 外须走代理")
+		}
+		if u, _ := chromiumProxyFunc()(req("http://192.168.1.6/x")); u == nil {
+			t.Fatal("非该 IP 须走代理")
 		}
 	})
 	t.Run("config 显式 proxy 不被 no_proxy 绕开", func(t *testing.T) {
