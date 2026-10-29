@@ -132,7 +132,7 @@ func doBoce(payload []byte) ([]byte, error) {
 	// 重定向/弹窗/未知 → PyppeteerChecker。thread_count 校验仅封堵分支生效
 	//（max_workers ValueError 只在 RequestChecker.run_multiple 抛）
 	switch mode {
-	case "封堵", "":
+	case "封堵": // 显式 mode:"" 不是缺省——Python ""≠"封堵" → pyppeteer 未知模式恒败
 		tc := 1
 		if _, ok := raw["thread_count"]; ok {
 			tc = req.ThreadCount

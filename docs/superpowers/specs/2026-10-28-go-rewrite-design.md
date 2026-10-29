@@ -295,3 +295,5 @@ frame(字节层) → config/svc(含 serve 别名+unit 模板)
 | 18 | chromedp Navigate 等 load（pyppeteer domcontentloaded）；timeout ctx 覆盖 tab 创建（Python 只罩 goto） | 判定通常不受影响（jumped 先置位）；冷启+小 timeout 时 Go 先败 |
 | 19 | chromium_path 变更：Go 关旧建新；Python 忽略变更沿用旧 browser 直至自然死亡 | Go 行为更合理；wire 不可观察（响应形态一致） |
 | 20 | 无 atexit 关 browser：Go 进程退出不杀 chromium 子进程，孤儿可能累积 | 运维级；Python boce.py:289-298 atexit 注册（活代码）；必要时加 Pdeathsig |
+| 21 | dt171 死实例重启前 `shutdown()` 会 kill -9 端口上的**外来占用者**（Python start_server 不杀、bind 失败回空 pid 列表） | 早期 stop_server 清扫语义的连带效应；仅"死实例+端口被外人占"场景可观察 |
+| 22 | dt1 args 为多键 dict 时按 key 排序迭代（Python dict 插入序不可由 JSON 稳定还原） | 单键 dict（真实用法）行为确定且对齐；多键顺序差异属输入病态 |

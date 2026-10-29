@@ -100,6 +100,8 @@ func boceBrowser(payload []byte, mode string, count, timeout int) ([]byte, error
 	chromium := defaultChromiumPath
 	if req.Chromium != "" {
 		chromium = req.Chromium
+	} else {
+		chromium = effectiveChromium("") // 保留 SOCKETSTACK_TEST_CHROMIUM 测试钩子
 	}
 
 	start := time.Now()
@@ -124,16 +126,9 @@ func boceBrowser(payload []byte, mode string, count, timeout int) ([]byte, error
 // runSingleRedirect 单次拨测。Python 仅异常串含 "Connection is closed" 且非 retry 才
 // 关 browser 重试一次（boce.py:380-389）；判定失败直接返回不重试。
 func runSingleRedirect(chromiumPath, url string, timeout int, mode string) bool {
-	ok, err := runSingleOnce(chromiumPath, url, timeout, mode)
-	if err == nil {
-		return ok
-	}
-	// chromedp 同源故障的等价错误串（websocket 断开/browser 已关）
-	if !strings.Contains(err.Error(), "Connection is closed") &&
-		!strings.Contains(err.Error(), "connection closed") &&
-		!strings.Contains(err.Error(), "browser has been closed") {
-		log.Printf("[pyppeteer拨测] run_single异常: %v", err)
-		return false
+	ok, connClosed := runSingleOnce(chromiumPath, url, timeout, mode)
+	if !connClosed {
+		return ok // 判定失败/普通异常都不重试（Python 只对 "Connection is closed" 重试）
 	}
 	log.Printf("[pyppeteer拨测] 检测到browser已关闭，尝试重启browser并重试一次")
 	closeBrowser()
@@ -145,16 +140,35 @@ func runSingleRedirect(chromiumPath, url string, timeout int, mode string) bool 
 	return ok
 }
 
-// runSingleOnce 单次判定。返回 (判定结果, 运行异常)——判定失败≠异常（后者才触发重试）。
-func runSingleOnce(chromiumPath, url string, timeout int, mode string) (bool, error) {
+// isConnClosedErr Python "Connection is closed" 在 chromedp 侧的等价错误族
+// （websocket 断开 / browser 进程中途死亡 / context 因 browser ctx 取消而结束）。
+func isConnClosedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	for _, k := range []string{
+		"Connection is closed", "connection closed", "browser has been closed",
+		"context canceled", "websocket: close", "EOF", "broken pipe",
+	} {
+		if strings.Contains(s, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// runSingleOnce 单次判定。返回 (判定结果, browser 连接类故障)——
+// 后者才触发重试（Python "Connection is closed"，含 browser 中途死亡，boce.py:380-389）。
+func runSingleOnce(chromiumPath, url string, timeout int, mode string) (bool, bool) {
 	if mode != "重定向" {
 		log.Printf("[拨测] %s 模式未实现，判定为失败", mode)
-		return false, nil
+		return false, false
 	}
 	bctx, err := getBrowser(chromiumPath)
 	if err != nil {
 		log.Printf("[拨测] browser 启动失败: %v", err)
-		return false, err
+		return false, isConnClosedErr(err)
 	}
 	tabCtx, cancel := chromedp.NewContext(bctx)
 	defer cancel()
@@ -231,5 +245,5 @@ func runSingleOnce(chromiumPath, url string, timeout int, mode string) (bool, er
 	cancel2()
 	<-done
 	<-done2
-	return ok, nil
+	return ok, isConnClosedErr(err)
 }

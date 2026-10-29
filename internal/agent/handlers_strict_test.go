@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -149,8 +150,8 @@ func TestDT1TypeErrorsBounded(t *testing.T) {
 	for name, body := range map[string]string{
 		"args null": `{"args":null}`,
 		"args 数字":   `{"args":5}`,
+		"args 浮点":   `{"args":5.5}`,
 		"args 布尔":   `{"args":true}`,
-		"args 对象":   `{"args":{}}`,
 		"cwd 数字":    `{"args":"ls","cwd":5}`,
 		"env 数字":    `{"args":"ls","env":5}`,
 	} {
@@ -347,5 +348,91 @@ func TestBoceDefaultsAndModeDispatch(t *testing.T) {
 	json.Unmarshal(unwrapDT131(t, resp), &m)
 	if m["total"] != float64(1) || m["fail"] != float64(1) {
 		t.Fatalf("弹窗恒失败 total=1: %v", m)
+	}
+}
+
+// dt1 args 是 dict → Python Popen 迭代 keys（python3 -I 实测：{}→code2，
+// {"echo pwned":1}→code0 stdout="pwned"）；列表含 null/非串 → TypeError 兜底。
+func TestDT1DictAndListElementSemantics(t *testing.T) {
+	cs := &ConnState{}
+	// 空 dict = 空序列 → sh -c 缺参 code 2（不得按 "dict not iterable" 兜底）
+	resp, err := Do(cs, 1, []byte(`{"args":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r struct {
+		Code   int    `json:"code"`
+		Stdout string `json:"stdout"`
+	}
+	json.Unmarshal(unwrapGzipResp(t, resp), &r)
+	if r.Code == 0 || r.Code == -1 {
+		t.Fatalf("空 dict 须走 sh -c 缺参路径(非零非-1): %+v", r)
+	}
+	// 单键 dict → 真执行 key（Python dict 迭代语义）
+	resp, _ = Do(cs, 1, []byte(`{"args":{"echo dict_keys":1}}`))
+	json.Unmarshal(unwrapGzipResp(t, resp), &r)
+	if r.Code != 0 || !strings.Contains(r.Stdout, "dict_keys") {
+		t.Fatalf("dict 须迭代 keys 真执行: %+v", r)
+	}
+	// 列表元素 null / 数字 → TypeError 兜底（此前 null 被静默成 ""）
+	for _, body := range []string{`{"args":["echo",null]}`, `{"args":[null]}`, `{"args":["echo",5]}`} {
+		resp, err = Do(cs, 1, []byte(body))
+		if err != nil {
+			t.Fatalf("%s 须兜底帧非断连: %v", body, err)
+		}
+		json.Unmarshal(unwrapGzipResp(t, resp), &r)
+		if r.Code != -1 {
+			t.Errorf("%s: 须 TypeError 兜底 -1: %+v", body, r)
+		}
+	}
+}
+
+// dt131 显式 mode:"" ≠ 缺省 → Python pyppeteer 未知模式恒败（不得走封堵）
+func TestBoceExplicitEmptyModeIsUnknown(t *testing.T) {
+	cs := &ConnState{}
+	payload := []byte(`{"url":"http://127.0.0.1:1","mode":"","count":1,"timeout":10}`)
+	resp, err := Do(cs, 131, payload)
+	if err != nil {
+		t.Fatalf("显式空 mode 走未知模式(恒败)不得断连: %v", err)
+	}
+	var m map[string]any
+	json.Unmarshal(unwrapDT131(t, resp), &m)
+	if m["total"] != float64(1) || m["fail"] != float64(1) || m["success"] != float64(0) {
+		t.Fatalf("显式 mode:\"\" 须未知模式全败: %v", m)
+	}
+}
+
+// dt10 value:null → Python ifconfig eth mtu None 必败吞错 + sleep5，网卡不动
+func TestDT10ValueNullNoMutation(t *testing.T) {
+	cs := &ConnState{}
+	before, _ := os.ReadFile("/sys/class/net/lo/mtu")
+	start := time.Now()
+	resp, err := Do(cs, 10, []byte(`{"eth":"lo","value":null}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r struct {
+		Res any `json:"res"`
+	}
+	json.Unmarshal(resp, &r)
+	if r.Res != nil {
+		t.Fatalf("value:null 须 res null: %s", resp)
+	}
+	if time.Since(start) < 4*time.Second {
+		t.Fatal("value:null 须 sleep5（Python int!=None 恒真走设置分支）")
+	}
+	after, _ := os.ReadFile("/sys/class/net/lo/mtu")
+	if string(before) != string(after) {
+		t.Fatalf("value:null 不得改动 MTU: %s→%s", before, after)
+	}
+}
+
+// dt173 合法但非对象 JSON 未运行 → b"error"（Python json.loads 成功后直接判 ss）
+func TestDT173NonObjectJSONIdle(t *testing.T) {
+	stopListenForTest()
+	cs := &ConnState{}
+	resp, err := Do(cs, 173, []byte(`[1,2]`))
+	if err != nil || string(resp) != "error" {
+		t.Fatalf("非对象 JSON 未运行须 b\"error\": resp=%q err=%v", resp, err)
 	}
 }

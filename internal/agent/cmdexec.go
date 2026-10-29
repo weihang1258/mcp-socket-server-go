@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strings"
 	"syscall"
 )
 
@@ -67,6 +69,9 @@ func jsonTypeName(raw json.RawMessage) string {
 	}
 	var f float64
 	if json.Unmarshal(raw, &f) == nil {
+		if strings.ContainsAny(string(raw), ".eE") { // Python float vs int
+			return "float"
+		}
 		return "int"
 	}
 	var str string
@@ -107,8 +112,35 @@ func cmdExec(payload []byte) ([]byte, error) {
 	}
 	if err := json.Unmarshal(args, &argsStr); err == nil {
 		argsIsStr = true
-	} else if err := json.Unmarshal(args, &argv); err != nil {
-		return badType("'" + jsonTypeName(args) + "' object is not iterable") // args=5/true/{}
+	} else {
+		// Python Popen 只要求 args 可迭代：列表/dict 皆可（dict 迭代 keys，实测 code 0 真执行）
+		var rawArr []json.RawMessage
+		var rawObj map[string]json.RawMessage
+		switch {
+		case json.Unmarshal(args, &rawArr) == nil:
+			for _, e := range rawArr { // 元素须逐条是字符串；null/数字 → Python TypeError
+				if string(e) == "null" {
+					return badType("expected str, bytes or os.PathLike object, not NoneType")
+				}
+				var s string
+				if json.Unmarshal(e, &s) != nil {
+					return badType("expected str, bytes or os.PathLike object, not " + jsonTypeName(e))
+				}
+				argv = append(argv, s)
+			}
+			if argv == nil {
+				argv = []string{} // 保持非 nil 空切片，走"空列表"分支
+			}
+		case json.Unmarshal(args, &rawObj) == nil:
+			keys := make([]string, 0, len(rawObj))
+			for k := range rawObj {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys) // Python dict 插入序不可由 JSON 稳定还原；单键场景（真实用法）确定
+			argv = keys
+		default:
+			return badType("'" + jsonTypeName(args) + "' object is not iterable") // args=5/true/5.5
+		}
 	}
 	wait := true
 	if r, ok := raw1["wait"]; ok {
@@ -202,6 +234,8 @@ func execArgvStart(argv []string, cwd string, env []string) (int, string, string
 	c := argvCmd(argv)
 	c.Dir = cwd
 	c.Env = env
+	c.Stdout = io.Discard // Python PIPE：输出进管道被丢弃，不得漏进 agent 终端/journal
+	c.Stderr = io.Discard
 	if err := c.Start(); err != nil {
 		return -1, "", err.Error()
 	}

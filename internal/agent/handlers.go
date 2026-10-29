@@ -102,8 +102,17 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 			return nil, err
 		}
 		value := 2000 // Python mtu(eth, value=2000) 默认值（netutils.py:113）
+		var rawMTU map[string]json.RawMessage
+		json.Unmarshal(payload, &rawMTU)
+		valueNone := string(rawMTU["value"]) == "null"
 		if p.Value != nil {
 			value = *p.Value
+		}
+		if valueNone {
+			// Python value=None：`int != None` 恒真 → `ifconfig eth mtu None` 必败
+			// （exec 吞错误）→ sleep(5) → res null，网卡不被改动
+			time.Sleep(5 * time.Second)
+			return json.Marshal(resNull())
 		}
 		set, err := setMTU(p.Eth, value)
 		if err != nil {
@@ -173,7 +182,7 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 	case 0: // pcap 回放：truthy 校验固定文案；stats JSON 裸文本
 		return replayFiles(payload)
 	case 5: // 抓包开始：{"res":bool}（回退后契约，无 error）；严格键（**data TypeError）
-		if err := strictKeys("tcpdump", payload, "eth", "path", "extended", "single_queue"); err != nil {
+		if err := strictKeys("tcpdump_start", payload, "eth", "path", "extended", "single_queue"); err != nil {
 			return nil, err
 		}
 		var p struct {

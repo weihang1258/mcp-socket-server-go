@@ -291,14 +291,14 @@ func listenClean() ([]byte, error) {
 // 非法 JSON 无条件断连；未启动 → b"error"（键不查）；运行中 data_writefile(**data)
 // 未知/缺 file 键 → TypeError 断连。
 func listenSave(payload []byte) ([]byte, error) {
-	var raw map[string]json.RawMessage
+	var raw json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return nil, err // json.loads 先行 → 非法 JSON 无条件断连
 	}
 	listenMu.Lock()
 	defer listenMu.Unlock()
 	if ss == nil || len(ss.pids()) == 0 {
-		return []byte("error"), nil // 未运行先回 b"error"，不展开 **data
+		return []byte("error"), nil // 未运行先回 b"error"，不展开 **data（合法非对象 JSON 也走这里）
 	}
 	if err := strictKeys("data_writefile", payload, "file"); err != nil {
 		return nil, err // data_writefile(**data) TypeError → 断连
