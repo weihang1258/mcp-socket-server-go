@@ -42,6 +42,7 @@ go test -race ./...
 
 ## 状态
 
-- agent 侧：全部 datatype（0-20/131/171-175/200）+ :9001 + 升级落地 ✅（AF_PACKET 真机验收待做）
-- mcp 侧：15 工具 + 双传输 ✅
-- 待人工验收：真实靶机 e2e、三链升级闭环（Go↔Python 混部）、chromium 重定向拨测（chromedp）
+- agent 侧：全部 datatype（0-20/131/171-175/200）+ :9001 + 升级落地 ✅；AF_PACKET 抓包/回放真机验收 ✅
+- mcp 侧：15 工具 + 双传输 ✅（默认端口 9010；改端口用配置 `mcp.bind.port`，经 systemd 启动时 env `MCP_BIND_PORT` 需写进 unit 的 `Environment=`）
+- 真机验收 ✅：反向 oracle 38+13（Go/Python 双跑）、15 工具 e2e、三链升级闭环（Go↔Python 混部）、chromedp 重定向拨测、chromium 自动下载（npmmirror r1730241 → 536MB 落盘可执行）
+- 平台：Linux 完整功能（AF_PACKET 仅 Linux）；darwin/windows 可编译，抓包/回放返回不可用错误

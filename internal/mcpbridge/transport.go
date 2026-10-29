@@ -4,9 +4,10 @@ package mcpbridge
 
 import (
 	"context"
-	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -30,7 +31,7 @@ func RunStreamableHTTP(ctx context.Context, b *Bridge, host string, port int) er
 	s := NewServer(b)
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s },
 		&mcp.StreamableHTTPOptions{DisableLocalhostProtection: true}) // 对齐 Python 显式关闭 rebinding 保护
-	addr := fmt.Sprintf("%s:%d", host, port)
+	addr := net.JoinHostPort(host, strconv.Itoa(port)) // 兼容 v6 字面量 host（"::" 等）
 	log.Printf("MCP Streamable HTTP 监听 %s/mcp (log_level=%s)", addr, b.Cfg.LogLevel)
 	srv := &http.Server{Addr: addr, Handler: handler}
 	err := srv.ListenAndServe()

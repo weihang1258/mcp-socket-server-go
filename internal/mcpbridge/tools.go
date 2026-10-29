@@ -35,8 +35,6 @@ type BridgeConfig struct {
 	LogLevel       string
 	AuditDays      int
 	Whitelist      []string
-	BindHost       string
-	BindPort       int
 	DefaultTimeout int
 }
 

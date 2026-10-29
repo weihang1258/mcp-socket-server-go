@@ -149,8 +149,8 @@ func deadlineFor(t time.Time) (unix.Timeval, error) {
 	return unix.NsecToTimeval(d.Nanoseconds()), nil
 }
 
-// attachBPFIfAvailable 编译产物注入（recv goroutine 起跑前调用）。
-func attachBPFIfAvailable(src pktSource, bpf []bpfInstr) error {
+// injectBPF 编译产物注入（recv goroutine 起跑前调用）。
+func injectBPF(src pktSource, bpf []bpfInstr) error {
 	afp, ok := src.(*afpacketSource)
 	if !ok || len(bpf) == 0 {
 		return nil
@@ -165,6 +165,7 @@ var _ = os.Geteuid
 
 func init() {
 	openPacketSocketFn = openPacketSocketLinux
+	attachBPFIfAvailable = injectBPF
 }
 
 // htonsUint16 x/sys SockaddrLinklayer.Protocol 不做字节序转换（raw 为网络序 BE16），

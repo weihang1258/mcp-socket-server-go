@@ -674,6 +674,10 @@ func max(a, b int) int {
 	return b
 }
 
+// attachBPFIfAvailable BPF 注入挂载点（afpacket_linux.go init 覆盖）。
+// 非 Linux 编译时保持 no-op → 抓包本就不可用（openPacketSocketFn 返回错误）。
+var attachBPFIfAvailable = func(src pktSource, bpf []bpfInstr) error { return nil }
+
 // defaultOpenPacketSocket AF_PACKET 真实现挂载点（afpacket_linux.go，Linux-only）。
 // 非构建环境/无权限时返回错误 → dt5 res:false（对齐 Python 无权限场景）。
 var defaultOpenPacketSocket = func(eth string) (pktSource, error) {

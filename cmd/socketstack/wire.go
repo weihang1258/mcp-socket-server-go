@@ -33,7 +33,7 @@ func runMCPServe(cfg config.Config) {
 	b := mcpbridge.Init(mcpbridge.BridgeConfig{
 		DBPath: cfg.MCP.DBPath, DownloadDir: cfg.MCP.DownloadDir, Proxy: cfg.MCP.Proxy,
 		LogLevel: cfg.MCP.LogLevel, AuditDays: cfg.MCP.AuditRetentionDays,
-		Whitelist: cfg.MCP.CmdExecWhitelist, BindHost: cfg.MCP.Bind.Host, BindPort: cfg.MCP.Bind.Port,
+		Whitelist:      cfg.MCP.CmdExecWhitelist,
 		DefaultTimeout: cfg.MCP.DefaultTimeout,
 	})
 	if err := mcpbridge.RunStreamableHTTP(context.Background(), b, cfg.MCP.Bind.Host, cfg.MCP.Bind.Port); err != nil {

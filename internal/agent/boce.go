@@ -1,14 +1,19 @@
 package agent
 
 import (
+	"archive/zip"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,7 +25,14 @@ import (
 // 无包管理器仅 log 继续 → 装后复测失败回错误 JSON。
 // boce() 运行时异常冒泡断连（回退后契约）。封堵=纯 HTTP；重定向/弹窗=chromedp（boce_browser）。
 
-const defaultChromiumPath = "/opt/socket/chrome-linux/chrome"
+// 可注入路径（测试改到临时目录；生产值对齐 boce.py:83-84）。
+// defaultChromiumPath 由 chromeInstallDir 派生，避免两处路径漂移。
+var (
+	chromeInstallDir = "/opt/socket/chrome-linux"
+	npmmirrorBase    = "https://registry.npmmirror.com/-/binary/chromium-browser-snapshots/Linux_x64"
+)
+
+func defaultChromiumPath() string { return chromeInstallDir + "/chrome" }
 
 // ensureChromiumFn 可注入（测试/后续实现替换）；签名（有效路径）→ 是否可用。
 var ensureChromiumFn func(chromiumPath string) bool
@@ -36,7 +48,7 @@ func effectiveChromium(payloadPath string) string {
 	if payloadPath != "" {
 		return payloadPath
 	}
-	return defaultChromiumPath
+	return defaultChromiumPath()
 }
 
 // doBoce dt131 入口。
@@ -88,7 +100,7 @@ func doBoce(payload []byte) ([]byte, error) {
 
 	// chromium 预检链（全模式执行，对齐 handlers.py 顺序）；chromium_path 键缺失才走默认，
 	// 显式空串保留（Python data.get 原样返回 "" → isfile 假 → 下载失败）
-	chromium := defaultChromiumPath
+	chromium := defaultChromiumPath()
 	if _, ok := raw["chromium_path"]; !ok {
 		chromium = effectiveChromium("")
 	} else if string(raw["chromium_path"]) != "null" {
@@ -168,12 +180,218 @@ func chromiumUsable(path string) bool {
 	return err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0
 }
 
-// ensureChromiumDownload npmmirror 自动下载（网络实现；失败返回 false，日志给手动步骤）。
+// ensureChromiumDownload npmmirror 自动下载（boce.py:142 ensure_chromium）：
+// 查最新 revision → 下载 zip → 解压到 dirname(install) → chmod 755 → 复查。
+// 失败一律 false（上层回错误 JSON 帧），不 panic。
 func ensureChromiumDownload(chromiumPath string) bool {
-	// ponytail: 网络下载链（npmmirror revision 查询 + zip + zip-slip 防护）由
-	// deploy 验收阶段按目标网络环境补；当前返回失败走错误 JSON 分支（协议行为已对）。
-	log.Printf("chromium 自动下载未启用（Go 版待接 npmmirror 链），请手动放置 %s", chromiumPath)
+	if chromiumUsable(chromiumPath) {
+		return true
+	}
+	// Python `with _browser_lock:` 阻塞串行化 + 等锁后 double-check（并发拨测不重复下载，
+	// 且后到者能拿到前者下载好的结果）
+	chromiumDownloadMu.Lock()
+	defer chromiumDownloadMu.Unlock()
+	if chromiumUsable(chromiumPath) { // double-check
+		return true
+	}
+	revision, err := fetchLatestChromiumRevision()
+	if err != nil {
+		log.Printf("查询 chromium 最新版本失败: %v", err)
+		printManualDownloadHint("latest")
+		return false
+	}
+	log.Printf("npmmirror 最新 chromium revision: %s", revision)
+
+	staging, err := os.MkdirTemp("", "chrome_dl_")
+	if err != nil {
+		log.Printf("chromium 自动下载失败: %v", err)
+		printManualDownloadHint(revision)
+		return false
+	}
+	defer os.RemoveAll(staging) // Python shutil.rmtree(staging, ignore_errors=True)
+
+	destZip := filepath.Join(staging, "chrome-linux.zip")
+	installRoot := filepath.Dir(chromeInstallDir)
+	if err := downloadChromiumZip(revision, destZip); err != nil {
+		log.Printf("chromium 自动下载失败: %v", err)
+		printManualDownloadHint(revision)
+		return false
+	}
+	log.Printf("chromium 下载完成，开始解压到 %s...", installRoot)
+	if err := unzipInto(destZip, installRoot); err != nil {
+		log.Printf("chromium 自动下载失败: %v", err)
+		printManualDownloadHint(revision)
+		return false
+	}
+	if err := os.Chmod(chromiumPath, 0o755); err != nil {
+		log.Printf("chromium 自动下载失败: %v", err)
+		printManualDownloadHint(revision)
+		return false
+	}
+	if chromiumUsable(chromiumPath) {
+		log.Printf("chromium 安装成功: %s", chromiumPath)
+		return true
+	}
+	log.Printf("解压后未找到可执行的 chrome: %s", chromiumPath)
+	printManualDownloadHint(revision)
 	return false
+}
+
+var chromiumDownloadMu sync.Mutex
+
+// readSocketConfigProxy /opt/socket/config 的 proxy= 键（boce.py:88 _read_config_proxy）。
+// 与 readAutoupgrade 同源文件（agent 侧实时读 /opt/socket/config）。
+func readSocketConfigProxy() string {
+	b, err := os.ReadFile(filepath.Join(upgradeRoot, "config"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "proxy=") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "proxy="))
+		}
+	}
+	return ""
+}
+
+// fetcher 带 proxy= 的 HTTP client（空 proxy → 走环境变量/直连）。
+func fetcher(timeout int) *http.Client {
+	c := &http.Client{Timeout: time.Duration(timeout) * time.Second}
+	if p := readSocketConfigProxy(); p != "" {
+		if u, err := url.Parse(p); err == nil {
+			c.Transport = &http.Transport{Proxy: http.ProxyURL(u)}
+		}
+	}
+	return c
+}
+
+// fetchLatestChromiumRevision 拉目录列表，取 name 为纯数字中最大者（max(key=int)）。
+func fetchLatestChromiumRevision() (string, error) {
+	resp, err := fetcher(20).Get(npmmirrorBase + "/")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("npmmirror 返回 %d", resp.StatusCode)
+	}
+	var entries []struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return "", err
+	}
+	latest, latestN := "", -1
+	for _, e := range entries {
+		name := strings.TrimSuffix(e.Name, "/")
+		if name == "" || strings.Trim(name, "0123456789") != "" {
+			continue
+		}
+		n, err := strconv.Atoi(name)
+		if err != nil {
+			continue
+		}
+		if n > latestN {
+			latest, latestN = name, n
+		}
+	}
+	if latestN < 0 {
+		return "", errors.New("npmmirror 未返回任何 chromium revision")
+	}
+	return latest, nil
+}
+
+// downloadChromiumZip 流式下载到 dest（Python iter_content 64KB 块）。
+func downloadChromiumZip(revision, dest string) error {
+	u := fmt.Sprintf("%s/%s/chrome-linux.zip", npmmirrorBase, revision)
+	log.Printf("下载 chromium r%s: %s", revision, u)
+	resp, err := fetcher(300).Get(u)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("下载 chrome-linux.zip 返回 %d", resp.StatusCode)
+	}
+	f, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(f, resp.Body)
+	return err
+}
+
+// unzipInto 解压 zip 到 destRoot，路径按 Python zipfile.extractall 规则消毒：
+// 去首斜杠、丢弃任何 ".." 与 "." 段（Go archive/zip 无内置防护，防 zip-slip）。
+func unzipInto(zipPath, destRoot string) error {
+	zr, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	for _, f := range zr.File {
+		parts := strings.Split(strings.TrimPrefix(filepath.ToSlash(f.Name), "/"), "/")
+		clean := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if p == "" || p == "." || p == ".." {
+				continue // Python 语义：.. 段直接丢弃，绝不向上逃逸
+			}
+			clean = append(clean, p)
+		}
+		if len(clean) == 0 {
+			continue
+		}
+		target := filepath.Join(append([]string{destRoot}, clean...)...)
+		if f.FileInfo().IsDir() {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, f.Mode().Perm())
+		if err != nil {
+			rc.Close()
+			return err
+		}
+		_, cerr := io.Copy(out, rc)
+		out.Close()
+		rc.Close()
+		if cerr != nil {
+			return cerr
+		}
+	}
+	return nil
+}
+
+// printManualDownloadHint 下载失败的手动步骤（boce.py:127-139 文案逐字保留）。
+func printManualDownloadHint(revision string) {
+	hint := fmt.Sprintf(`
+========== chromium 自动下载失败，请手动下载 ==========
+1. 在能联网的机器下载:
+   wget %s/%s/chrome-linux.zip
+   (或浏览器打开上述 URL)
+2. 解压到靶机 %s (最终路径需为 %s/chrome):
+   mkdir -p %s && cd %s
+   unzip chrome-linux.zip   # 解压出 chrome-linux/ 目录
+3. 赋予执行权限:
+   chmod +x %s/chrome
+4. 验证:
+   %s/chrome --headless --no-sandbox --dump-dom about:blank
+======================================================`,
+		npmmirrorBase, revision, chromeInstallDir, chromeInstallDir,
+		filepath.Dir(chromeInstallDir), filepath.Dir(chromeInstallDir),
+		chromeInstallDir, chromeInstallDir)
+	log.Printf("%s", hint)
+	fmt.Println(hint)
 }
 
 // boceBlock 封堵模式（RequestChecker.run_multiple 移植）：
