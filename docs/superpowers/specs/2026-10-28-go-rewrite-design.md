@@ -300,5 +300,5 @@ frame(字节层) → config/svc(含 serve 别名+unit 模板)
 | 21 | dt171 死实例重启前 `shutdown()` 会 kill -9 端口上的**外来占用者**（Python start_server 不杀、bind 失败回空 pid 列表） | 早期 stop_server 清扫语义的连带效应；仅"死实例+端口被外人占"场景可观察 |
 | 22 | dt1 args 为多键 dict 时按 key 排序迭代（Python dict 插入序不可由 JSON 稳定还原） | 单键 dict（真实用法）行为确定且对齐；多键顺序差异属输入病态 |
 | 23 | chromium 下载并发：Python `_browser_lock` 串行阻塞；Go 同样阻塞串行 + 等锁 double-check | 语义一致（后到者复用先到者结果），无差异，仅记录实现路径 |
-| 24 | zip 解压：Go `unzipInto` 复刻 CPython `zipfile.extractall` 路径消毒（`..` 段丢弃、绝对路径去首斜杠、空段丢弃），但不复刻符号链接条目与 0o600→umask 权限细节 | chromium 包内无符号链接（真机 `/opt/socket/chrome-linux` 实测 0 个）；文件权限由 chmod 755 主目标兜底 |
+| 24 | zip 解压：Go `unzipInto` 逐条复刻 CPython `zipfile.extractall`（`_extract_member` 源码核对 + python3.9 实测）——路径段过滤 `""`/`.`/`..`（含中间段 `a/../../b.txt`→`a/b.txt`）、绝对路径去首斜杠、目录 0777&~umask、文件恒 0666&~umask（**忽略 external_attr**）；不复刻符号链接条目 | chromium 包内无符号链接（真机安装目录实测 0 个）；主目标另有显式 chmod 755 |
 | 25 | mcp HTTP 绑定用 `net.JoinHostPort`（Python uvicorn `host:port` 直拼） | `mcp.bind.host` 配 v6 字面量时 Go 可用、Python 会 "too many colons"；默认 0.0.0.0 无差别 |
