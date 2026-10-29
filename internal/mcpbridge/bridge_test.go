@@ -3,6 +3,7 @@ package mcpbridge
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -217,5 +218,32 @@ func TestOpenAuditCreatesMissingParentDir(t *testing.T) {
 	defer a.Close()
 	if _, err := os.Stat(db); err != nil {
 		t.Fatalf("db 文件未创建: %v", err)
+	}
+}
+
+// db_path 写成已存在的目录时，sqlite 只回 "unable to open database file:
+// out of memory (14)"——完全看不出是配置写错了。须给出能读懂的错误。
+func TestOpenRegistryRejectsDirectoryPath(t *testing.T) {
+	dir := t.TempDir()
+	_, err := OpenRegistry(dir)
+	if err == nil {
+		t.Fatal("db_path 指向目录须报错")
+	}
+	if strings.Contains(err.Error(), "out of memory") {
+		t.Fatalf("错误信息须可读，不得是 sqlite 的 out of memory: %v", err)
+	}
+	if !strings.Contains(err.Error(), "目录") {
+		t.Fatalf("错误信息须点明是目录: %v", err)
+	}
+}
+
+func TestOpenAuditRejectsDirectoryPath(t *testing.T) {
+	dir := t.TempDir()
+	_, err := OpenAudit(dir, 90)
+	if err == nil {
+		t.Fatal("db_path 指向目录须报错")
+	}
+	if !strings.Contains(err.Error(), "目录") {
+		t.Fatalf("错误信息须点明是目录: %v", err)
 	}
 }

@@ -177,7 +177,13 @@ func (m *LockManager) ReleaseTarget(target string, class Lk, key string) {
 // （§12#11 有意改绝对路径），全新机器上目录不存在——sqlite 只会回
 // "unable to open database file: out of memory (14)"，看不出真因。
 // 纯文件名（无目录部分，如 Python 默认的 ./x.db）直接跳过。
+//
+// db_path 本身指向已存在的目录（配置写错）时同样只会得到那句 out of memory，
+// 这里提前点破。
 func mkdirForFile(path string) error {
+	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		return fmt.Errorf("db_path 指向了目录而不是文件: %s", path)
+	}
 	dir := filepath.Dir(path)
 	if dir == "." || dir == "" {
 		return nil
