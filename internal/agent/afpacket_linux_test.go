@@ -121,7 +121,10 @@ func TestSendSocketStaleClassification(t *testing.T) {
 		want bool
 	}{
 		{unix.ENXIO, true}, // 网卡删除/重建的真机返回值（dummy 网卡实测）
-		{unix.ENETDOWN, true},
+		// ENETDOWN **不是**句柄失效：网卡 down 时 Bind 照样成功，且同一句柄在网卡
+		// up 回来后立刻可发（真机实测 down→ENETDOWN、up→nil，全程未重建）。
+		// 归为 stale 会让持续 down 的网卡每包重建一次 socket（实测 built 1→2→3→4）。
+		{unix.ENETDOWN, false},
 		{unix.EBADF, true},
 		{unix.EINVAL, true},
 		{unix.ENODEV, true},
@@ -218,5 +221,119 @@ func TestReplaySendRebuildBackoff(t *testing.T) {
 	}
 	if got := attempts.Load(); got != first {
 		t.Fatalf("冷却期内不得重复重建：首次 %d 次，5 次调用后 %d 次", first, got)
+	}
+}
+
+// 网卡持续 down：不得重建 socket（ENETDOWN 是链路状态，不是句柄失效）。
+// 真机实测绑定 down 的网卡成功、网卡 up 回来后同一句柄立刻可发。
+func TestReplaySendDownIfaceDoesNotRebuild(t *testing.T) {
+	sendMu.Lock()
+	savedSockets, savedOpen, savedSendTo := sendSockets, openSendSocket, sendToFn
+	sendSockets = map[string]*rawPacketSender{}
+	var built atomic.Int32
+	openSendSocket = func(iface string) (*rawPacketSender, error) {
+		built.Add(1)
+		return &rawPacketSender{fd: -1, ifindex: 7}, nil
+	}
+	sendToFn = func(fd int, pkt []byte, ifindex int) error { return unix.ENETDOWN }
+	sendMu.Unlock()
+	t.Cleanup(func() {
+		sendMu.Lock()
+		sendSockets, openSendSocket, sendToFn = savedSockets, savedOpen, savedSendTo
+		sendMu.Unlock()
+		rebuildBackoffMu.Lock()
+		rebuildBackoffAt = nil
+		rebuildBackoffMu.Unlock()
+	})
+
+	for i := 0; i < 3; i++ {
+		if err := replaySendLinux("lo", make([]byte, 16)); !errors.Is(err, unix.ENETDOWN) {
+			t.Fatalf("第 %d 包须原样返回 ENETDOWN，实际 %v", i, err)
+		}
+	}
+	if got := built.Load(); got != 1 {
+		t.Fatalf("网卡 down 期间不得重建：应只建 1 次，实际 %d 次（每包重建一次）", got)
+	}
+	// 网卡 up 回来：同一句柄直接可发，仍不新建
+	sendToFn = func(fd int, pkt []byte, ifindex int) error { return nil }
+	if err := replaySendLinux("lo", make([]byte, 16)); err != nil {
+		t.Fatalf("网卡恢复后同一句柄须能发送: %v", err)
+	}
+	if got := built.Load(); got != 1 {
+		t.Fatalf("恢复后不得重建，实际 %d 次", got)
+	}
+}
+
+// 两个 goroutine 同时撞上同一失效句柄：两个包都必须发出去。
+// Sendto 报 ENXIO 的那次根本没上线（真机实测接收端 0 包），所以两边各自重试
+// 是正确的——不构成重复报文；反过来"只有抢到删除的才重试"会让另一个包静默丢失
+// （replayer 逐包失败只计数不报错，见 TestReplayerPerPacketSendFailureKeepsStats）。
+func TestReplaySendConcurrentStaleNoPacketLost(t *testing.T) {
+	sendMu.Lock()
+	savedSockets, savedOpen, savedSendTo := sendSockets, openSendSocket, sendToFn
+	sendSockets = map[string]*rawPacketSender{}
+	var built atomic.Int32
+	openSendSocket = func(iface string) (*rawPacketSender, error) {
+		built.Add(1)
+		return &rawPacketSender{fd: -1, ifindex: 7}, nil
+	}
+	// 前两次调用（两个 goroutine 各自的首发）都卡在同一点，确保拿到的是同一个
+	// 失效前句柄；之后的重试直接放行。
+	release := make(chan struct{})
+	var firstTwo atomic.Int32
+	var failedSends, okSends atomic.Int32
+	sendToFn = func(fd int, pkt []byte, ifindex int) error {
+		if firstTwo.Add(1) <= 2 {
+			<-release
+			failedSends.Add(1)
+			return unix.ENXIO
+		}
+		okSends.Add(1)
+		return nil
+	}
+	sendMu.Unlock()
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		sendMu.Lock()
+		sendSockets, openSendSocket, sendToFn = savedSockets, savedOpen, savedSendTo
+		sendMu.Unlock()
+		rebuildBackoffMu.Lock()
+		rebuildBackoffAt = nil
+		rebuildBackoffMu.Unlock()
+	})
+
+	if _, err := replaySenderFor("lo"); err != nil {
+		t.Fatal(err)
+	}
+	built.Store(1)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) { defer wg.Done(); errs[i] = replaySendLinux("lo", make([]byte, 16)) }(i)
+	}
+	for firstTwo.Load() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	wg.Wait()
+
+	for i, e := range errs {
+		if e != nil {
+			t.Fatalf("第 %d 个包未送达（并发下被丢弃）: %v", i, e)
+		}
+	}
+	// 两个 goroutine 持有的是同一个失效前句柄，所以两人的首发都该失败（各 1 次 ENXIO），
+	// 然后各自重试成功 → 一共 2 失败 + 2 成功。任一包没送达就是丢了。
+	if got := failedSends.Load(); got != 2 {
+		t.Fatalf("两个 goroutine 的首发都该遇到 ENXIO，实际 %d 次", got)
+	}
+	if got := okSends.Load(); got != 2 {
+		t.Fatalf("两个包都须成功送达（各自一次重试），实际成功 %d 次", got)
 	}
 }

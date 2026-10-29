@@ -226,6 +226,9 @@ func replaySendLinux(iface string, pkt []byte) error {
 	}
 	// 网卡删除重建（ifindex 变化）/ socket 失效：丢弃缓存句柄后重建重试一次。
 	// Python 每次回放都新建 socket，故不存在此问题；Go 常驻缓存需要这层自愈（§12#26）。
+	// 并发下两个 goroutine 都撞上同一失效句柄时**都该重试**：Sendto 报 ENXIO 的那次
+	// 根本没有上线（真机实测接收端 0 包），所以重发不构成重复报文；反过来"没抢到
+	// 删除就不重试"会让那个包静默丢失（replayer 逐包失败只计数不报错）。
 	dropSendSocket(iface, s)
 	s, err = sendHandle(iface)
 	if err != nil {
@@ -263,12 +266,14 @@ var errNoSendSocket = errors.New("发送 socket 不可用（网卡重建冷却�
 // sendSocketStale 缓存句柄已失效的错误族。
 //
 // ENXIO 是**网卡被删除/重建**时的实际返回值（真机实测：dummy 网卡 ip link del 后
-// Sendto 回 "no such device or address" = ENXIO）。漏了它这层自愈就等于无效——
-// ENETDOWN 只覆盖"网卡还在但 down"。
+// Sendto 回 "no such device or address" = ENXIO）。漏了它这层自愈就等于无效。
+//
+// ENETDOWN **不属于**此列：网卡 down 时 Bind 照样成功，且同一句柄在网卡 up 回来后
+// 立刻可发（真机实测 down→ENETDOWN、up→nil，全程未重建）。归进来会让持续 down 的
+// 网卡每包重建一次 socket（实测构造次数 1→2→3→4），纯属无意义的内核调用抖动。
 func sendSocketStale(err error) bool {
-	return errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ENETDOWN) ||
-		errors.Is(err, unix.EBADF) || errors.Is(err, unix.EINVAL) ||
-		errors.Is(err, unix.ENODEV)
+	return errors.Is(err, unix.ENXIO) || errors.Is(err, unix.EBADF) ||
+		errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENODEV)
 }
 
 // rebuildBackoff 重建失败后的冷却（防"网卡长期不存在"时每包都重建一次 socket，
