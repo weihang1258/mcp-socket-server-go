@@ -97,7 +97,7 @@ func boceBrowser(payload []byte, mode string, count, timeout int) ([]byte, error
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, err
 	}
-	chromium := defaultChromiumPath()
+	var chromium string
 	if req.Chromium != "" {
 		chromium = req.Chromium
 	} else {

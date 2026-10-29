@@ -302,7 +302,7 @@ frame(字节层) → config/svc(含 serve 别名+unit 模板)
 | 23 | chromium 下载并发：Python `_browser_lock` 串行阻塞；Go 同样阻塞串行 + 等锁 double-check | 语义一致（后到者复用先到者结果），无差异，仅记录实现路径 |
 | 24 | zip 解压：Go `unzipInto` 逐条复刻 CPython `zipfile.extractall`（`_extract_member` 源码核对 + python3.9 实测）——路径段过滤 `""`/`.`/`..`（含中间段 `a/../../b.txt`→`a/b.txt`）、绝对路径去首斜杠、目录 0777&~umask、文件恒 0666&~umask（**忽略 external_attr**）；不复刻符号链接条目 | chromium 包内无符号链接（真机安装目录实测 0 个）；主目标另有显式 chmod 755 |
 | 25 | mcp HTTP 绑定用 `net.JoinHostPort`（Python uvicorn `host:port` 直拼） | `mcp.bind.host` 配 v6 字面量时 Go 可用、Python 会 "too many colons"；默认 0.0.0.0 无差别 |
-| 26 | 回放发送 socket 常驻缓存（`sendSockets`，按 iface 名，加锁）：Python `replay_files` 末尾 `_cleanup_sockets()` 每次回放建/关 | fd 数量按网卡数有界（≤2×N），换来免每次重建；网卡删除重建（ifindex 变化）时会 ENETDOWN，需重启 agent |
+| 26 | 回放发送 socket 常驻缓存（`sendSockets`，按 iface 名，`sendMu` 保护）：Python 的 socket 是 PcapReplayer 实例字段、每次 dt0 新建实例并 `_cleanup_sockets()`，故「每回放独占+必回收」 | fd 数量按网卡数有界（≤2×N）；网卡删除重建（ifindex 变化）时靠 ENETDOWN/EBADF/EINVAL/ENODEV 自愈：删缓存+关 fd+重建重试一次。不照搬 Python 的「回放完关闭」——Go 是全局共享缓存，照搬会让并发 dt0 互相关掉对方正在用的 fd |
 | 27 | chromium 并发下载冲突：Python `_browser_lock` 串行；Go 同样阻塞串行 + 锁内 double-check | 语义一致（后到者复用先到者结果） |
 | 30 | `no_proxy` 后缀用**标签边界**匹配（`host==e \|\| HasSuffix(host, "."+e)`）；Python requests 用裸 `endswith`，故 `no_proxy=mirror.com` 在 Python 会命中 `notmirror.com`，Go 不会 | Go 更接近 curl/wget；Python 的裸后缀匹配本身是缺陷，且真实环境不会配成这种形式 |
 | 29 | chromium 代理解析完全自实现（config `proxy=` 优先 → 无 scheme 自动补 `http://` → 环境变量小写优先 → 遵守 `no_proxy`/`NO_PROXY`） | 不用 `http.ProxyFromEnvironment`（其大小写优先级与 requests 不同，且无法在前面插入 config 覆盖）；no_proxy 语义有 6 组单测守护 |

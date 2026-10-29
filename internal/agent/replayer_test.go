@@ -378,6 +378,39 @@ func TestReplayerSendUnavailableFailsFast(t *testing.T) {
 	}
 }
 
+// 逐包发送失败：Python send_packet 内 except → return，不累加字节，但 replay_file 的
+// packets 照常累加 → 最终 stats 呈 total_packets>0 / total_bytes=0。**这是 Python 语义，
+// 不得改成 error JSON**。本用例锁住该行为，防将来"顺手"改成错误帧。
+func TestReplayerPerPacketSendFailureKeepsStats(t *testing.T) {
+	prevSend, prevPrep := replaySendFn, replayPrepareFn
+	replaySendFn = func(iface string, pkt []byte) error { return errors.New("send failed") }
+	replayPrepareFn = func(up, down string) error { return nil } // prepare 成功，逐包失败
+	t.Cleanup(func() { replaySendFn, replayPrepareFn = prevSend, prevPrep })
+
+	dir := t.TempDir()
+	p := filepath.Join(dir, "x.pcap")
+	writeReplayPcap(t, p, int(1e6),
+		ipv4("10.20.0.1", "10.20.0.2", 6, tcpSeg(1000, 80, 0x02, nil)),
+		ipv4("10.20.0.2", "10.20.0.1", 6, tcpSeg(80, 1000, 0x10, nil)))
+
+	resp, err := runDT(t, 0, mustJSON(t, map[string]any{
+		"pcaps": []string{p}, "uplink_iface": "u", "downlink_iface": "d",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s struct {
+		TotalPackets int `json:"total_packets"`
+		TotalBytes   int `json:"total_bytes"`
+	}
+	if err := json.Unmarshal(resp, &s); err != nil {
+		t.Fatalf("须返回 stats 而非 error JSON（Python 语义）: %s", resp)
+	}
+	if s.TotalPackets != 2 || s.TotalBytes != 0 {
+		t.Fatalf("逐包失败须 total_packets=2/total_bytes=0（Python 语义）: %s", resp)
+	}
+}
+
 func resetReplaySender(t *testing.T) {
 	t.Helper()
 	replaySender = &fakeSender{}

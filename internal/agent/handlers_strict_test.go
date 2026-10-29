@@ -402,6 +402,25 @@ func TestBoceExplicitEmptyModeIsUnknown(t *testing.T) {
 	}
 }
 
+// dt131 浏览器模式显式 chromium_path:"" → Python boce.py:475 ValueError 冒泡断连
+// （预检 isfile("") 假会先下载失败；此处注入 ensure 成功以走到 mode 分派）
+func TestBoceEmptyChromiumPathBrowerDisconnects(t *testing.T) {
+	setEnsureChromium(func(string) bool { return true })
+	t.Cleanup(func() { setEnsureChromium(nil) })
+	cs := &ConnState{}
+	for _, mode := range []string{"重定向", "弹窗", "未知模式"} {
+		payload := []byte(`{"url":"http://127.0.0.1:1","count":1,"mode":"` + mode + `","chromium_path":""}`)
+		if _, err := Do(cs, 131, payload); err == nil {
+			t.Errorf("mode=%s + 空 chromium_path 须断连（Python ValueError）", mode)
+		}
+	}
+	// 封堵模式不受此限（Python 只对非封堵检查）
+	payload := []byte(`{"url":"http://127.0.0.1:1","count":1,"mode":"封堵","chromium_path":""}`)
+	if _, err := Do(cs, 131, payload); err != nil {
+		t.Fatalf("封堵模式空 chromium_path 不得断连: %v", err)
+	}
+}
+
 // dt10 value:null → Python ifconfig eth mtu None 必败吞错 + sleep5，网卡不动
 func TestDT10ValueNullNoMutation(t *testing.T) {
 	cs := &ConnState{}

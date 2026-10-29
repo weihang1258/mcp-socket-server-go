@@ -27,7 +27,7 @@ import (
 // 无包管理器仅 log 继续 → 装后复测失败回错误 JSON。
 // boce() 运行时异常冒泡断连（回退后契约）。封堵=纯 HTTP；重定向/弹窗=chromedp（boce_browser）。
 
-// 可注入路径（测试改到临时目录；生产值对齐 boce.py:83-84）。
+// 可注入路径（测试改到临时目录；生产值对齐 boce.py:80-81）。
 // defaultChromiumPath 由 chromeInstallDir 派生，避免两处路径漂移。
 var (
 	chromeInstallDir = "/opt/socket/chrome-linux"
@@ -157,6 +157,11 @@ func doBoce(payload []byte) ([]byte, error) {
 		out := boceBlock(req.Url, count, req.Interval, tc, timeout)
 		return dt131Frame(out), nil
 	default:
+		// Python boce.py:475-476：浏览器模式显式空 chromium_path → ValueError 冒泡断连
+		//（预检阶段 isfile("") 为假会先走下载失败分支；下载成功或预检被绕过时才会到这里）
+		if chromium == "" {
+			return nil, errors.New("必须指定 Chromium 可执行文件路径参数 chromium_path")
+		}
 		return boceBrowser(payload, mode, count, timeout) // chromedp 实现（boce_browser.go）
 	}
 }
@@ -241,7 +246,7 @@ func ensureChromiumDownload(chromiumPath string) bool {
 
 var chromiumDownloadMu sync.Mutex
 
-// readSocketConfigProxy /opt/socket/config 的 proxy= 键（boce.py:88 _read_config_proxy）。
+// readSocketConfigProxy /opt/socket/config 的 proxy= 键（boce.py:84 _read_config_proxy）。
 // 与 readAutoupgrade 同源文件（agent 侧实时读 /opt/socket/config）。
 func readSocketConfigProxy() string {
 	b, err := os.ReadFile(filepath.Join(upgradeRoot, "config"))
@@ -374,11 +379,11 @@ func noProxyBypass(u *url.URL) bool {
 		}
 		// 后缀匹配：Python 用裸 endswith（无标签边界，故 no_proxy=mirror.com 会命中
 		// notmirror.com）；Go 侧保留标签边界语义（§12#30），更接近 curl/wget。
+		// **不得剥离 entry 的端口**：requests 是拿 entry 原样与 host / host:port 两个
+		// 形态比 endswith，端口不匹配就不命中（否则 no_proxy=h.com:8080 会误绕 h.com:9090）。
 		e := strings.TrimPrefix(entry, ".")
-		if h, _, err := net.SplitHostPort(e); err == nil {
-			e = h
-		}
-		if host == e || strings.HasSuffix(host, "."+e) || hostWithPort == entry {
+		if host == e || strings.HasSuffix(host, "."+e) ||
+			hostWithPort == entry || strings.HasSuffix(hostWithPort, "."+entry) {
 			return true
 		}
 	}

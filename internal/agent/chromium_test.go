@@ -463,10 +463,28 @@ func TestChromiumProxyNoProxyBypass(t *testing.T) {
 			t.Fatalf("* 须全部直连: %v", u)
 		}
 	})
+	// 带端口条目必须端口精确匹配（requests：entry 原样与 host / host:port 比 endswith）
 	t.Run("带端口条目", func(t *testing.T) {
 		t.Setenv("no_proxy", "h.com:8080")
+		cases := []struct {
+			url       string
+			wantBypss bool
+		}{
+			{"http://h.com:8080/x", true},
+			{"http://h.com/x", false},      // 无端口 ≠ 带端口条目
+			{"http://h.com:9090/x", false}, // 端口不同不得绕过（曾有 bug）
+		}
+		for _, c := range cases {
+			u, _ := chromiumProxyFunc()(req(c.url))
+			if got := u == nil; got != c.wantBypss {
+				t.Errorf("%s: bypass=%v want %v (proxy=%v)", c.url, got, c.wantBypss, u)
+			}
+		}
+	})
+	t.Run("不带端口的条目可匹配任意端口", func(t *testing.T) {
+		t.Setenv("no_proxy", "h.com")
 		if u, _ := chromiumProxyFunc()(req("http://h.com:8080/x")); u != nil {
-			t.Fatalf("带端口条目须命中: %v", u)
+			t.Fatalf("无端口条目须命中带端口 URL: %v", u)
 		}
 	})
 	t.Run("大写 NO_PROXY 也生效", func(t *testing.T) {

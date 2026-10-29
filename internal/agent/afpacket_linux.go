@@ -159,8 +159,6 @@ func injectBPF(src pktSource, bpf []bpfInstr) error {
 	return attachBPF(afp.fd, bpf)
 }
 
-var errAFNotLinux = errors.New("AF_PACKET 仅 Linux")
-
 // syscallReadRO 只读包装（供 setsockopt* 使用，避免重复 import）。
 var _ = os.Geteuid
 
@@ -218,7 +216,34 @@ func replaySendLinux(iface string, pkt []byte) error {
 		return err
 	}
 	addr := &unix.SockaddrLinklayer{Ifindex: s.ifindex}
-	return unix.Sendto(s.fd, pkt, 0, addr)
+	err = unix.Sendto(s.fd, pkt, 0, addr)
+	if err == nil || !sendSocketStale(err) {
+		return err
+	}
+	// 网卡删除重建（ifindex 变化）/ socket 失效：丢弃缓存句柄后重建重试一次。
+	// Python 每次回放都新建 socket，故不存在此问题；Go 常驻缓存需要这层自愈（§12#26）。
+	dropSendSocket(iface, s)
+	s, rerr := replaySenderFor(iface)
+	if rerr != nil {
+		return rerr
+	}
+	return unix.Sendto(s.fd, pkt, 0, &unix.SockaddrLinklayer{Ifindex: s.ifindex})
+}
+
+// sendSocketStale 缓存句柄已失效的错误族。
+func sendSocketStale(err error) bool {
+	return errors.Is(err, unix.ENETDOWN) || errors.Is(err, unix.EBADF) ||
+		errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENODEV)
+}
+
+// dropSendSocket 仅当缓存仍是同一句柄时才删除并关闭（避免关掉别处刚重建的）。
+func dropSendSocket(iface string, stale *rawPacketSender) {
+	sendMu.Lock()
+	defer sendMu.Unlock()
+	if cur, ok := sendSockets[iface]; ok && cur == stale {
+		delete(sendSockets, iface)
+		unix.Close(stale.fd)
+	}
 }
 
 // replaySenderFor 按网卡取/建发送 socket（缓存复用，对齐 Python _uplink_socket/_downlink_socket）。
