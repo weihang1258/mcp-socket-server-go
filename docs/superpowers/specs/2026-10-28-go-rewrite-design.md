@@ -302,8 +302,11 @@ frame(字节层) → config/svc(含 serve 别名+unit 模板)
 | 23 | chromium 下载并发：Python `_browser_lock` 串行阻塞；Go 同样阻塞串行 + 等锁 double-check | 语义一致（后到者复用先到者结果），无差异，仅记录实现路径 |
 | 24 | zip 解压：Go `unzipInto` 逐条复刻 CPython `zipfile.extractall`（`_extract_member` 源码核对 + python3.9 实测）——路径段过滤 `""`/`.`/`..`（含中间段 `a/../../b.txt`→`a/b.txt`）、绝对路径去首斜杠、目录 0777&~umask、文件恒 0666&~umask（**忽略 external_attr**）；不复刻符号链接条目 | chromium 包内无符号链接（真机安装目录实测 0 个）；主目标另有显式 chmod 755 |
 | 25 | mcp HTTP 绑定用 `net.JoinHostPort`（Python uvicorn `host:port` 直拼） | `mcp.bind.host` 配 v6 字面量时 Go 可用、Python 会 "too many colons"；默认 0.0.0.0 无差别 |
-| 26 | 回放发送 socket 常驻缓存（`sendSockets`，按 iface 名，`sendMu` 保护）：Python 的 socket 是 PcapReplayer 实例字段、每次 dt0 新建实例并 `_cleanup_sockets()`，故「每回放独占+必回收」 | fd 数量按网卡数有界（≤2×N）；网卡删除重建（ifindex 变化）时靠 ENETDOWN/EBADF/EINVAL/ENODEV 自愈：删缓存+关 fd+重建重试一次。不照搬 Python 的「回放完关闭」——Go 是全局共享缓存，照搬会让并发 dt0 互相关掉对方正在用的 fd |
+| 26 | 回放发送 socket 常驻缓存（`sendSockets`，按 iface 名，`sendMu` 保护）：Python 的 socket 是 PcapReplayer 实例字段、每次 dt0 新建实例并 `_cleanup_sockets()`，故「每回放独占+必回收」 | fd 数量按网卡数有界（≤2×N）；网卡删除重建（ifindex 变化）时靠 ENXIO/ENETDOWN/EBADF/EINVAL/ENODEV 自愈：删缓存+关 fd+重建重试一次（§12#31）。不照搬 Python 的「回放完关闭」——Go 是全局共享缓存，照搬会让并发 dt0 互相关掉对方正在用的 fd |
 | 27 | chromium 并发下载冲突：Python `_browser_lock` 串行；Go 同样阻塞串行 + 锁内 double-check | 语义一致（后到者复用先到者结果） |
-| 30 | `no_proxy` 后缀用**标签边界**匹配（`host==e \|\| HasSuffix(host, "."+e)`）；Python requests 用裸 `endswith`，故 `no_proxy=mirror.com` 在 Python 会命中 `notmirror.com`，Go 不会 | Go 更接近 curl/wget；Python 的裸后缀匹配本身是缺陷，且真实环境不会配成这种形式 |
-| 29 | chromium 代理解析完全自实现（config `proxy=` 优先 → 无 scheme 自动补 `http://` → 环境变量小写优先 → 遵守 `no_proxy`/`NO_PROXY`） | 不用 `http.ProxyFromEnvironment`（其大小写优先级与 requests 不同，且无法在前面插入 config 覆盖）；no_proxy 语义有 6 组单测守护 |
 | 28 | 首字节后 body 停摆按 requests 语义处理：Go 在 dial 时给 conn 包 `readDeadlineConn`（每次 Read 前重设 deadline），等效 requests 的 read timeout；**不是**总传输时限 | 36MB 目录列表/500MB zip 在慢链路上必须能传完 |
+| 29 | chromium 代理解析完全自实现（config `proxy=` 优先 → 无 scheme 自动补 `http://` → 环境变量小写优先 → 遵守 `no_proxy`/`NO_PROXY`） | 不用 `http.ProxyFromEnvironment`（其大小写优先级与 requests 不同，且无法在前面插入 config 覆盖）；no_proxy 语义有 6 组单测守护 |
+| 30 | `no_proxy` 后缀用**标签边界**匹配（`host==e \|\| HasSuffix(host, "."+e)`）；Python requests 用裸 `endswith`，故 `no_proxy=mirror.com` 在 Python 会命中 `notmirror.com`，Go 不会 | Go 更接近 curl/wget；Python 的裸后缀匹配本身是缺陷，且真实环境不会配成这种形式 |
+| 31 | 回放 socket 自愈的错误族以 **ENXIO** 为主（真机实测 `ip link del` 后 `Sendto` 回 `no such device or address` = ENXIO，不是 ENODEV/ENETDOWN）；且重建失败后进 2s 冷却，冷却期内不再建 socket | 漏 ENXIO 则自愈对「网卡被删除」这一主场景完全失效；无冷却时网卡长期不存在会每包一次 `socket()` 系统调用（回放上百万包即系统调用风暴） |
+| 32 | `no_proxy` 的 IPv4 CIDR 判定：Go 用 `net.ParseCIDR`，requests 用 `is_valid_cidr`（正则，拒绝全零掩码如 `0.0.0.0/0`）| Go 更宽松：`no_proxy=0.0.0.0/0` 在 Go 会绕过全部 IPv4（Python 视为非法条目跳过）。属放宽，不会漏绕过；真实配置不会写 `/0` |
+| 33 | zip 解压**不**复刻 `extractall` 的硬链接条目与 mtime 恢复 | chromium 包内无硬链接条目（实测）；mtime 不影响执行。若将来换包源需复核 `unzipInto` |

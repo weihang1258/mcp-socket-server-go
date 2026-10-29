@@ -310,9 +310,13 @@ func (c *readDeadlineConn) Read(p []byte) (int, error) {
 func chromiumProxyFunc() func(*http.Request) (*url.URL, error) {
 	return func(req *http.Request) (*url.URL, error) {
 		if p := readSocketConfigProxy(); p != "" {
-			if u := parseProxyURL(p); u != nil {
-				return u, nil // 显式配置不参与 no_proxy 绕过（与 requests proxies= 一致）
+			u := parseProxyURL(p)
+			if u == nil {
+				// 配了代理但不可解析：直接失败（走 ensureChromiumDownload 的日志+手动下载
+				// 提示路径），不静默改用 env——否则"代理配错了"会表现为"下载很慢/超时"。
+				return nil, fmt.Errorf("proxy= 配置不可用: %q", p)
 			}
+			return u, nil // 显式配置不参与 no_proxy 绕过（与 requests proxies= 一致）
 		}
 		if noProxyBypass(req.URL) {
 			return nil, nil
@@ -391,14 +395,36 @@ func noProxyBypass(u *url.URL) bool {
 }
 
 // parseProxyURL 无 scheme 时补 http://（"10.0.0.1:7897" → http://10.0.0.1:7897）。
+// 已有 scheme 时**不再二次补 scheme**：否则 "http://" 会被补成 "http://http://"，
+// url.Parse 给出 host="http:" 这种坏代理（比回落 env 更糟，流量指向解析不出的 host）。
 func parseProxyURL(raw string) *url.URL {
-	if u, err := url.Parse(raw); err == nil && u.Host != "" {
-		return u
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
 	}
-	if u, err := url.Parse("http://" + raw); err == nil {
+	if strings.Contains(raw, "://") {
+		if u, err := url.Parse(raw); err == nil && usableProxyURL(u) {
+			return u
+		}
+		return nil
+	}
+	if u, err := url.Parse("http://" + raw); err == nil && usableProxyURL(u) {
 		return u
 	}
 	return nil
+}
+
+// usableProxyURL host 必须解析出主机名；带端口时端口须为数字；"h.com:" 这类尾冒号视为坏值。
+func usableProxyURL(u *url.URL) bool {
+	if u.Hostname() == "" || strings.HasSuffix(u.Host, ":") {
+		return false
+	}
+	if p := u.Port(); p != "" {
+		if _, err := strconv.Atoi(p); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // fetcher 带 proxy 语义的 HTTP client（总时限不限，超时由 transport 逐操作控制）。

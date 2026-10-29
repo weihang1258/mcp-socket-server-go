@@ -509,6 +509,27 @@ func TestChromiumProxyNoProxyBypass(t *testing.T) {
 			t.Fatal("非该 IP 须走代理")
 		}
 	})
+	// 配置了代理但值不可用 → 直接报错（不静默回落 env，避免"配错了表现为下载慢"）
+	t.Run("config proxy 不可解析须报错", func(t *testing.T) {
+		dir := t.TempDir()
+		prev := upgradeRoot
+		defer func() { upgradeRoot = prev }()
+		upgradeRoot = dir
+		t.Setenv("HTTP_PROXY", "http://env:1") // 有 env 也不得静默改用
+		for _, bad := range []string{"http://", "h.com:", "::::bad", "%zz"} {
+			os.WriteFile(filepath.Join(dir, "config"), []byte("proxy="+bad+"\n"), 0o644)
+			u, err := chromiumProxyFunc()(req("http://example.invalid/x"))
+			if err == nil || u != nil {
+				t.Errorf("proxy=%q 须报错且不给代理: u=%v err=%v", bad, u, err)
+			}
+		}
+		// 合法值仍正常
+		os.WriteFile(filepath.Join(dir, "config"), []byte("proxy=h.com:7897\n"), 0o644)
+		u, err := chromiumProxyFunc()(req("http://example.invalid/x"))
+		if err != nil || u == nil || u.Host != "h.com:7897" {
+			t.Fatalf("合法 proxy 须正常: u=%v err=%v", u, err)
+		}
+	})
 	t.Run("config 显式 proxy 不被 no_proxy 绕开", func(t *testing.T) {
 		dir := t.TempDir()
 		upgradeRoot = dir

@@ -120,6 +120,7 @@ func TestSendSocketStaleClassification(t *testing.T) {
 		err  error
 		want bool
 	}{
+		{unix.ENXIO, true}, // 网卡删除/重建的真机返回值（dummy 网卡实测）
 		{unix.ENETDOWN, true},
 		{unix.EBADF, true},
 		{unix.EINVAL, true},
@@ -131,5 +132,91 @@ func TestSendSocketStaleClassification(t *testing.T) {
 		if got := sendSocketStale(tc.err); got != tc.want {
 			t.Errorf("%v: got %v want %v", tc.err, got, tc.want)
 		}
+	}
+}
+
+// 端到端自愈：真正经过 sendSocketStale 判定 → drop → 重建 → 重发。
+// 这条能抓住「判定漏了某个 errno」（如 ENXIO）这类回归——旧的
+// TestReplaySendStaleSocketRebuilds 直接调 dropSendSocket，抓不到。
+func TestReplaySendSelfHealsOnStaleErrno(t *testing.T) {
+	sendMu.Lock()
+	savedSockets, savedOpen, savedSendTo := sendSockets, openSendSocket, sendToFn
+	sendSockets = map[string]*rawPacketSender{}
+	var built atomic.Int32
+	openSendSocket = func(iface string) (*rawPacketSender, error) {
+		built.Add(1)
+		return &rawPacketSender{fd: -1, ifindex: 7 + int(built.Load())}, nil
+	}
+	var firstCall atomic.Bool
+	sendToFn = func(fd int, pkt []byte, ifindex int) error {
+		if firstCall.CompareAndSwap(false, true) {
+			return unix.ENXIO // 首次发送：模拟网卡已被删除
+		}
+		return nil
+	}
+	sendMu.Unlock()
+	t.Cleanup(func() {
+		sendMu.Lock()
+		sendSockets, openSendSocket, sendToFn = savedSockets, savedOpen, savedSendTo
+		sendMu.Unlock()
+		rebuildBackoffMu.Lock()
+		rebuildBackoffAt = nil
+		rebuildBackoffMu.Unlock()
+	})
+
+	if err := replaySendLinux("lo", make([]byte, 16)); err != nil {
+		t.Fatalf("ENXIO 须自愈重试成功，实际: %v", err)
+	}
+	if built.Load() != 2 {
+		t.Fatalf("须重建一次（构造器 2 次），实际 %d", built.Load())
+	}
+	// 非失效类错误不得触发重建
+	firstCall.Store(false)
+	sendToFn = func(fd int, pkt []byte, ifindex int) error { return unix.ENOBUFS }
+	before := built.Load()
+	if err := replaySendLinux("lo", make([]byte, 16)); err == nil {
+		t.Fatal("普通错误须原样返回")
+	}
+	if built.Load() != before {
+		t.Fatal("普通错误不得触发重建")
+	}
+}
+
+// 网卡长期不可用（重建持续失败）时不得每包都建 socket：冷却期内跳过重建。
+func TestReplaySendRebuildBackoff(t *testing.T) {
+	sendMu.Lock()
+	savedSockets, savedOpen, savedSendTo := sendSockets, openSendSocket, sendToFn
+	sendSockets = map[string]*rawPacketSender{}
+	var attempts atomic.Int32
+	openSendSocket = func(iface string) (*rawPacketSender, error) {
+		if attempts.Add(1) == 1 {
+			return &rawPacketSender{fd: -1, ifindex: 7}, nil // 首次建成功
+		}
+		return nil, unix.ENODEV // 之后的重建恒失败（网卡长期不存在）
+	}
+	sendToFn = func(fd int, pkt []byte, ifindex int) error { return unix.ENXIO }
+	sendMu.Unlock()
+	t.Cleanup(func() {
+		sendMu.Lock()
+		sendSockets, openSendSocket, sendToFn = savedSockets, savedOpen, savedSendTo
+		sendMu.Unlock()
+		rebuildBackoffMu.Lock()
+		rebuildBackoffAt = nil
+		rebuildBackoffMu.Unlock()
+	})
+
+	// 首次：建成功 → 发送 ENXIO → drop → 重建失败（attempts=2）
+	if err := replaySendLinux("lo", make([]byte, 16)); err == nil {
+		t.Fatal("重建失败须返回错误")
+	}
+	first := attempts.Load()
+	if first != 2 {
+		t.Fatalf("首次应建 1 次 + 重建失败 1 次 = 2，实际 %d", first)
+	}
+	for i := 0; i < 5; i++ {
+		replaySendLinux("lo", make([]byte, 16))
+	}
+	if got := attempts.Load(); got != first {
+		t.Fatalf("冷却期内不得重复重建：首次 %d 次，5 次调用后 %d 次", first, got)
 	}
 }

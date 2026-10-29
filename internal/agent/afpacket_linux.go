@@ -209,31 +209,97 @@ var (
 	sendSockets = map[string]*rawPacketSender{}
 )
 
+// sendToFn 发送注入点（测试替换 unix.Sendto；真机 EPERM/root 依赖使真发包难覆盖判定路径）。
+var sendToFn = func(fd int, pkt []byte, ifindex int) error {
+	return unix.Sendto(fd, pkt, 0, &unix.SockaddrLinklayer{Ifindex: ifindex})
+}
+
 // replaySendLinux 回放发送实现（export 给 replaySendFn 替换；root/CAP_NET_RAW）。
 func replaySendLinux(iface string, pkt []byte) error {
-	s, err := replaySenderFor(iface)
+	s, err := sendHandle(iface)
 	if err != nil {
 		return err
 	}
-	addr := &unix.SockaddrLinklayer{Ifindex: s.ifindex}
-	err = unix.Sendto(s.fd, pkt, 0, addr)
+	err = sendToFn(s.fd, pkt, s.ifindex)
 	if err == nil || !sendSocketStale(err) {
 		return err
 	}
 	// 网卡删除重建（ifindex 变化）/ socket 失效：丢弃缓存句柄后重建重试一次。
 	// Python 每次回放都新建 socket，故不存在此问题；Go 常驻缓存需要这层自愈（§12#26）。
 	dropSendSocket(iface, s)
-	s, rerr := replaySenderFor(iface)
-	if rerr != nil {
-		return rerr
+	s, err = sendHandle(iface)
+	if err != nil {
+		return err
 	}
-	return unix.Sendto(s.fd, pkt, 0, &unix.SockaddrLinklayer{Ifindex: s.ifindex})
+	return sendToFn(s.fd, pkt, s.ifindex)
 }
 
+// sendHandle 取缓存的发送句柄；重建受冷却期约束（网卡长期不存在时避免每包一次
+// socket 创建——否则 ENXIO 会放大成系统调用风暴）。
+func sendHandle(iface string) (*rawPacketSender, error) {
+	// 冷却期内先判缓存（网卡若已恢复，缓存可能已被别处重建好），缓存没有就直接失败，
+	// 不再尝试建 socket——否则网卡长期不存在时每包一次 socket() 系统调用。
+	if rebuildInCooldown(iface) {
+		sendMu.Lock()
+		s := sendSockets[iface]
+		sendMu.Unlock()
+		if s != nil {
+			return s, nil
+		}
+		return nil, errNoSendSocket
+	}
+	s, err := replaySenderFor(iface)
+	if err != nil {
+		markRebuildFailed(iface)
+		return nil, err
+	}
+	clearRebuildBackoff(iface)
+	return s, nil
+}
+
+// errNoSendSocket 冷却期内缓存缺失时的占位错误（保持"发送失败但连接存活"语义）。
+var errNoSendSocket = errors.New("发送 socket 不可用（网卡重建冷却中）")
+
 // sendSocketStale 缓存句柄已失效的错误族。
+//
+// ENXIO 是**网卡被删除/重建**时的实际返回值（真机实测：dummy 网卡 ip link del 后
+// Sendto 回 "no such device or address" = ENXIO）。漏了它这层自愈就等于无效——
+// ENETDOWN 只覆盖"网卡还在但 down"。
 func sendSocketStale(err error) bool {
-	return errors.Is(err, unix.ENETDOWN) || errors.Is(err, unix.EBADF) ||
-		errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENODEV)
+	return errors.Is(err, unix.ENXIO) || errors.Is(err, unix.ENETDOWN) ||
+		errors.Is(err, unix.EBADF) || errors.Is(err, unix.EINVAL) ||
+		errors.Is(err, unix.ENODEV)
+}
+
+// rebuildBackoff 重建失败后的冷却（防"网卡长期不存在"时每包都重建一次 socket，
+// 既浪费 fd 又把错误放大成系统调用风暴）。只在**重建失败**时记录，成功后清除。
+var (
+	rebuildBackoffMu sync.Mutex
+	rebuildBackoffAt map[string]time.Time
+)
+
+const rebuildCooldown = 2 * time.Second
+
+func rebuildInCooldown(iface string) bool {
+	rebuildBackoffMu.Lock()
+	defer rebuildBackoffMu.Unlock()
+	t, ok := rebuildBackoffAt[iface]
+	return ok && time.Since(t) < rebuildCooldown
+}
+
+func markRebuildFailed(iface string) {
+	rebuildBackoffMu.Lock()
+	defer rebuildBackoffMu.Unlock()
+	if rebuildBackoffAt == nil {
+		rebuildBackoffAt = map[string]time.Time{}
+	}
+	rebuildBackoffAt[iface] = time.Now()
+}
+
+func clearRebuildBackoff(iface string) {
+	rebuildBackoffMu.Lock()
+	defer rebuildBackoffMu.Unlock()
+	delete(rebuildBackoffAt, iface)
 }
 
 // dropSendSocket 仅当缓存仍是同一句柄时才删除并关闭（避免关掉别处刚重建的）。
