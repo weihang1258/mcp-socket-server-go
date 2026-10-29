@@ -46,3 +46,8 @@ go test -race ./...
 - mcp 侧：15 工具 + 双传输 ✅（默认端口 9010；改端口用配置 `mcp.bind.port`，经 systemd 启动时 env `MCP_BIND_PORT` 需写进 unit 的 `Environment=`）
 - 真机验收 ✅：反向 oracle 38+13（Go/Python 双跑）、15 工具 e2e、三链升级闭环（Go↔Python 混部）、chromedp 重定向拨测、chromium 自动下载（npmmirror r1730241 → 536MB 落盘可执行）
 - 平台：Linux 完整功能（AF_PACKET 仅 Linux）；darwin/windows 可编译，抓包/回放返回不可用错误
+
+## 已知运行特性（与 Python 版一致，非缺陷）
+
+- **单连接串行**：每条 TCP 连接 read→do()→write 循环处理（Python ThreadingTCPServer 同构：一条连接一线程）。因此同一连接上的后续请求（含 `stop`/状态探查）会排在该请求完成之后。
+- **首次 chromium 下载会占住该连接**：`boce_run` 的客户端超时是 `timeout+10`（默认 130s），而首次自动下载真机实测 223s（536MB）。此时该连接上的请求会先被客户端判超时。与 Python 行为一致；要消除需改为 agent 启动时后台预取（未实现）。
