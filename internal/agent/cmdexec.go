@@ -31,11 +31,14 @@ type execExitError = exec.ExitError
 // - wait=false → 立即返回 None → json "null" 仍回 gzip 帧（quirk）
 // - 响应 [4B i][gzip JSON {code,stdout,stderr}]；执行异常 → {code:-1,stderr:str(e)}
 func cmdExec(payload []byte) ([]byte, error) {
+	// netutils.py:64 签名全键：shell/stdout/stderr/encoding/use_run 合法（本实现仅接线差异项）
 	var p struct {
-		Args string            `json:"args"`
-		Cwd  string            `json:"cwd"`
-		Env  map[string]string `json:"env"`
-		Wait *bool             `json:"wait"`
+		Args   json.RawMessage   `json:"args"`
+		Cwd    string            `json:"cwd"`
+		Env    map[string]string `json:"env"`
+		Wait   *bool             `json:"wait"`
+		Shell  *bool             `json:"shell"`
+		UseRun *bool             `json:"use_run"`
 	}
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, err
@@ -46,7 +49,9 @@ func cmdExec(payload []byte) ([]byte, error) {
 		return nil, errors.New("exec_cmd_subprocess missing args") // Python TypeError
 	}
 	for k := range raw1 {
-		if k != "args" && k != "cwd" && k != "env" && k != "wait" {
+		switch k {
+		case "args", "cwd", "env", "wait", "shell", "stdout", "stderr", "encoding", "use_run":
+		default:
 			return nil, fmt.Errorf("exec_cmd_subprocess unexpected kwarg %q", k)
 		}
 	}
@@ -54,10 +59,28 @@ func cmdExec(payload []byte) ([]byte, error) {
 	if p.Wait != nil {
 		wait = *p.Wait
 	}
+	shell := true // Python 默认 shell=True
+	if p.Shell != nil {
+		shell = *p.Shell
+	}
+	useRun := p.UseRun != nil && *p.UseRun
+	// use_run 分支无视 wait：subprocess.run 阻塞 → {code,stdout,stderr}
+	if useRun {
+		wait = true
+	}
 
-	args := p.Args
-	if os.Geteuid() == 0 {
-		args = stripSudoPrefix(args)
+	// args 二态：字符串（shell 路径）或列表（argv 路径，Python isinstance(args, str) 为假）
+	var argsStr string
+	var argv []string
+	if len(p.Args) > 0 && p.Args[0] == '"' {
+		if err := json.Unmarshal(p.Args, &argsStr); err != nil {
+			return nil, err
+		}
+	} else if err := json.Unmarshal(p.Args, &argv); err != nil {
+		return nil, err
+	}
+	if argsStr != "" && os.Geteuid() == 0 {
+		argsStr = stripSudoPrefix(argsStr) // 仅 shell+str 路径剥 sudo（Python 同条件）
 	}
 	env := cleanEnv(os.Environ())
 	if p.Env != nil {
@@ -66,17 +89,67 @@ func cmdExec(payload []byte) ([]byte, error) {
 
 	var code int
 	var stdout, stderr string
-	if wait {
-		code, stdout, stderr = execCmdWith(args, p.Cwd, env, true)
-	} else {
-		// 异步：Start 不等（Python Popen 不 communicate → 返回 None）；
-		// Start 失败 = Python Popen 抛异常 → except → {code:-1,...} gzip JSON（非 "null"）
-		if code, _, stderr = execCmdWith(args, p.Cwd, env, false); code == -1 {
-			return errGzipFrame(code, "", stderr) // 复审 F4：stderr 进 stderr 字段
+	switch {
+	case argv != nil && !shell:
+		// Python shell=False + 列表：argv 直执行（无 sh -c）
+		if wait || useRun {
+			code, stdout, stderr = execArgvWait(argv, p.Cwd, env)
+		} else {
+			if code, _, stderr = execArgvStart(argv, p.Cwd, env); code == -1 {
+				return errGzipFrame(code, "", stderr)
+			}
+			return gzipFrame([]byte("null")), nil
 		}
-		return gzipFrame([]byte("null")), nil
+	default:
+		args := argsStr
+		if argv != nil { // shell=True + 列表：Python 视作单命令名（args[0]），罕见路径按 shell 拼接
+			args = argv[0]
+		}
+		if wait {
+			code, stdout, stderr = execCmdWith(args, p.Cwd, env, true)
+		} else {
+			// 异步：Start 不等（Python Popen 不 communicate → 返回 None）；
+			// Start 失败 = Python Popen 抛异常 → except → {code:-1,...} gzip JSON（非 "null"）
+			if code, _, stderr = execCmdWith(args, p.Cwd, env, false); code == -1 {
+				return errGzipFrame(code, "", stderr) // 复审 F4：stderr 进 stderr 字段
+			}
+			return gzipFrame([]byte("null")), nil
+		}
 	}
 	return errGzipFrame(code, stdout, stderr)
+}
+
+// execArgvWait execCmdArgs 带工作目录/环境的 argv 变体（dt1 shell=false 路径）。
+func execArgvWait(argv []string, cwd string, env []string) (int, string, string) {
+	c := argvCmd(argv)
+	c.Dir = cwd
+	c.Env = env
+	var stdoutBuf, stderrBuf bytes.Buffer
+	c.Stdout = &stdoutBuf
+	c.Stderr = &stderrBuf
+	err := c.Run()
+	code := 0
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			code = processExitCode(ee)
+		} else {
+			return -1, "", err.Error()
+		}
+	}
+	return code, stdoutBuf.String(), stderrBuf.String()
+}
+
+// execArgvStart Popen 语义：只 Start 不等；失败 = Python Popen 异常 → {code:-1,stderr}。
+func execArgvStart(argv []string, cwd string, env []string) (int, string, string) {
+	c := argvCmd(argv)
+	c.Dir = cwd
+	c.Env = env
+	if err := c.Start(); err != nil {
+		return -1, "", err.Error()
+	}
+	go func() { c.Wait() }() // 回收僵尸，不阻塞
+	return 0, "", ""
 }
 
 // errGzipFrame [4B i][gzip JSON {code,stdout,stderr}]。

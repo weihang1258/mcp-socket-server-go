@@ -37,7 +37,10 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 			return nil, err
 		}
 		return json.Marshal(m)
-	case 7: // isfile：{"file": path} → {"res":bool}
+	case 7: // isfile：{"file": path} → {"res":bool}；**data 未知键 TypeError → 断连
+		if err := strictKeys(payload, "file"); err != nil {
+			return nil, err
+		}
 		var p struct {
 			File string `json:"file"`
 		}
@@ -46,7 +49,10 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		}
 		fi, err := os.Stat(p.File)
 		return json.Marshal(resBool(err == nil && !fi.IsDir()))
-	case 8: // isdir：{"dir": path} → {"res":bool}
+	case 8: // isdir：{"dir": path} → {"res":bool}；**data 未知键 → 断连
+		if err := strictKeys(payload, "dir"); err != nil {
+			return nil, err
+		}
 		var p struct {
 			Dir string `json:"dir"`
 		}
@@ -55,7 +61,10 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		}
 		fi, err := os.Stat(p.Dir)
 		return json.Marshal(resBool(err == nil && fi.IsDir()))
-	case 9: // mkdir：os.makedirs 语义——已存在 → FileExistsError → 断连（quirk）；递归创建
+	case 9: // mkdir：os.makedirs 语义——已存在 → FileExistsError → 断连（quirk）；递归创建；未知键 → 断连
+		if err := strictKeys(payload, "dir"); err != nil {
+			return nil, err
+		}
 		var p struct {
 			Dir string `json:"dir"`
 		}
@@ -69,7 +78,10 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 			return nil, err
 		}
 		return json.Marshal(resNull())
-	case 10: // 改 MTU：解析两种格式；不等则设置 + sleep 5s；ifconfig 缺失 → 断连
+	case 10: // 改 MTU：解析两种格式；不等则设置 + sleep 5s；ifconfig 缺失 → 断连；未知键 → 断连
+		if err := strictKeys(payload, "eth", "value"); err != nil {
+			return nil, err
+		}
 		var p struct {
 			Eth   string `json:"eth"`
 			Value int    `json:"value"`
@@ -101,7 +113,10 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		}{fi.Size()})
 	case 14: // 获版本号：json.dumps(VERSION) 带引号 JSON 字符串
 		return json.Marshal(Version)
-	case 15: // 解压 zip：恒回裸 b"ok"（unzip 缺失/失败也 ok）
+	case 15: // 解压 zip：恒回裸 b"ok"（unzip 缺失/失败也 ok）；**data 未知键 → 断连
+		if err := strictKeys(payload, "file", "outdir", "passwd", "overwrite"); err != nil {
+			return nil, err
+		}
 		return unzipCmd(payload)
 	case 171: // socket监听-启动
 		return listenStart(payload)
@@ -113,14 +128,18 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		return listenFetch()
 	case 175: // socket监听-停止监听
 		return listenStop()
-	case 18: // ensure_command：PATH 查找 → {"res":bool}
+	case 18: // ensure_command：which → 装后复查（install_cmd shell 跑一次再查）；未知键 → 断连
+		if err := strictKeys(payload, "cmd", "install_cmd"); err != nil {
+			return nil, err
+		}
 		var p struct {
-			Cmd string `json:"cmd"`
+			Cmd        string `json:"cmd"`
+			InstallCmd string `json:"install_cmd"`
 		}
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return nil, err
 		}
-		return json.Marshal(resBool(ensureCommand(p.Cmd)))
+		return json.Marshal(resBool(ensureCommand(p.Cmd, p.InstallCmd)))
 	case 19: // 版本详情（纯本地，键序对齐 Python 字典插入序）
 		return json.Marshal(struct {
 			Version       string `json:"version"`

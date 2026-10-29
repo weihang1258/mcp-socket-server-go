@@ -84,6 +84,15 @@ func (li *listenInstance) dataCopy() []byte {
 // listenStart 实现 dt171：ss 存活跳过 / 死了重启 / 无则新建。
 // 无条件回 {"pid":[...]}——bind 失败也回（可能为空）列表，不报错（回退后契约）。
 func listenStart(payload []byte) ([]byte, error) {
+	// Python：已存活分支不展开 **data（`if ss and ss.pid(): pass`）；未运行才构造 → 键检查限此路径
+	listenMu.Lock()
+	defer listenMu.Unlock()
+	needKeys := ss == nil || len(ss.pids()) == 0
+	if needKeys {
+		if err := strictKeys(payload, "host", "port"); err != nil {
+			return nil, err
+		}
+	}
 	var p struct {
 		Host *string `json:"host"`
 		Port int     `json:"port"`
@@ -95,8 +104,6 @@ func listenStart(payload []byte) ([]byte, error) {
 		p.Port = 30001 // SocketServerListen 默认端口
 	}
 
-	listenMu.Lock()
-	defer listenMu.Unlock()
 	if ss != nil && len(ss.pids()) > 0 {
 		// 存活：跳过
 	} else if ss != nil {
@@ -276,16 +283,19 @@ func listenClean() ([]byte, error) {
 
 // listenSave dt173：未启动 → b"error"；成功写盘 → b"ok"；缺 file 键 → error 断连。
 func listenSave(payload []byte) ([]byte, error) {
+	listenMu.Lock()
+	defer listenMu.Unlock()
+	if ss == nil || len(ss.pids()) == 0 {
+		return []byte("error"), nil // Python：未运行先回 b"error"，不展开 **data
+	}
+	if err := strictKeys(payload, "file"); err != nil {
+		return nil, err // data_writefile(**data) TypeError → 断连
+	}
 	var p struct {
 		File string `json:"file"`
 	}
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, err
-	}
-	listenMu.Lock()
-	defer listenMu.Unlock()
-	if ss == nil || len(ss.pids()) == 0 {
-		return []byte("error"), nil
 	}
 	if err := os.WriteFile(p.File, ss.dataCopy(), 0o644); err != nil {
 		return nil, err

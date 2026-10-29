@@ -115,9 +115,16 @@ func routeinfo() (map[string]map[string]any, error) {
 }
 
 // ensureCommand 复刻 netutils.ensure_command：PATH 查找（不带 install_cmd 分支——dt18 不传）。
-func ensureCommand(cmd string) bool {
-	_, err := exec.LookPath(cmd)
-	return err == nil
+func ensureCommand(cmd, installCmd string) bool {
+	if _, err := exec.LookPath(cmd); err == nil {
+		return true
+	}
+	if installCmd != "" { // Python：subprocess.run(install_cmd, shell=True) 后复查（netutils.py ensure_command）
+		execCmdWith(installCmd, "", cleanEnv(os.Environ()), true)
+		_, err := exec.LookPath(cmd)
+		return err == nil
+	}
+	return false
 }
 
 var (
@@ -129,7 +136,7 @@ var (
 // 与 value 相等不动；不等则 `ifconfig eth mtu value`（list-args 语义经 sh 传参拼接，
 // eth/value 已按 Python 端解析为受控输入）。
 func setMTU(eth string, value int) (set bool, err error) {
-	if !ensureCommand("ifconfig") {
+	if !ensureCommand("ifconfig", "") {
 		return false, errors.New("请检查系统是否存在命令：ifconfig")
 	}
 	code, stdout, stderr := execCmdArgs("ifconfig", eth)
