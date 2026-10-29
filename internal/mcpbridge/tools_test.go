@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -177,6 +178,18 @@ func TestUpgradeRunEndToEnd(t *testing.T) {
 	rawVersionBase, releaseBase = releaseSrv.URL, releaseSrv.URL
 	t.Cleanup(func() { rawVersionBase, releaseBase = prevRaw, prevRel })
 
+	// 本机 :9001 可能被真实 agent 占用（真机验收机即如此）——
+	// 用保证无人监听的空闲端口构造确定性"推包不可达"
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedPort := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	prevPort := pushHTTPPort
+	pushHTTPPort = closedPort
+	t.Cleanup(func() { pushHTTPPort = prevPort })
+
 	m := newMockServer(t, func(dt int32, p []byte, w *mockConnIO) {
 		switch dt {
 		case 14:
@@ -229,7 +242,7 @@ func upgradeRunForTest(t *testing.T, b *Bridge, targets []string, version string
 			if !atLeast(cur, 1, 8, 0) {
 				return map[string]any{"_error": fmt.Sprintf("靶机 v%s 过旧", cur)}, nil
 			}
-			if _, _, perr := PushBinary(c.Host, binaryPath, ver, 9001, 3); perr != nil {
+			if _, _, perr := PushBinary(c.Host, binaryPath, ver, pushHTTPPort, 3); perr != nil {
 				return map[string]any{"_error": perr.Error()}, nil
 			}
 			resp, err := c.UpgradeApply(ver, sha, force)

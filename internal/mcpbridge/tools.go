@@ -773,7 +773,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 					if !atLeast(cur, 1, 8, 0) {
 						return map[string]any{"_error": fmt.Sprintf("靶机 v%s 过旧，请先用 install.sh 安装 1.8.0+", cur)}, nil
 					}
-					if _, _, perr := PushBinary(c.Host, binaryPath, ver, 9001, 300); perr != nil {
+					if _, _, perr := PushBinary(c.Host, binaryPath, ver, pushHTTPPort, 300); perr != nil {
 						return map[string]any{"_error": perr.Error()}, nil
 					}
 					resp, err := c.UpgradeApply(ver, sha, a.Force)

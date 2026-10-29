@@ -7,6 +7,7 @@ package mcpbridge
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -25,6 +26,9 @@ import (
 var (
 	rawVersionBase = "https://raw.githubusercontent.com/weihang1258/socket_server/main/socket_server/version.py"
 	releaseBase    = "https://github.com/weihang1258/socket_server/releases/download"
+	// pushHTTPPort 推包端口（Python 硬编码 9001；var 仅为单测接缝——本机 :9001 可能被
+	// 真实 agent 占用，不可达分支需确定性端口；生产路径恒默认值）
+	pushHTTPPort = 9001
 )
 
 var versionRe = regexp.MustCompile(`^\d+(\.\d+){1,3}$`)
@@ -205,7 +209,11 @@ func PushBinary(host, binaryPath, version string, httpPort, timeout int) (bool, 
 	if resp.StatusCode != 200 {
 		return false, "", fmt.Errorf("推送失败: HTTP %d %s", resp.StatusCode, string(body))
 	}
-	if !strings.Contains(string(body), `"ok":true`) {
+	// Python resp.json().get("ok") 语义（容忍任意 JSON 排版）
+	var ack struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(body, &ack); err != nil || !ack.OK {
 		return false, "", fmt.Errorf("推送失败: %s", string(body))
 	}
 	return true, staging, nil
