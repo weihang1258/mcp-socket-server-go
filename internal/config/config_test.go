@@ -19,8 +19,8 @@ func TestDefaultsZeroConfig(t *testing.T) {
 	if cfg.Agent.LogFile != "/var/log/socket_server.log" {
 		t.Errorf("agent log_file want default, got %q", cfg.Agent.LogFile)
 	}
-	if cfg.MCP.Bind.Host != "0.0.0.0" || cfg.MCP.Bind.Port != 8080 {
-		t.Errorf("mcp bind want 0.0.0.0:8080 got %s:%d", cfg.MCP.Bind.Host, cfg.MCP.Bind.Port)
+	if cfg.MCP.Bind.Host != "0.0.0.0" || cfg.MCP.Bind.Port != 9010 {
+		t.Errorf("mcp bind want 0.0.0.0:9010 got %s:%d", cfg.MCP.Bind.Host, cfg.MCP.Bind.Port)
 	}
 	if cfg.MCP.DBPath != "/var/lib/socketstack/mcp.db" {
 		t.Errorf("db_path want /var/lib/socketstack/mcp.db got %q", cfg.MCP.DBPath)

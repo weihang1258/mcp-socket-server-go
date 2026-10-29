@@ -56,7 +56,7 @@ func defaults() Config {
 			LogFile: "/var/log/socket_server.log",
 		},
 		MCP: MCP{
-			Bind:               Bind{Host: "0.0.0.0", Port: 8080},
+			Bind:               Bind{Host: "0.0.0.0", Port: 9010},
 			DBPath:             "/var/lib/socketstack/mcp.db",
 			DownloadDir:        "/var/lib/socketstack/downloads",
 			Proxy:              "",

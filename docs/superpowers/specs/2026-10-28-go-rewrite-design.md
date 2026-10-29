@@ -193,7 +193,7 @@ agent:
   tcp_port: 9000
   log_file: /var/log/socket_server.log   # env SOCKET_SERVER_LOG > 此键 > 默认
 mcp:
-  bind: {host: 0.0.0.0, port: 8080}
+  bind: {host: 0.0.0.0, port: 9010}
   db_path: /var/lib/socketstack/mcp.db   # systemd 用绝对路径
   download_dir: /var/lib/socketstack/downloads
   proxy: ""
@@ -289,3 +289,4 @@ frame(字节层) → config/svc(含 serve 别名+unit 模板)
 | 12 | Python 死代码不移植（cache_cpus 族/get_tx_cpu/config_rx_thread_cpus/kill_all_chrome/tcpdump_isrun/PcapStats/PacketBuffer/wait_until 族/_sniff_command） | 全仓无调用点 |
 | 13 | upgrade_run 轮询拆分对方括号 IPv6（`[fd00::5]:9000`）剥括号（Python rpartition 保留括号必败） | Go 行为更优；普通裸 v6 的 fd00::5 截断 quirk 仍照抄 |
 | 14 | 封堵拨测连接禁 keep-alive 显式配置（Python 靠每请求新 Session） | 语义等价，实现路径不同 |
+| 15 | mcp 默认 bind 端口 8080 → **9010**（2026-10-29 用户指定） | MCP_BIND_PORT env 仍可覆盖回任意端口 |

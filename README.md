@@ -18,7 +18,7 @@ go build -ldflags "-X github.com/weihang1258/mcp-socket-server-go/internal/agent
 
 ```
 socketstack                     # mcp stdio（本地 MCP 客户端）
-socketstack mcp serve           # MCP Streamable HTTP :8080/mcp
+socketstack mcp serve           # MCP Streamable HTTP :9010/mcp
 socketstack agent               # agent（:9000 TCP + :9001 文件服务）
 socketstack serve               # agent 别名（旧 Python unit ExecStart 兼容）
 socketstack install [--with-mcp]    # 装 systemd 单元并启动（--with-mcp 加装 mcp 单元）

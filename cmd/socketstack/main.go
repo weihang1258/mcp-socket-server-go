@@ -24,7 +24,7 @@ const agentUsage = `socketstack — socket_server(agent) + mcp_socket_server(mcp
 
 用法:
   socketstack                     mcp stdio 模式（本地接入）
-  socketstack mcp serve           MCP Streamable HTTP :8080/mcp
+  socketstack mcp serve           MCP Streamable HTTP :9010/mcp
   socketstack agent               agent 模式（:9000 + :9001）
   socketstack serve               agent 模式别名（旧 unit 兼容入口）
   socketstack install [--with-mcp]
