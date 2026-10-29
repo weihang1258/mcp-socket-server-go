@@ -9,6 +9,7 @@ import (
 	"archive/zip"
 	"context"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -61,6 +62,7 @@ func TestEnsureChromiumZipSlipBlocked(t *testing.T) {
 	}, func(w http.ResponseWriter, revision string) {
 		writeZip(t, w, map[string]string{
 			"../../escaped.txt":     "x",
+			"a/../../mid.txt":       "m", // 中间 .. 段：Python 过滤后为 a/mid.txt
 			"/abs/absolute.txt":     "y",
 			"chrome-linux/chrome":   "#!/bin/sh\n",
 			"chrome-linux/sub/a.js": "z",
@@ -82,8 +84,18 @@ func TestEnsureChromiumZipSlipBlocked(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(parent, "abs", "absolute.txt")); err != nil {
 		t.Fatalf("绝对路径须去首斜杠后落在父目录下: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(parent, "a", "mid.txt")); err != nil {
+		t.Fatalf("中间 .. 段须被丢弃（a/mid.txt）: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(installRoot, "sub", "a.js")); err != nil {
 		t.Fatalf("嵌套目录未解压: %v", err)
+	}
+	// CPython extractall 不复刻 external_attr：普通文件恒 0666&~umask（0o644），目录 0o755
+	if fi, err := os.Stat(filepath.Join(installRoot, "sub", "a.js")); err != nil || fi.Mode().Perm() != 0o644 {
+		t.Fatalf("文件权限须 0o644（忽略 zip external_attr）: %v %v", fi.Mode().Perm(), err)
+	}
+	if fi, err := os.Stat(filepath.Join(installRoot, "sub")); err != nil || !fi.IsDir() {
+		t.Fatalf("子目录缺失: %v", err)
 	}
 }
 
@@ -186,6 +198,45 @@ func TestEnsureChromiumZipWithoutExecutable(t *testing.T) {
 	}
 }
 
+// 解压不沿用 zip 内的 external_attr 权限（CPython extractall 用 open(wb)，恒 0666&~umask）。
+// 真机实证：python3.9 extractall 后 exec.sh(0755) 与 ro.txt(0400) 均落为 0o644。
+func TestEnsureChromiumIgnoresZipFileModes(t *testing.T) {
+	root := t.TempDir()
+	installRoot := filepath.Join(root, "opt", "socket", "chrome-linux")
+	defer overrideChromiumPaths(t, installRoot)()
+
+	srv := newNPMMirrorServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[{"name":"1/"}]`))
+	}, func(w http.ResponseWriter, revision string) {
+		writeUnixZip(t, w, map[string]struct {
+			Body string
+			Mode fs.FileMode
+		}{
+			"chrome-linux/chrome":   {"#!/bin/sh\n", 0o755},
+			"chrome-linux/libro.so": {"ro", 0o400},
+			"chrome-linux/tool":     {"tool", 0o700},
+		})
+	})
+	defer srv.Close()
+	npmmirrorBase = "http://" + srv.Addr
+
+	if !ensureChromiumDownload(installRoot + "/chrome") {
+		t.Fatal("下载应成功")
+	}
+	for name, want := range map[string]fs.FileMode{
+		"chrome":   0o755,                // 主目标被显式 chmod 755
+		"libro.so": 0o644, "tool": 0o644, // 其余按 CPython 语义 0666&~umask
+	} {
+		fi, err := os.Stat(filepath.Join(installRoot, name))
+		if err != nil {
+			t.Fatalf("%s 缺失: %v", name, err)
+		}
+		if fi.Mode().Perm() != want {
+			t.Errorf("%s 权限 %v，want %v", name, fi.Mode().Perm(), want)
+		}
+	}
+}
+
 // ---- 测试辅助 ----
 
 func overrideChromiumPaths(t *testing.T, installDir string) func() {
@@ -237,6 +288,33 @@ func writeZip(t *testing.T, w http.ResponseWriter, files map[string]string) {
 			t.Fatal(err)
 		}
 		io.WriteString(f, files[n])
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeUnixZip 生成 Unix 创建者标记的 zip（external_attr 带真实权限），
+// 用于验证解压不沿用 external_attr（CPython extractall 行为）。
+func writeUnixZip(t *testing.T, w http.ResponseWriter, entries map[string]struct {
+	Body string
+	Mode fs.FileMode
+}) {
+	t.Helper()
+	zw := zip.NewWriter(w)
+	names := make([]string, 0, len(entries))
+	for n := range entries {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		h := &zip.FileHeader{Name: n, Method: zip.Deflate, CreatorVersion: 3 << 8} // 3 = Unix
+		h.SetMode(entries[n].Mode)
+		fw, err := zw.CreateHeader(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.WriteString(fw, entries[n].Body)
 	}
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)

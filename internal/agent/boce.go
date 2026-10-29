@@ -345,19 +345,20 @@ func unzipInto(zipPath, destRoot string) error {
 		}
 		target := filepath.Join(append([]string{destRoot}, clean...)...)
 		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if err := mkdirAllPythonMode(target); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		if err := mkdirAllPythonMode(filepath.Dir(target)); err != nil {
 			return err
 		}
 		rc, err := f.Open()
 		if err != nil {
 			return err
 		}
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, f.Mode().Perm())
+		// CPython extractall 用 open(wb)（0666&~umask）且忽略 external_attr——保持一致
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o666)
 		if err != nil {
 			rc.Close()
 			return err
@@ -371,6 +372,9 @@ func unzipInto(zipPath, destRoot string) error {
 	}
 	return nil
 }
+
+// mkdirAllPythonMode 目录创建对齐 CPython extractall 的 os.makedirs（默认 0o777 & ~umask）。
+func mkdirAllPythonMode(dir string) error { return os.MkdirAll(dir, 0o777) }
 
 // printManualDownloadHint 下载失败的手动步骤（boce.py:127-139 文案逐字保留）。
 func printManualDownloadHint(revision string) {
