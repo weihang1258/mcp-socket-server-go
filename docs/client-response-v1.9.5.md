@@ -143,7 +143,9 @@ agent 服务: active (socket_server.service)
 
 使用 `copytruncate` 而非 `create`：agent 由 systemd 常驻并长期持有日志文件句柄，`rename` 之后它仍会写入旧 inode，必须就地截断。
 
-配置写入失败只告警，不中断安装。
+**已知代价**：`copytruncate` 在「拷贝完成、截断生效」之间写入的日志行会丢失。agent 是重日志源，这个窗口里丢几行并非不可能。彻底解决需要 agent 支持收到信号后重开日志文件，再改用 `create` + `postrotate`；那要动 agent 侧，本次不做。
+
+配置写入失败只告警，不中断安装。`uninstall` 会一并移除该配置（它由 `install` 生成，属纯运维副作用文件，与「保留配置/数据库」不同类）。
 
 **关于历史日志**：现有 364MB 不会被自动清理（这是数据，我们不替你删）。需要时手动处理：
 
@@ -166,7 +168,11 @@ sudo truncate -s 0 /var/log/socket_server.log
 
 **修复**：HTTP 传输层增加中间件，把调用方 IP（`X-Forwarded-For` 优先，否则 `RemoteAddr`）写入请求 context，三处审计写入改为取真实来源。stdio 模式（本地无 HTTP 来源）仍记录为 `internal`。
 
+中间件必须包在 SDK 的 Streamable HTTP handler **外层**——go-sdk 用 `req.Context()` 建会话，只有外层的值才能传到工具处理函数。
+
 > 说明：这原被归类为「与原型一致的既定行为」，重新评估后认为是**实现缺陷**——不做鉴权不等于不需要知道是谁调的。现在审计日志里能看到真实 IP。
+
+> 限制：会话值在建会话那次请求（`initialize`）时取定。本产品一个会话即一个客户端，不影响语义；若日后在前后加按请求轮换的代理，审计 IP 会固定成第一跳地址。
 
 ---
 
@@ -182,5 +188,6 @@ sudo truncate -s 0 /var/log/socket_server.log
 
 - 单元测试全量通过（含 `-race`）
 - 新增测试覆盖：二进制一致性检测、`ExecStart` 解析、`MainPID` 老版本降级、安装参数解析、单元备份与保留上限、MCP 自动重启、重启后仍漂移的告警、日志轮转配置、连接重试边界、审计来源 IP 全链路
+- 审计来源 IP 用**真实 SDK 客户端**跑完整 Streamable HTTP 链路（客户端 → SDK 服务端 → 中间件 → 工具 → 审计）断言落库值；移除中间件即测试变红，确认覆盖的是真实传播链而非纯函数
 - 每项修复均验证过「回退改动后测试变红」，确认测试有效
 - 二进制一致性检测已在反馈机器上实测：root 下成功检出真实存在的旧 inode 问题；非 root 下正确提示需 root
