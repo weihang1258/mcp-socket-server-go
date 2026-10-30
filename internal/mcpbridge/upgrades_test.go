@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func setFetchBase(t *testing.T, _ , relBase string) {
+func setFetchBase(t *testing.T, _, relBase string) {
 	t.Helper()
 	prevRel := releaseBase
 	releaseBase = relBase

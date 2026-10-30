@@ -6,11 +6,15 @@
 package svc
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 )
 
 const (
@@ -83,10 +87,69 @@ func EnsureDirs() error {
 
 // WriteUnit 写入单元文件并 daemon-reload（对齐 Python _write_unit）。
 func WriteUnit(path, content string) error {
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := writeUnitFile(path, content); err != nil {
 		return fmt.Errorf("写入 %s 需要 root 权限: %w", path, err)
 	}
 	return systemctl("daemon-reload")
+}
+
+// 单元备份：覆写前留副本。写坏一个 unit 没有副本就只能重装整机。
+const (
+	bakPrefix      = ".bak."
+	bakGlob        = bakPrefix + "*"
+	maxUnitBackups = 3
+)
+
+var timeNowFn = time.Now // 测试可注入
+
+// writeUnitFile 覆写单元文件；内容未变则跳过，有旧内容则先备份。
+//
+// 不备份会怎样：WriteUnit 是 O_TRUNC 直写，改坏 ExecStart 后机器重启就起不来，
+// 而 /etc/systemd/system 下的原文件已经没了。
+func writeUnitFile(path, content string) error {
+	old, readErr := os.ReadFile(path)
+	hadOld := readErr == nil
+	if hadOld && string(old) == content {
+		return nil
+	}
+	if !hadOld && !errors.Is(readErr, fs.ErrNotExist) {
+		// 存在但读不到（EACCES/EISDIR…）：不能当作「没有旧文件」直接覆写，
+		// 那样等于无备份地把读不到的内容冲掉。
+		return readErr
+	}
+	bak := ""
+	if hadOld {
+		// 时间戳用固定宽度的零填充，避免不同纳秒位数时字符串排序错乱
+		bak = path + bakPrefix + fmt.Sprintf("%019d", timeNowFn().UnixNano())
+		if err := os.Rename(path, bak); err != nil {
+			// 备份没建成就不覆写：否则「写坏可回滚」在这条路径上根本不成立，
+			// 而用户还以为有备份。
+			return fmt.Errorf("备份 %s 失败，已放弃覆写: %w", path, err)
+		}
+		pruneUnitBackups(path)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		// 写失败时还原刚建的那一份（精确路径，不靠文件名排序猜）
+		if bak != "" {
+			if rerr := os.Rename(bak, path); rerr != nil {
+				return fmt.Errorf("写入失败且还原失败（unit 可能在 %s，请手动移回）: %v: %w", bak, rerr, err)
+			}
+		}
+		return err
+	}
+	return nil
+}
+
+// pruneUnitBackups 只留最近 maxUnitBackups 份（文件名里的纳秒时间戳保证可排序）。
+func pruneUnitBackups(path string) {
+	m, _ := filepath.Glob(path + bakGlob)
+	if len(m) <= maxUnitBackups {
+		return
+	}
+	sort.Strings(m)
+	for _, f := range m[:len(m)-maxUnitBackups] {
+		os.Remove(f)
+	}
 }
 
 func systemctl(args ...string) error {

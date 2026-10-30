@@ -36,7 +36,7 @@ socketstack status
 ```
 
 ```
-版本      : v1.9.3
+版本      : v1.9.5
 agent 服务: active (socket_server.service)
 mcp 服务  : active (socketstack-mcp.service)
 
@@ -60,6 +60,7 @@ sudo socketstack install --with-mcp
 
 > 标准部署是**分机安装**：靶机只装 agent，中央只装 mcp。`--with-mcp` 是同机调试用。
 > 从 Python 版原地升级：执行同样的 `install`，旧单元与路径会被复用（见「升级」）。
+> `install` 只认 `--with-mcp`；传其它参数（或 `--help`）会打用法并退出，**不会执行安装**。
 
 **卸载**（保留版本目录、配置与 MCP 数据库）：
 
@@ -159,9 +160,13 @@ curl -fsSL "${MIRROR}${URL}" -o /tmp/socket_server \
 **回滚**：`versions/<旧版本>/` 都还在，改 `current` 指回去再重启即可：
 
 ```bash
-sudo ln -sfn /opt/socket/versions/1.9.1 /opt/socket/versions/current
-sudo socketstack agent start   # 单元 active 时用 systemctl restart socket_server
+sudo ln -sfn /opt/socket/versions/1.9.4 /opt/socket/versions/current
+sudo systemctl restart socket_server   # 单元 active 时 start 是空操作
 ```
+
+> `current` 是软链，切换后**必须 restart**：直接 `start` 一个已 active 的单元不会
+> 让新二进制生效，进程会继续跑被替换掉的旧 inode（`/proc/<pid>/exe` 显示 `(deleted)`）。
+> `socketstack status` 会检测并提示这种情况
 
 **关掉自动升级**：`sudo socketstack agent autoupgrade off`（写 `/opt/socket/config`）。
 注意它只是**闸门**：agent 不会自己轮询找新版本，只决定中央推过来时接不接受。
@@ -177,12 +182,12 @@ sudo socketstack agent start   # 单元 active 时用 systemctl restart socket_s
 ```
 /usr/local/bin/socketstack  ──┐   ← 敲命令用的入口（软链）
                               ↓
-/opt/socket/versions/current  ──→ versions/1.9.3/socket_server   ← 真身，systemd 执行它
+/opt/socket/versions/current  ──→ versions/1.9.5/socket_server   ← 真身，systemd 执行它
 ```
 
 | 路径 | 内容 |
 |---|---|
-| `/opt/socket/versions/1.9.3/socket_server` | **唯一的二进制真身**（版本目录） |
+| `/opt/socket/versions/1.9.5/socket_server` | **唯一的二进制真身**（版本目录） |
 | `/opt/socket/versions/current` | 指向当前版本目录的软链 —— 升级/回滚只切这个链接 |
 | `/usr/local/bin/socketstack` | 指向 `current/socket_server` 的软链（PATH 入口，不在 PATH 加第二个文件） |
 
@@ -226,7 +231,7 @@ sudo journalctl -u socketstack-mcp -f          # mcp 全部日志
 ## 从源码构建
 
 ```bash
-go build -ldflags "-X github.com/weihang1258/mcp-socket-server-go/internal/agent.Version=1.9.0" \
+go build -ldflags "-X github.com/weihang1258/mcp-socket-server-go/internal/agent.Version=1.9.5" \
   -o socketstack ./cmd/socketstack/
 ```
 
@@ -254,6 +259,7 @@ go test -race ./...    # 竞态检测
 - **首次 chromium 下载会占住该连接**：默认与 Python 一致，客户端超时 `timeout+10`（默认 130s）小于首次下载耗时（约 223s），该连接会被判超时；日志会打印手动下载方法。开启 `chromium_prefetch` 可避免。
 - **抓包 stop 的 drain 有 2s 上限**：Python 版靠「1 秒收不到新帧」判断队列排空，在有持续流量的网卡上永不成立（`capture_stop` 30s 超时、实例持锁导致 `cmd_exec` 全被拒）。Go 版改为最多 drain 2s 后强制收尾——stop 瞬间已在缓冲里的帧仍会落盘，但**极端突发流量下可能丢弃 stop 之后才到达的少量帧**。
 - **`status` 会跑一次 `ldd`**：仅当 chromium 已下载时探测缺库，未下载则跳过。
+- **`status` 会比对进程与磁盘的二进制**：`/proc/<pid>/exe` 指向 `(deleted)` 或 inode 不符时告警。改了 `current` 软链后必须 `systemctl restart`，否则 `start` 对一个已 active 的单元是空操作，进程继续跑旧 inode。
 
 ---
 

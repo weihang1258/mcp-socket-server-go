@@ -13,6 +13,7 @@ import (
 // 以前是两份独立拷贝（各 15MB），升级后两者会漂移——本机实测过
 // 「/usr/local/bin 更新了、版本目录还是旧的」。
 func TestInstallPlacesSingleBinaryAndSymlinksCLI(t *testing.T) {
+	stubNoDrift(t)
 	dir := t.TempDir()
 	versions := filepath.Join(dir, "opt", "versions")
 	binPath := filepath.Join(dir, "usr", "local", "bin", "socketstack")
@@ -73,6 +74,7 @@ func TestInstallPlacesSingleBinaryAndSymlinksCLI(t *testing.T) {
 // install 装完就该能直接用：`install` 之后 agent（以及 --with-mcp 时的 mcp）
 // 都必须被重启，用户不用再敲第二条命令。
 func TestInstallStartsServices(t *testing.T) {
+	stubNoDrift(t)
 	prev := []any{svcEnsureDirs, svcAgentEnable, svcAgentRestartFn, svcMCPInstall, svcMCPRestartFn, exePathFn, svcVersionsDir, svcBinPath, installDeps}
 	defer func() {
 		installDeps = prev[8].(func() []string)
@@ -117,6 +119,7 @@ func TestInstallStartsServices(t *testing.T) {
 // start 是空操作，进程继续跑被 rename 替换掉的旧 inode（真机实测 /proc/<pid>/exe
 // 显示 "(deleted)"，日志停在装之前的时间）。必须 restart。
 func TestInstallRestartsServices(t *testing.T) {
+	stubNoDrift(t)
 	dir := t.TempDir()
 
 	prevExe, prevDirs := exePathFn, svcEnsureDirs
@@ -203,6 +206,7 @@ func TestUninstallRemovesDanglingCLILink(t *testing.T) {
 // current，否则「升级/覆盖修复」是假的（当前 current 已存在时 seedInitialVersion 早退，
 // 会把新二进制悄悄丢掉）。同版本重装也要覆盖（修复损坏的二进制）。
 func TestInstallOverwritesExistingVersion(t *testing.T) {
+	stubNoDrift(t)
 	dir := t.TempDir()
 	versions := filepath.Join(dir, "versions")
 	binPath := filepath.Join(dir, "bin", "socketstack")
@@ -252,6 +256,7 @@ func TestInstallOverwritesExistingVersion(t *testing.T) {
 // Go 版最初漏移植：ethtool 缺失要等第一次抓包才知道，chromium 库缺失要等
 // 第一次 boce 拨测才炸）。
 func TestInstallRunsDependencyInstall(t *testing.T) {
+	stubNoDrift(t)
 	dir := t.TempDir()
 	prevExe, prevDirs := exePathFn, svcEnsureDirs
 	prevVersions, prevBin := svcVersionsDir, svcBinPath
@@ -283,6 +288,7 @@ func TestInstallRunsDependencyInstall(t *testing.T) {
 
 // 依赖安装失败只告警，不能中断安装（best-effort 语义，对齐 Python install.sh）。
 func TestInstallDepsFailureDoesNotAbort(t *testing.T) {
+	stubNoDrift(t)
 	dir := t.TempDir()
 	prevExe, prevDirs := exePathFn, svcEnsureDirs
 	prevVersions, prevBin := svcVersionsDir, svcBinPath
@@ -367,4 +373,21 @@ func TestStatusReportIncludesChromiumDiag(t *testing.T) {
 	if !strings.Contains(repo, "拨测依赖") {
 		t.Fatalf("status 输出须有拨测依赖小节:\n%s", repo)
 	}
+}
+
+// stubNoDrift 隔离 inode 漂移检测：这些用例只关心 install 的其它行为，
+// 不 stub 会打到真实 systemctl（本机真装了服务时行为不可控）。
+func stubNoDrift(t *testing.T) {
+	t.Helper()
+	prevPID, prevExe, prevInode, prevExec := mainPIDFn, procExeFn, statInodeFn, execStartPathFn
+	prevActive := svcMCPActive
+	t.Cleanup(func() {
+		mainPIDFn, procExeFn, statInodeFn, execStartPathFn = prevPID, prevExe, prevInode, prevExec
+		svcMCPActive = prevActive
+	})
+	svcMCPActive = func() bool { return false }
+	mainPIDFn = func(string) int { return 0 }
+	procExeFn = func(int) string { return "" }
+	statInodeFn = func(string) uint64 { return 0 }
+	execStartPathFn = func(string) string { return "" }
 }

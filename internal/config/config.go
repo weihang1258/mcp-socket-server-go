@@ -37,14 +37,14 @@ type Pool struct {
 }
 
 type MCP struct {
-	Bind               Bind     `yaml:"bind"`
-	DBPath             string   `yaml:"db_path"`
-	DownloadDir        string   `yaml:"download_dir"`
-	Proxy              string   `yaml:"proxy"`
+	Bind        Bind   `yaml:"bind"`
+	DBPath      string `yaml:"db_path"`
+	DownloadDir string `yaml:"download_dir"`
+	Proxy       string `yaml:"proxy"`
 	// UpgradeRepo upgrade_run 从这里下载靶机升级包（owner/repo）。
 	// 默认 mcp-socket-server-go：Go 版二进制发在这个仓库；Python 仓库
 	// （socket_server）最新只到 1.8.3，写死它会让 1.9.x 必然 404。
-	UpgradeRepo        string   `yaml:"upgrade_repo"`
+	UpgradeRepo string `yaml:"upgrade_repo"`
 	// UpgradeMirror 下载基址前缀（如 https://gh-proxy.com/），空=直连 GitHub。
 	// 内网机器靠它 + Proxy 两个手段之一出网。
 	UpgradeMirror      string   `yaml:"upgrade_mirror"`

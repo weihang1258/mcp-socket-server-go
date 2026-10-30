@@ -143,12 +143,42 @@ func runMCP(args []string) {
 	runMCPStdioFn()
 }
 
-func runInstall(args []string) {
-	withMCP := false
+// installUsage install 子命令的用法（认识参数时才打印）。
+const installUsage = `用法: socketstack install [--with-mcp]
+
+  --with-mcp  同时安装并启动 mcp 单元（同机调试用；标准部署请分机安装）`
+
+// parseInstallArgs 解析 install 参数，返回 (withMCP, 动作)。
+//
+// 动作非空表示**不要安装**：help = 用户要用法，unknown = 参数不认识。
+// 以前是「遍历挑出 --with-mcp，其余静默丢弃」，于是 `install --help` 会真的
+// 执行安装并重启服务——客户端反馈的「连接被断」很大一部分就来自这里。
+func parseInstallArgs(args []string) (bool, string) {
+	withMCP, act := false, ""
 	for _, a := range args {
-		if a == "--with-mcp" {
+		switch a {
+		case "--with-mcp":
 			withMCP = true
+		case "-h", "--help", "help":
+			if act == "" {
+				act = "help"
+			}
+		default:
+			act = "unknown"
 		}
+	}
+	return withMCP, act
+}
+
+func runInstall(args []string) {
+	withMCP, act := parseInstallArgs(args)
+	switch act {
+	case "help":
+		fmt.Println(installUsage)
+		return
+	case "unknown":
+		fmt.Fprintln(os.Stderr, "install: 未知参数\n"+installUsage)
+		os.Exit(2)
 	}
 	if err := installSelf(withMCP); err != nil {
 		fmt.Fprintln(os.Stderr, "install 失败:", err)

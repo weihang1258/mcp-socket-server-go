@@ -98,6 +98,21 @@ func installSelf(withMCP bool) error {
 			return err
 		}
 		fmt.Println("mcp 单元已启用并启动（同机调试；标准部署请分机安装）")
+	} else if svcMCPActive() &&
+		unitDrift(svc.MCPService, filepath.Join(svcVersionsDir, "current", "socket_server")) != "" {
+		// agent 与 mcp 共享 current/socket_server（软链布局）。不带 --with-mcp 时
+		// 本来不碰 mcp，但它要是在跑被 rename 替换掉的旧 inode，就会一直跑旧代码，
+		// 而 status 显示的是新版本号。只重启、不改 mcp 配置。
+		if err := svcMCPRestartFn(); err != nil {
+			fmt.Fprintln(os.Stderr, "警告: mcp 跑的是旧二进制，自动重启失败:", err)
+		} else if again := unitDrift(svc.MCPService, filepath.Join(svcVersionsDir, "current", "socket_server")); again != "" {
+			// 重启后仍然漂移：说明单元的 ExecStart 压根不指向当前版本
+			// （老机器残留配置），重启治不好，必须如实说出来。
+			fmt.Fprintln(os.Stderr, "警告: mcp 已重启，但仍与磁盘二进制不一致——单元的 ExecStart 可能指向别处，请检查:")
+			fmt.Fprintln(os.Stderr, again)
+		} else {
+			fmt.Println("mcp 单元检测到旧二进制，已重启")
+		}
 	}
 	return nil
 }
@@ -186,7 +201,13 @@ func statusReport() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "版本      : v%s\n", agent.Version)
 	fmt.Fprintf(&b, "agent 服务: %s (%s.service)\n", activeText(svcAgentActive()), svc.ServiceName)
+	if drift := unitDrift(svc.ServiceName, filepath.Join(svcVersionsDir, "current", "socket_server")); drift != "" {
+		b.WriteString(drift + "\n")
+	}
 	fmt.Fprintf(&b, "mcp 服务  : %s (%s.service)\n", activeText(svcMCPActive()), svc.MCPService)
+	if drift := unitDrift(svc.MCPService, filepath.Join(svcVersionsDir, "current", "socket_server")); drift != "" {
+		b.WriteString(drift + "\n")
+	}
 	b.WriteString("\n路径\n")
 	fmt.Fprintf(&b, "  入口 (CLI)   %s -> %s/current/socket_server\n", svcBinPath, svcVersionsDir)
 	fmt.Fprintf(&b, "  当前版本目录 %s/current/socket_server\n", svcVersionsDir)
