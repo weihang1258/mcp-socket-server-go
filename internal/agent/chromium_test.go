@@ -735,7 +735,8 @@ func TestPrefetchChromiumRecoversPanic(t *testing.T) {
 	root := t.TempDir()
 	restore := overrideChromiumPaths(t, filepath.Join(root, "opt", "socket", "chrome-linux"))
 	defer restore()
-	t.Setenv("SOCKETSTACK_TEST_CHROMIUM", filepath.Join(root, "missing-chrome"))
+	// 钩子非空会被 PrefetchChromium 直接跳过，这里走默认路径（不存在 → 进入下载分支）
+	os.MkdirAll(filepath.Dir(chromeInstallDir), 0o755)
 
 	panicked := make(chan struct{})
 	prev := prefetchDownload
@@ -753,4 +754,33 @@ func TestPrefetchChromiumRecoversPanic(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 	// 进程还活着（能跑到这里）即证明 recover 生效
+}
+
+// 钩子非空但指向不存在的文件时，预取不得绕过钩子去下默认路径。
+// SOCKETSTACK_TEST_CHROMIUM 只服务测试/验收，生产预取不该受它支配；
+// 留着这个残留变量时，最省事也最可预测的行为是「完全不预取」。
+func TestPrefetchChromiumSkipsWhenHookSet(t *testing.T) {
+	root := t.TempDir()
+	restore := overrideChromiumPaths(t, filepath.Join(root, "opt", "socket", "chrome-linux"))
+	defer restore()
+	t.Setenv("SOCKETSTACK_TEST_CHROMIUM", filepath.Join(root, "bogus-chrome"))
+
+	var listed atomic.Int32
+	srv := newNPMMirrorServer(t, func(w http.ResponseWriter, r *http.Request) {
+		listed.Add(1)
+		w.Write([]byte(`[{"name":"123/"}]`))
+	}, func(w http.ResponseWriter, revision string) {
+		writeZip(t, w, map[string]string{"chrome-linux/chrome": "#!/bin/sh\nexit 0\n"})
+	})
+	defer srv.Close()
+	npmmirrorBase = "http://" + srv.Addr
+
+	PrefetchChromium()
+	time.Sleep(400 * time.Millisecond)
+	if listed.Load() != 0 {
+		t.Fatalf("钩子非空时不得预取，实际请求 %d 次", listed.Load())
+	}
+	if chromiumUsable(defaultChromiumPath()) {
+		t.Fatalf("不得下到默认路径 %s（绕过了钩子）", defaultChromiumPath())
+	}
 }

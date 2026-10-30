@@ -53,9 +53,13 @@ func setEnsureChromium(f func(string) bool) { ensureChromiumFn = f }
 var prefetchDownload = ensureChromiumDownload
 
 func PrefetchChromium() {
-	// 用 effectiveChromium 而不是 defaultChromiumPath：后者会绕过
-	// SOCKETSTACK_TEST_CHROMIUM 钩子，把 chromium 下到一份没人会用的目录。
-	path := effectiveChromium("")
+	// SOCKETSTACK_TEST_CHROMIUM 只服务测试/验收。它非空时 ensureChromiumDownload
+	// 解压/chmod 的目标仍是默认安装路径，于是「钩子指向不存在的文件」会变成
+	// 「绕过钩子往默认路径下一份」——验收机残留该变量时就多下一次。直接不预取。
+	if os.Getenv("SOCKETSTACK_TEST_CHROMIUM") != "" {
+		return
+	}
+	path := defaultChromiumPath()
 	if chromiumUsable(path) {
 		return // 已装好，零开销
 	}
