@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -32,6 +33,7 @@ func netListen(port string) (net.Listener, error) {
 func runMCPServe(cfg config.Config) {
 	b := mcpbridge.Init(mcpbridge.BridgeConfig{
 		DBPath: cfg.MCP.DBPath, DownloadDir: cfg.MCP.DownloadDir, Proxy: cfg.MCP.Proxy,
+		UpgradeRepo: cfg.MCP.UpgradeRepo, UpgradeMirror: cfg.MCP.UpgradeMirror,
 		LogLevel: cfg.MCP.LogLevel, AuditDays: cfg.MCP.AuditRetentionDays,
 		Whitelist:      cfg.MCP.CmdExecWhitelist,
 		DefaultTimeout: cfg.MCP.DefaultTimeout,
@@ -47,6 +49,7 @@ func runMCPStdio() {
 	cfg := loadCfg()
 	b := mcpbridge.Init(mcpbridge.BridgeConfig{
 		DBPath: cfg.MCP.DBPath, DownloadDir: cfg.MCP.DownloadDir, Proxy: cfg.MCP.Proxy,
+		UpgradeRepo: cfg.MCP.UpgradeRepo, UpgradeMirror: cfg.MCP.UpgradeMirror,
 		LogLevel: cfg.MCP.LogLevel, AuditDays: cfg.MCP.AuditRetentionDays,
 		Whitelist: cfg.MCP.CmdExecWhitelist, DefaultTimeout: cfg.MCP.DefaultTimeout,
 	})
@@ -71,6 +74,11 @@ func installSelf(withMCP bool) error {
 	}
 	if err := linkCLI(); err != nil {
 		return err
+	}
+	// 系统依赖 best-effort（与 Python install.sh 同策略）：失败仅告警不中断。
+	// 启动服务之前装，这样 agent 起来时 ethtool/拨测库已经就位。
+	for _, w := range installDeps() {
+		fmt.Fprintln(os.Stderr, "警告:", w)
 	}
 	if err := svcAgentEnable(); err != nil {
 		return err
@@ -188,6 +196,38 @@ func statusReport() string {
 	b.WriteString("\n日志\n")
 	b.WriteString("  agent  tail -f /var/log/socket_server.log\n")
 	b.WriteString("  mcp    journalctl -u socketstack-mcp -f\n")
+	// 拨测依赖预检：缺库时只会在首次 boce_run 炸，且报的是 .so 名，
+	// 装包还得人工反查包名。这里提前点破并给出可复制的命令。
+	if diag := chromiumDepsDiag(); diag != "" {
+		b.WriteString("\n拨测依赖（chromium）\n")
+		b.WriteString(diag)
+	}
+	return b.String()
+}
+
+// lddFn 测试注入点。
+var lddFn = func(path string) ([]byte, error) { return exec.Command("ldd", path).Output() }
+
+// chromiumDepsDiag 探测 chromium 缺失的运行期库；正常或未装 chromium 时返回空。
+func chromiumDepsDiag() string {
+	chrome := agent.ChromiumPath()
+	if fi, err := os.Stat(chrome); err != nil || fi.IsDir() {
+		return "" // 未下载 chromium 不算问题（首次 boce 才会下）
+	}
+	out, err := lddFn(chrome)
+	if err != nil {
+		return ""
+	}
+	missing := svc.MissingLibsFromLdd(string(out))
+	if len(missing) == 0 {
+		return "  正常\n"
+	}
+	pm := svc.DetectPkgManager()
+	var b strings.Builder
+	fmt.Fprintf(&b, "  缺 %d 个库（boce_run 会失败）: %s\n", len(missing), strings.Join(missing, ", "))
+	if pm != "" {
+		fmt.Fprintf(&b, "  修复: sudo %s\n", svc.InstallDepsCommand(pm, svc.ChromiumDepPackages()))
+	}
 	return b.String()
 }
 
@@ -213,6 +253,7 @@ var (
 	svcMCPRestartFn   = svc.MCPRestart
 	svcMCPDisable     = svc.MCPDisable
 	svcMCPActive      = svc.MCPActive
+	installDeps       = svc.InstallDeps
 	// exePathFn 取自身可执行文件路径（测试替换，避免依赖真实的 /proc/self/exe）。
 	exePathFn = func() (string, error) { return os.Executable() }
 )

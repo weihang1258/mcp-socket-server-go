@@ -149,6 +149,10 @@ func tcpdumpStart(eth, path, extended string, singleQueue bool) (bool, error) {
 	return true, nil
 }
 
+// drainMaxDuration 停止后 drain 队列的总时长上限（见 captureRecvLoop 注释）。
+// var 仅为单测可缩短；生产恒 2s。
+var drainMaxDuration = 2 * time.Second
+
 // captureRecvLoop recv 循环：时间戳解码 → VLAN 还原 → 纳秒落盘；
 // 停止 = 置 stop → drain 完缓冲帧 → stats → close（drain 语义 §3）。
 func captureRecvLoop(src pktSource, path string, bpf []bpfInstr, stop chan struct{}) (bool, error) {
@@ -174,17 +178,30 @@ func captureRecvLoop(src pktSource, path string, bpf []bpfInstr, stop chan struc
 	deadline := time.Now().Add(1 * time.Second)
 	// 停止语义（设计 §3）：置 stop 后必须 drain 完队列剩余帧再退出。
 	// recv 超时 1s 保证循环及时看到 stop。
+	//
+	// **drain 必须有总时长硬上限**：只靠"1 秒内收不到新帧"判断空，在持续流量的
+	// 网卡上永远不成立（真机 ens3 背景 ~10pps 实测：stop 30s 超时、pcap 无限增长、
+	// 实例持锁导致同靶机 cmd_exec 全被拒，只能重启服务）。Python 版同源缺陷
+	// （capture.py 的 recvmsg 1s 超时循环），只是重试时偶尔恰好抽空缓冲才成功。
+	// 上限取 2s：远小于 stopCaptureEntry 的 30s，也足够把 stop 瞬间已进缓冲的
+	// 在途帧读完（实测队列深度对应的排空时间 << 100ms）。
 	for {
 		select {
 		case <-stop:
-			// drain：继续收，1s 无新帧即空
-			for {
-				n, oob, err := src.recvFrame(buf, time.Now().Add(1*time.Second))
+			// drain：收到 stop 后 2s 内尽可能收完，到点无条件退出
+			drainDeadline := time.Now().Add(drainMaxDuration)
+			for time.Now().Before(drainDeadline) {
+				d := time.Now().Add(1 * time.Second)
+				if d.After(drainDeadline) {
+					d = drainDeadline
+				}
+				n, oob, err := src.recvFrame(buf, d)
 				if err != nil {
 					goto drained
 				}
 				pktCount += writePacket(f, restoreVLAN(buf[:n], oob), decodeTimestampNs(oob))
 			}
+			goto drained
 		default:
 		}
 		n, oob, err := src.recvFrame(buf, deadline)

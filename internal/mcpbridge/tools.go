@@ -25,13 +25,18 @@ type Bridge struct {
 	Whitelist   []string
 	DownloadDir string
 	Proxy       string
-	Cfg         BridgeConfig
+	// proxyResolved 生效代理（ResolveProxy 结果，Init 时算一次）。
+	// 显式 mcp.proxy 优先，空则回退 /opt/socket/config 的 proxy=。
+	proxyResolved string
+	Cfg           BridgeConfig
 }
 
 type BridgeConfig struct {
 	DBPath         string
 	DownloadDir    string
 	Proxy          string
+	UpgradeRepo    string
+	UpgradeMirror  string
 	LogLevel       string
 	AuditDays      int
 	Whitelist      []string
@@ -40,17 +45,20 @@ type BridgeConfig struct {
 
 // Init 初始化（对齐 init_server：registry/locks/audit 共用 db_path）。
 func Init(cfg BridgeConfig) *Bridge {
+	ConfigureUpgradeSource(cfg.UpgradeRepo, cfg.UpgradeMirror)
+	proxy := ResolveProxy(cfg.Proxy)
 	b := &Bridge{
-		Registry:    mustRegistry(cfg.DBPath),
-		Locks:       NewLockManager(),
-		Audit:       mustAudit(cfg.DBPath, cfg.AuditDays),
-		Sched:       NewScheduler(),
-		Whitelist:   cfg.Whitelist,
-		DownloadDir: cfg.DownloadDir,
-		Proxy:       cfg.Proxy,
-		Cfg:         cfg,
+		Registry:      mustRegistry(cfg.DBPath),
+		Locks:         NewLockManager(),
+		Audit:         mustAudit(cfg.DBPath, cfg.AuditDays),
+		Sched:         NewScheduler(),
+		Whitelist:     cfg.Whitelist,
+		DownloadDir:   cfg.DownloadDir,
+		Proxy:         cfg.Proxy,
+		proxyResolved: proxy,
+		Cfg:           cfg,
 	}
-	StartDailyCheck(cfg.Proxy, func() string { return BridgeVersion })
+	StartDailyCheck(proxy, func() string { return BridgeVersion })
 	return b
 }
 
@@ -748,14 +756,14 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 						"results": []any{}}
 				}
 			} else {
-				ver = FetchLatestVersion(b.Proxy)
+				ver = FetchLatestVersion(b.proxyResolved)
 				if ver == "" {
 					return map[string]any{"ok": 0, "version": "",
 						"failed":  []map[string]any{{"target": "*", "reason": "查询最新版失败（GitHub 不可达），可显式指定 version 重试"}},
 						"results": []any{}}
 				}
 			}
-			binaryPath, sha, err := EnsureReleaseBinary(ver, b.DownloadDir, b.Proxy)
+			binaryPath, sha, err := EnsureReleaseBinary(ver, b.DownloadDir, b.proxyResolved)
 			if err != nil {
 				return map[string]any{"ok": 0, "version": ver, "failed": []map[string]any{{"target": "*", "reason": err.Error()}}, "results": []any{}}
 			}

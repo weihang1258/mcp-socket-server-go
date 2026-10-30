@@ -11,30 +11,41 @@ import (
 	"testing"
 )
 
-func setFetchBase(t *testing.T, rawBase, relBase string) {
+func setFetchBase(t *testing.T, _ , relBase string) {
 	t.Helper()
-	prevRaw, prevRel := rawVersionBase, releaseBase
-	rawVersionBase, releaseBase = rawBase, relBase
-	t.Cleanup(func() { rawVersionBase, releaseBase = prevRaw, prevRel })
+	prevRel := releaseBase
+	releaseBase = relBase
+	t.Cleanup(func() { releaseBase = prevRel })
 }
 
-// fetch_latest_version：raw version.py 解析 VERSION="x.y.z"
+// fetch_latest_version：读 releases/latest 的 302 Location 取 tag。
+// 旧实现读 raw version.py，但 Go 仓库没有该文件（1.9.x 发在 mcp-socket-server-go）。
+// 覆盖：正常 302、404、以及 200 但无 Location（反代吞重定向）三种。
 func TestFetchLatestVersion(t *testing.T) {
+	var srvURL string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `VERSION = "1.8.4"`+"\nREPO = \"weihang1258/socket_server\"\n")
+		if r.URL.Path == "/releases/latest" {
+			http.Redirect(w, r, srvURL+"/releases/tag/v1.9.3", http.StatusFound)
+			return
+		}
+		w.WriteHeader(404)
 	}))
 	defer srv.Close()
-	setFetchBase(t, srv.URL, srv.URL)
-	v := FetchLatestVersion("")
-	if v != "1.8.4" {
-		t.Fatalf("want 1.8.4 got %q", v)
+	srvURL = srv.URL
+	prev := latestReleaseBaseFor
+	latestReleaseBaseFor = func(repo string) string { return srv.URL }
+	t.Cleanup(func() { latestReleaseBaseFor = prev })
+
+	if v := FetchLatestVersion(""); v != "1.9.3" {
+		t.Fatalf("want 1.9.3 got %q", v)
 	}
+
 	// 失败 → ""
 	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
 	}))
 	defer srv2.Close()
-	setFetchBase(t, srv2.URL, srv2.URL)
+	latestReleaseBaseFor = func(repo string) string { return srv2.URL }
 	if v := FetchLatestVersion(""); v != "" {
 		t.Fatalf("fail want empty, got %q", v)
 	}

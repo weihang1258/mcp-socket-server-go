@@ -109,12 +109,27 @@ mcp:
   bind: {host: 0.0.0.0, port: 9010}
   db_path: /var/lib/socketstack/mcp.db
   download_dir: /var/lib/socketstack/downloads
-  proxy: ""
+  proxy: ""                                      # 中央下载升级包用；空则回退 /opt/socket/config 的 proxy=
+  upgrade_repo: weihang1258/mcp-socket-server-go # upgrade_run 从这里拉靶机包
+  upgrade_mirror: ""                             # GitHub 前缀，如 https://gh-proxy.com/
   log_level: INFO
   default_timeout: 30
 ```
 
-旧键兼容：`/opt/socket/config` 里的 `autoupgrade=` / `http_port=` / `proxy=` 会被 agent 实时读取，且**优先级高于新配置**（与 Python 版互操作）。
+旧键兼容：`/opt/socket/config` 里的 `autoupgrade=` / `http_port=` / `proxy=` 会被 agent 实时读取；mcp 的 `proxy` 未配置时也回退到这里的 `proxy=`（与 Python 版互操作）。
+
+### 中央推送升级（upgrade_run）的出网配置
+
+`upgrade_run` 由中央节点下载靶机包再经 `:9001` 推送。中央节点出网受限时二选一：
+
+```yaml
+mcp:
+  proxy: http://10.12.186.204:7897   # 走代理（查版 + 下载都可用）
+  # 或者
+  upgrade_mirror: https://gh-proxy.com/   # 走镜像（只能下载；查版仍需代理或显式指定 version）
+```
+
+都不配且直连不通时，`upgrade_run` 必须**显式给 version**，且仍需要能下到包。
 
 ### chromium 预取
 
@@ -237,6 +252,8 @@ go test -race ./...    # 竞态检测
 
 - **单连接串行**：每条 TCP 连接按 read→do()→write 循环处理（与 Python ThreadingTCPServer 同构）。同一连接上的后续请求会排在前一个请求完成之后。
 - **首次 chromium 下载会占住该连接**：默认与 Python 一致，客户端超时 `timeout+10`（默认 130s）小于首次下载耗时（约 223s），该连接会被判超时；日志会打印手动下载方法。开启 `chromium_prefetch` 可避免。
+- **抓包 stop 的 drain 有 2s 上限**：Python 版靠「1 秒收不到新帧」判断队列排空，在有持续流量的网卡上永不成立（`capture_stop` 30s 超时、实例持锁导致 `cmd_exec` 全被拒）。Go 版改为最多 drain 2s 后强制收尾——stop 瞬间已在缓冲里的帧仍会落盘，但**极端突发流量下可能丢弃 stop 之后才到达的少量帧**。
+- **`status` 会跑一次 `ldd`**：仅当 chromium 已下载时探测缺库，未下载则跳过。
 
 ---
 

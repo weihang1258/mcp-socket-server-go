@@ -30,10 +30,13 @@ func TestInstallPlacesSingleBinaryAndSymlinksCLI(t *testing.T) {
 
 	prevVersions, prevBin, prevExe := svcVersionsDir, svcBinPath, exePathFn
 	prevDirs, prevEnable, prevRestart := svcEnsureDirs, svcAgentEnable, svcAgentRestartFn
+	prevDeps := installDeps
 	defer func() {
 		svcVersionsDir, svcBinPath, exePathFn = prevVersions, prevBin, prevExe
 		svcEnsureDirs, svcAgentEnable, svcAgentRestartFn = prevDirs, prevEnable, prevRestart
+		installDeps = prevDeps
 	}()
+	installDeps = func() []string { return nil }
 	svcVersionsDir, svcBinPath = versions, binPath
 	exePathFn = func() (string, error) { return src, nil }
 	svcEnsureDirs = func() error { return os.MkdirAll(versions, 0o755) }
@@ -70,8 +73,9 @@ func TestInstallPlacesSingleBinaryAndSymlinksCLI(t *testing.T) {
 // install 装完就该能直接用：`install` 之后 agent（以及 --with-mcp 时的 mcp）
 // 都必须被重启，用户不用再敲第二条命令。
 func TestInstallStartsServices(t *testing.T) {
-	prev := []any{svcEnsureDirs, svcAgentEnable, svcAgentRestartFn, svcMCPInstall, svcMCPRestartFn, exePathFn, svcVersionsDir, svcBinPath}
+	prev := []any{svcEnsureDirs, svcAgentEnable, svcAgentRestartFn, svcMCPInstall, svcMCPRestartFn, exePathFn, svcVersionsDir, svcBinPath, installDeps}
 	defer func() {
+		installDeps = prev[8].(func() []string)
 		svcEnsureDirs, svcAgentEnable = prev[0].(func() error), prev[1].(func() error)
 		svcAgentRestartFn = prev[2].(func() error)
 		svcMCPInstall, svcMCPRestartFn = prev[3].(func() error), prev[4].(func() error)
@@ -88,6 +92,7 @@ func TestInstallStartsServices(t *testing.T) {
 	svcEnsureDirs = func() error { return os.MkdirAll(svcVersionsDir, 0o755) }
 	svcAgentEnable = func() error { return nil }
 	svcMCPInstall = func() error { return nil }
+	installDeps = func() []string { return nil }
 	var agentStarted, mcpStarted atomic.Int32
 	svcAgentRestartFn = func() error { agentStarted.Add(1); return nil }
 	svcMCPRestartFn = func() error { mcpStarted.Add(1); return nil }
@@ -118,12 +123,15 @@ func TestInstallRestartsServices(t *testing.T) {
 	prevVersions, prevBin := svcVersionsDir, svcBinPath
 	prevEnable, prevRestart, prevStart := svcAgentEnable, svcAgentRestartFn, svcAgentStart
 	prevMCPInst, prevMCPRestart, prevMCPStart := svcMCPInstall, svcMCPRestartFn, svcMCPStart
+	prevDeps := installDeps
 	defer func() {
 		exePathFn, svcEnsureDirs = prevExe, prevDirs
 		svcVersionsDir, svcBinPath = prevVersions, prevBin
 		svcAgentEnable, svcAgentRestartFn, svcAgentStart = prevEnable, prevRestart, prevStart
 		svcMCPInstall, svcMCPRestartFn, svcMCPStart = prevMCPInst, prevMCPRestart, prevMCPStart
+		installDeps = prevDeps
 	}()
+	installDeps = func() []string { return nil }
 	svcVersionsDir = filepath.Join(dir, "versions")
 	svcBinPath = filepath.Join(dir, "bin", "socketstack")
 	os.MkdirAll(filepath.Dir(svcBinPath), 0o755)
@@ -212,10 +220,13 @@ func TestInstallOverwritesExistingVersion(t *testing.T) {
 
 	prevVersions, prevBin, prevExe := svcVersionsDir, svcBinPath, exePathFn
 	prevDirs, prevEnable, prevRestart := svcEnsureDirs, svcAgentEnable, svcAgentRestartFn
+	prevDeps := installDeps
 	defer func() {
 		svcVersionsDir, svcBinPath, exePathFn = prevVersions, prevBin, prevExe
 		svcEnsureDirs, svcAgentEnable, svcAgentRestartFn = prevDirs, prevEnable, prevRestart
+		installDeps = prevDeps
 	}()
+	installDeps = func() []string { return nil }
 	svcVersionsDir, svcBinPath = versions, binPath
 	exePathFn = func() (string, error) { return src, nil }
 	svcEnsureDirs = func() error { return nil }
@@ -234,5 +245,126 @@ func TestInstallOverwritesExistingVersion(t *testing.T) {
 	}
 	if fi, err := os.Lstat(binPath); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("PATH 入口须是软链，实际 %v err=%v", fi.Mode(), err)
+	}
+}
+
+// install 必须做系统依赖的 best-effort 安装（Python install.sh 有这一段，
+// Go 版最初漏移植：ethtool 缺失要等第一次抓包才知道，chromium 库缺失要等
+// 第一次 boce 拨测才炸）。
+func TestInstallRunsDependencyInstall(t *testing.T) {
+	dir := t.TempDir()
+	prevExe, prevDirs := exePathFn, svcEnsureDirs
+	prevVersions, prevBin := svcVersionsDir, svcBinPath
+	prevEnable, prevRestart, prevDeps := svcAgentEnable, svcAgentRestartFn, installDeps
+	defer func() {
+		exePathFn, svcEnsureDirs = prevExe, prevDirs
+		svcVersionsDir, svcBinPath = prevVersions, prevBin
+		svcAgentEnable, svcAgentRestartFn, installDeps = prevEnable, prevRestart, prevDeps
+	}()
+	svcVersionsDir = filepath.Join(dir, "versions")
+	svcBinPath = filepath.Join(dir, "bin", "socketstack")
+	os.MkdirAll(filepath.Dir(svcBinPath), 0o755)
+	src := filepath.Join(dir, "src")
+	os.WriteFile(src, []byte("BIN"), 0o755)
+	exePathFn = func() (string, error) { return src, nil }
+	svcEnsureDirs = func() error { return nil }
+	svcAgentEnable = func() error { return nil }
+	svcAgentRestartFn = func() error { return nil }
+	var called atomic.Int32
+	installDeps = func() []string { called.Add(1); return nil }
+
+	if err := installSelf(false); err != nil {
+		t.Fatalf("installSelf: %v", err)
+	}
+	if called.Load() != 1 {
+		t.Fatalf("install 须执行依赖安装 1 次，实际 %d", called.Load())
+	}
+}
+
+// 依赖安装失败只告警，不能中断安装（best-effort 语义，对齐 Python install.sh）。
+func TestInstallDepsFailureDoesNotAbort(t *testing.T) {
+	dir := t.TempDir()
+	prevExe, prevDirs := exePathFn, svcEnsureDirs
+	prevVersions, prevBin := svcVersionsDir, svcBinPath
+	prevEnable, prevRestart, prevDeps := svcAgentEnable, svcAgentRestartFn, installDeps
+	defer func() {
+		exePathFn, svcEnsureDirs = prevExe, prevDirs
+		svcVersionsDir, svcBinPath = prevVersions, prevBin
+		svcAgentEnable, svcAgentRestartFn, installDeps = prevEnable, prevRestart, prevDeps
+	}()
+	svcVersionsDir = filepath.Join(dir, "versions")
+	svcBinPath = filepath.Join(dir, "bin", "socketstack")
+	os.MkdirAll(filepath.Dir(svcBinPath), 0o755)
+	src := filepath.Join(dir, "src")
+	os.WriteFile(src, []byte("BIN"), 0o755)
+	exePathFn = func() (string, error) { return src, nil }
+	svcEnsureDirs = func() error { return nil }
+	svcAgentEnable = func() error { return nil }
+	svcAgentRestartFn = func() error { return nil }
+	installDeps = func() []string { return []string{"装包失败"} }
+
+	if err := installSelf(false); err != nil {
+		t.Fatalf("依赖失败不应中断安装: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(svcVersionsDir, "current")); err != nil {
+		t.Fatalf("依赖失败后 current 仍须建好: %v", err)
+	}
+}
+
+// status 必须给出拨测依赖诊断：chromium 已下载但缺库时要列出缺哪些 .so、
+// 并给出可直接复制的装包命令。未装 chromium 时不该报（首次 boce 才下载）。
+func TestStatusReportsMissingChromiumLibs(t *testing.T) {
+	dir := t.TempDir()
+	chrome := filepath.Join(dir, "chrome")
+	os.WriteFile(chrome, []byte("#!/bin/sh\n"), 0o755)
+	// 伪造 ldd：让诊断函数走真实实现，但 chromium 路径与 ldd 都可控
+	t.Setenv("SOCKETSTACK_TEST_CHROMIUM", chrome)
+
+	prevLdd := lddFn
+	lddFn = func(string) ([]byte, error) {
+		return []byte("\tlibX11-xcb.so.1 => not found\n\tlibnss3.so => not found\n"), nil
+	}
+	defer func() { lddFn = prevLdd }()
+
+	diag := chromiumDepsDiag()
+	if !strings.Contains(diag, "libX11-xcb.so.1") || !strings.Contains(diag, "libnss3.so") {
+		t.Fatalf("诊断须列出缺失库: %q", diag)
+	}
+	if !strings.Contains(diag, "install -y") {
+		t.Fatalf("诊断须给出装包命令: %q", diag)
+	}
+}
+
+// 未下载 chromium → 不报缺库（首次 boce 才会下载，此时报是噪音）。
+func TestStatusSilentWhenChromiumAbsent(t *testing.T) {
+	t.Setenv("SOCKETSTACK_TEST_CHROMIUM", filepath.Join(t.TempDir(), "nope"))
+	prevLdd := lddFn
+	lddFn = func(string) ([]byte, error) { t.Fatal("未装 chromium 不该跑 ldd"); return nil, nil }
+	defer func() { lddFn = prevLdd }()
+	if got := chromiumDepsDiag(); got != "" {
+		t.Fatalf("未装 chromium 应返回空，实际 %q", got)
+	}
+}
+
+// status 输出必须真的带上拨测依赖诊断。上一条用例只测 chromiumDepsDiag 本身，
+// 把 statusReport 里的调用删掉它照样绿——那正是要防的回归。
+func TestStatusReportIncludesChromiumDiag(t *testing.T) {
+	dir := t.TempDir()
+	chrome := filepath.Join(dir, "chrome")
+	os.WriteFile(chrome, []byte("#!/bin/sh\n"), 0o755)
+	t.Setenv("SOCKETSTACK_TEST_CHROMIUM", chrome)
+
+	prevLdd := lddFn
+	lddFn = func(string) ([]byte, error) {
+		return []byte("\tlibX11-xcb.so.1 => not found\n"), nil
+	}
+	defer func() { lddFn = prevLdd }()
+
+	repo := statusReport()
+	if !strings.Contains(repo, "libX11-xcb.so.1") {
+		t.Fatalf("status 输出须包含缺库诊断:\n%s", repo)
+	}
+	if !strings.Contains(repo, "拨测依赖") {
+		t.Fatalf("status 输出须有拨测依赖小节:\n%s", repo)
 	}
 }

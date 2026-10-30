@@ -22,14 +22,90 @@ import (
 	"time"
 )
 
-// 基址可注入（测试 httptest；生产 GitHub）。
+// 基址可注入（测试 httptest；生产按仓库/镜像拼）。
+//
+// **不能写死 Python 仓库**：Go 版二进制发在 mcp-socket-server-go，Python 仓库
+// （socket_server）最新只到 1.8.3。原实现逐字复刻 Python 版的 REPO 常量，导致
+// upgrade_run(version="1.9.3") 必然 404。
 var (
-	rawVersionBase = "https://raw.githubusercontent.com/weihang1258/socket_server/main/socket_server/version.py"
-	releaseBase    = "https://github.com/weihang1258/socket_server/releases/download"
+	defaultUpgradeRepo = "weihang1258/mcp-socket-server-go"
+
+	// upgradeRepo/upgradeMirror 运行时配置（Init 时从 config 写入）。
+	upgradeRepo   = defaultUpgradeRepo
+	upgradeMirror = ""
+
+	// githubBase GitHub 站点基址（测试替换为 httptest URL）。
+	githubBase = "https://github.com"
+	// releaseBase 测试注入点：非空时覆盖按仓库拼出来的值。
+	releaseBase = ""
+
+	// latestReleaseBaseFor 查最新版用的基址（测试注入）。
+	latestReleaseBaseFor = func(repo string) string { return githubBase + "/" + repo }
+
 	// pushHTTPPort 推包端口（Python 硬编码 9001；var 仅为单测接缝——本机 :9001 可能被
 	// 真实 agent 占用，不可达分支需确定性端口；生产路径恒默认值）
 	pushHTTPPort = 9001
 )
+
+// releaseBaseFor 某仓库的 release 下载基址。
+func releaseBaseFor(repo string) string {
+	if releaseBase != "" {
+		return releaseBase
+	}
+	return githubBase + "/" + repo + "/releases/download"
+}
+
+// legacyProxyPath 旧键配置（/opt/socket/config，Python 版格式）。
+// var 仅为单测注入。
+var legacyProxyPath = "/opt/socket/config"
+
+// legacyProxyFrom 从旧键配置读 proxy=（Python 版 mcp 只读这一处）。
+//
+// 为什么要有：试点机只配了 /opt/socket/config 的 proxy=，没有
+// /etc/socketstack/config.yaml，于是 mcp.proxy 为空 → 走 ProxyFromEnvironment
+// → unit 里没有 Environment= → 裸连 GitHub（实测 570 B/s，等于不可用）。
+func legacyProxyFrom(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "proxy=") {
+			return strings.TrimSpace(line[len("proxy="):])
+		}
+	}
+	return ""
+}
+
+// ResolveProxy 生效代理：显式配置优先，空则回退旧键 proxy=。
+func ResolveProxy(explicit string) string {
+	if p := strings.TrimSpace(explicit); p != "" {
+		return p
+	}
+	return legacyProxyFrom(legacyProxyPath)
+}
+
+// ConfigureUpgradeSource 写入运行时下载源配置（Init 时调用）。
+func ConfigureUpgradeSource(repo, mirror string) {
+	if repo != "" {
+		upgradeRepo = repo
+	}
+	upgradeMirror = strings.TrimSpace(mirror)
+}
+
+// withMirror 给 GitHub URL 套镜像前缀（gh-proxy 等用法：MIRROR + 完整 URL）。
+// 只读 upgradeMirror，不改它——之前就地补斜杠会在并发调用间叠加出 "//"。
+func withMirror(u string) string {
+	m := upgradeMirror
+	if m == "" {
+		return u
+	}
+	if !strings.HasSuffix(m, "/") {
+		m += "/"
+	}
+	return m + u
+}
 
 var versionRe = regexp.MustCompile(`^\d+(\.\d+){1,3}$`)
 
@@ -57,24 +133,18 @@ func httpClient(timeout int, proxy string) *http.Client {
 }
 
 // FetchLatestVersion 查最新版本；失败 ""（退避日志策略：首败 warning、后续 debug、恢复 info）。
+//
+// 走 releases/latest 的 302 Location 取 tag，而不是 raw version.py：
+// Go 仓库没有 socket_server/version.py，raw 方式在新仓库上恒失败。302 方案
+// 两仓库通用，Python 版 install.sh 的 latest_tag() 也是这么做的。
 func FetchLatestVersion(proxy string) string {
 	failStreakMu.Lock()
 	streak := failStreak
 	failStreakMu.Unlock()
-	resp, err := httpClient(10, proxy).Get(rawVersionBase)
-	if err != nil {
-		logFetchFail(err, streak+1)
-		return ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		logFetchFail(fmt.Errorf("HTTP %d", resp.StatusCode), streak+1)
-		return ""
-	}
-	body, _ := io.ReadAll(resp.Body)
-	m := regexp.MustCompile(`VERSION\s*=\s*"([^"]+)"`).FindSubmatch(body)
-	if m == nil {
-		log.Printf("raw version.py 未解析到 VERSION")
+
+	v, err := fetchLatestViaRedirect(proxy)
+	if err != "" {
+		logFetchFail(fmt.Errorf("%s", err), streak+1)
 		return ""
 	}
 	failStreakMu.Lock()
@@ -83,7 +153,35 @@ func FetchLatestVersion(proxy string) string {
 	}
 	failStreak = 0
 	failStreakMu.Unlock()
-	return string(m[1])
+	return v
+}
+
+var latestTagRe = regexp.MustCompile(`/releases/tag/v?([0-9][0-9.]*)$`)
+
+// fetchLatestViaRedirect 读 /releases/{latest} 的 302 Location 尾段取版本号。
+// 只读 302，不跟随（跟随重定向后拿不到 Location）。返回 (版本, 错误说明)。
+func fetchLatestViaRedirect(proxy string) (string, string) {
+	base := latestReleaseBaseFor(upgradeRepo)
+	url := withMirror(base + "/releases/latest")
+	c := httpClient(10, proxy)
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := c.Get(url)
+	if err != nil {
+		return "", err.Error()
+	}
+	defer resp.Body.Close()
+	loc := resp.Header.Get("Location")
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 && loc != "" {
+		if m := latestTagRe.FindStringSubmatch(loc); m != nil {
+			return m[1], ""
+		}
+		return "", fmt.Sprintf("无法从 Location 解析版本: %s", loc)
+	}
+	if resp.StatusCode != 200 {
+		return "", fmt.Sprintf("HTTP %d（%s）", resp.StatusCode, url)
+	}
+	// 200：不跟随重定向的服务端直接返回页面，Location 里没有 tag。
+	return "", fmt.Sprintf("未返回重定向（%s）", url)
 }
 
 func logFetchFail(err error, streak int) {
@@ -130,24 +228,33 @@ func EnsureReleaseBinary(version, downloadDir, proxy string) (string, string, er
 		sha, err := sha256File(binary)
 		return binary, sha, err
 	}
-	base := fmt.Sprintf("%s/v%s", releaseBase, version)
+	base := withMirror(fmt.Sprintf("%s/v%s", releaseBaseFor(upgradeRepo), version))
 	os.MkdirAll(vdir, 0o755)
-	content, err := httpGet(base+"/socket_server", proxy, 300)
+	binURL := base + "/socket_server"
+	content, status, err := httpGetStatus(binURL, proxy, 300)
 	if err != nil {
-		return "", "", fmt.Errorf("下载 v%s 失败: %v", version, err)
+		return "", "", fmt.Errorf("下载 v%s 失败: %v（请求地址 %s）", version, err, binURL)
 	}
-	expectedRaw, err := httpGet(base+"/socket_server.sha256", proxy, 30)
-	if err != nil {
-		return "", "", fmt.Errorf("下载 v%s 失败: %v", version, err)
-	}
-	expected := strings.Fields(string(expectedRaw))
-	if len(expected) == 0 {
-		return "", "", fmt.Errorf("下载 v%s 失败: 空 sha256 文件", version)
+	if status != 200 {
+		return "", "", fmt.Errorf("下载 v%s 失败: HTTP %d（请求地址 %s）", version, status, binURL)
 	}
 	actual := sha256.Sum256(content)
 	actualHex := hex.EncodeToString(actual[:])
-	if actualHex != expected[0] {
-		return "", "", fmt.Errorf("下载校验失败: 期望 %s, 实际 %s", expected[0], actualHex)
+	// 远端 sha 资产**可选**：Go 仓库的 release 只有 socket_server 一个资产。
+	// 有就校验（保留对 Python 仓库的防篡改能力），没有就用本地计算结果——
+	// dt20 推送本来就需要这个哈希，靶机侧仍会按它校验，链路完整性不受影响。
+	shaURL := base + "/socket_server.sha256"
+	expectedRaw, status2, err2 := httpGetStatus(shaURL, proxy, 30)
+	switch {
+	case err2 != nil || status2 != 200:
+		log.Printf("v%s 无远端 sha256 资产（%s，HTTP %d），改用本地计算 %s", version, shaURL, status2, actualHex[:16])
+	case len(strings.Fields(string(expectedRaw))) == 0:
+		log.Printf("v%s 远端 sha256 为空，改用本地计算", version)
+	default:
+		expected := strings.Fields(string(expectedRaw))[0]
+		if actualHex != expected {
+			return "", "", fmt.Errorf("下载校验失败: 期望 %s, 实际 %s（%s）", expected, actualHex, binURL)
+		}
 	}
 	tmp := binary + ".tmp"
 	if err := os.WriteFile(tmp, content, 0o755); err != nil {
@@ -162,15 +269,29 @@ func EnsureReleaseBinary(version, downloadDir, proxy string) (string, string, er
 
 // httpGet 全量 GET。
 func httpGet(url, proxy string, timeout int) ([]byte, error) {
-	resp, err := httpClient(timeout, proxy).Get(url)
+	body, status, err := httpGetStatus(url, proxy, timeout)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	if status != 200 {
+		return nil, fmt.Errorf("HTTP %d", status)
 	}
-	return io.ReadAll(resp.Body)
+	return body, nil
+}
+
+// httpGetStatus 全量 GET，返回 (body, HTTP 状态码, 传输错误)。
+// 状态码单独返回，供调用方在 404 时把实际 URL 一并写进错误信息。
+func httpGetStatus(url, proxy string, timeout int) ([]byte, int, error) {
+	resp, err := httpClient(timeout, proxy).Get(url)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return body, resp.StatusCode, nil
 }
 
 // PushBinary 经 :9001 推二进制到 versions/<版本>/.staging/socket_server（IPv6 加方括号）。

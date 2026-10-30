@@ -378,3 +378,77 @@ func resetCapture(t *testing.T) {
 }
 
 var _ = json.Marshal
+
+// 持续流量下 stop 必须能结束。真机实测（ens3 背景 ~10pps）：drain 只靠"1 秒内
+// 收不到新帧"判断空，流量不断时永远不成立 → recv 线程永不退出 → stop 30s 超时，
+// 抓包实例一直持有 CAPTURE 锁，期间同靶机 cmd_exec 全被拒，只能重启服务。
+func TestCaptureStopWithSustainedTraffic(t *testing.T) {
+	resetCapture(t)
+	path := filepath.Join(t.TempDir(), "busy.pcap")
+	src := newFakeSource()
+	if ok, _ := captureTestStart(t, src, path); !ok {
+		t.Fatal("start")
+	}
+	// 持续灌帧，直到用例结束（模拟 background 10pps 以上）
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			src.push(testEthPayload(), nil)
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	defer close(done)
+	time.Sleep(200 * time.Millisecond) // 确保已经在持续收包
+
+	start := time.Now()
+	resp, _ := runDT(t, 6, mustJSON(t, map[string]string{"path": path}))
+	elapsed := time.Since(start)
+	if string(resp) != `{"res":true}` {
+		t.Fatalf("持续流量下 stop 必须成功，实际 %s（耗时 %v）", resp, elapsed)
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("stop 耗时 %v，drain 需要硬上限", elapsed)
+	}
+}
+
+// 持续流量下 stop 成功后，实例必须从注册表移除、pcap 可正常读回。
+// 真机反馈的连带影响是"锁不释放、cmd_exec 全被拒"——stop 一旦成功，
+// tcpdumpStop 会 delete 注册表项，锁由 mcp 侧释放；这里锁住"stop 后不再残留"。
+func TestCaptureStopRemovesInstanceUnderLoad(t *testing.T) {
+	resetCapture(t)
+	path := filepath.Join(t.TempDir(), "busy2.pcap")
+	src := newFakeSource()
+	if ok, _ := captureTestStart(t, src, path); !ok {
+		t.Fatal("start")
+	}
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			src.push(testEthPayload(), nil)
+			time.Sleep(3 * time.Millisecond)
+		}
+	}()
+	defer close(done)
+	time.Sleep(150 * time.Millisecond)
+
+	if resp, _ := runDT(t, 6, mustJSON(t, map[string]string{"path": path})); string(resp) != `{"res":true}` {
+		t.Fatalf("stop 失败: %s", resp)
+	}
+	// 再 stop 一次必须是幂等真（实例已移除，未在抓）
+	if resp, _ := runDT(t, 6, mustJSON(t, map[string]string{"path": path})); string(resp) != `{"res":true}` {
+		t.Fatalf("stop 后实例应已移除（幂等 true），实际 %s", resp)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Size() <= 24 {
+		t.Fatalf("pcap 应已落盘且有帧: %v", err)
+	}
+}

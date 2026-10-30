@@ -41,6 +41,13 @@ type MCP struct {
 	DBPath             string   `yaml:"db_path"`
 	DownloadDir        string   `yaml:"download_dir"`
 	Proxy              string   `yaml:"proxy"`
+	// UpgradeRepo upgrade_run 从这里下载靶机升级包（owner/repo）。
+	// 默认 mcp-socket-server-go：Go 版二进制发在这个仓库；Python 仓库
+	// （socket_server）最新只到 1.8.3，写死它会让 1.9.x 必然 404。
+	UpgradeRepo        string   `yaml:"upgrade_repo"`
+	// UpgradeMirror 下载基址前缀（如 https://gh-proxy.com/），空=直连 GitHub。
+	// 内网机器靠它 + Proxy 两个手段之一出网。
+	UpgradeMirror      string   `yaml:"upgrade_mirror"`
 	LogLevel           string   `yaml:"log_level"`
 	DefaultTimeout     int      `yaml:"default_timeout"`
 	BehindProxy        bool     `yaml:"behind_proxy"`
@@ -65,6 +72,8 @@ func defaults() Config {
 			DBPath:             "/var/lib/socketstack/mcp.db",
 			DownloadDir:        "/var/lib/socketstack/downloads",
 			Proxy:              "",
+			UpgradeRepo:        "weihang1258/mcp-socket-server-go",
+			UpgradeMirror:      "",
 			LogLevel:           "INFO",
 			DefaultTimeout:     30,
 			BehindProxy:        false,
@@ -106,6 +115,12 @@ func Load(path string) Config {
 				}
 				if over.MCP.Proxy != "" {
 					cfg.MCP.Proxy = over.MCP.Proxy
+				}
+				if over.MCP.UpgradeRepo != "" {
+					cfg.MCP.UpgradeRepo = over.MCP.UpgradeRepo
+				}
+				if over.MCP.UpgradeMirror != "" {
+					cfg.MCP.UpgradeMirror = over.MCP.UpgradeMirror
 				}
 				if over.MCP.LogLevel != "" {
 					cfg.MCP.LogLevel = over.MCP.LogLevel
@@ -156,6 +171,12 @@ func Load(path string) Config {
 	}
 	if v := os.Getenv("SOCKET_SERVER_LOG"); v != "" {
 		cfg.Agent.LogFile = v
+	}
+	if v := os.Getenv("MCP_UPGRADE_REPO"); v != "" {
+		cfg.MCP.UpgradeRepo = v
+	}
+	if v := os.Getenv("MCP_UPGRADE_MIRROR"); v != "" {
+		cfg.MCP.UpgradeMirror = v
 	}
 	return cfg
 }

@@ -174,9 +174,9 @@ func TestUpgradeRunEndToEnd(t *testing.T) {
 		fmt.Fprint(w, sum)
 	})
 	releaseSrv := startHTTP(t, releaseMux)
-	prevRaw, prevRel := rawVersionBase, releaseBase
-	rawVersionBase, releaseBase = releaseSrv.URL, releaseSrv.URL
-	t.Cleanup(func() { rawVersionBase, releaseBase = prevRaw, prevRel })
+	prevRel := releaseBase
+	releaseBase = releaseSrv.URL
+	t.Cleanup(func() { releaseBase = prevRel })
 
 	// 本机 :9001 可能被真实 agent 占用（真机验收机即如此）——
 	// 用保证无人监听的空闲端口构造确定性"推包不可达"

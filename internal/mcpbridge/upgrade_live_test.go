@@ -155,7 +155,9 @@ func TestLiveThreeChainUpgradeInterop(t *testing.T) {
 
 	srv := releaseServer(t, releases)
 	defer srv.Close()
-	rawVersionBase, releaseBase = srv.URL+"/socket_server/version.py", srv.URL
+	prevRel := releaseBase
+	releaseBase = srv.URL
+	t.Cleanup(func() { releaseBase = prevRel })
 
 	b := newTestBridge(t)
 	if r := b.Registry.AddTarget("127.0.0.1", 9000, nil, ""); r["ok"] != true {

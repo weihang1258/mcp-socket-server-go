@@ -162,3 +162,16 @@ func TestDT131IntervalPacing(t *testing.T) {
 		t.Fatalf("interval pacing not applied: %v", elapsed)
 	}
 }
+
+// 拨测缺库报错必须能看懂：原来只有 ".so: cannot open shared object file"，
+// 装包还得人工反查包名（真机反馈问题 3）。
+func TestMissingSharedLibs(t *testing.T) {
+	in := "/opt/socket/chrome-linux/chrome: error while loading shared libraries: libX11-xcb.so.1: cannot open shared object file: No such file or directory"
+	got := missingSharedLibs(in)
+	if len(got) != 1 || got[0] != "libX11-xcb.so.1" {
+		t.Fatalf("want [libX11-xcb.so.1], got %v", got)
+	}
+	if got := missingSharedLibs("some other error"); len(got) != 0 {
+		t.Fatalf("无关输出应为空，got %v", got)
+	}
+}

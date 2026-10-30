@@ -173,7 +173,12 @@ func doBoce(payload []byte) ([]byte, error) {
 			code2, _, _ := execCmd(install)
 			_ = code2
 			if code3, _, stderr3 := execCmdArgs(chromium, "--headless", "--no-sandbox", "--disable-gpu", "--dump-dom", "about:blank"); code3 != 0 {
-				return dt131Frame(map[string]string{"error": fmt.Sprintf("chromium依赖库安装失败: %s", truncBytes(stderr3, 200))}), nil
+				// 真机反馈：原来只回 ".so: cannot open shared object file"，
+				// 装包还得人工反查包名。这里补三样：缺哪些 .so、要装哪些包、
+				// 以及可直接复制的命令。
+				return dt131Frame(map[string]string{"error": fmt.Sprintf(
+					"chromium依赖库安装失败: %s；缺失库: %s；可手动执行: sudo %s",
+					truncBytes(stderr3, 200), strings.Join(missingSharedLibs(stderr3), ", "), install)}), nil
 			}
 			log.Printf("chromium 依赖库安装成功，继续执行拨测")
 		}
@@ -679,3 +684,32 @@ func boceBlock(url string, count, interval, threadCount, timeout int) boceResult
 }
 
 func round4(f float64) float64 { return float64(int(f*10000+0.5*sign(f))) / 10000 }
+
+// ChromiumPath 当前生效的 chromium 可执行文件路径（含 SOCKETSTACK_TEST_CHROMIUM
+// 钩子与默认路径）。供 `socketstack status` 做缺库预检——拨测依赖缺失只会在
+// 首次 boce_run 炸，且只报 .so 名。
+func ChromiumPath() string { return effectiveChromium("") }
+
+// missingSharedLibs 从 chromium 的 "error while loading shared libraries: X: cannot
+// open shared object file" 报错里提取全部 .so 名（真机一次只报第一个，但多行输出
+// 可能带多个）。
+func missingSharedLibs(stderr string) []string {
+	const marker = "cannot open shared object file"
+	var out []string
+	for _, line := range strings.Split(stderr, "\n") {
+		if !strings.Contains(line, marker) {
+			continue
+		}
+		// 形如 "... shared libraries: libX11-xcb.so.1: cannot open shared object file"
+		idx := strings.Index(line, marker)
+		head := strings.TrimSpace(line[:idx])
+		head = strings.TrimSuffix(head, ":")
+		if i := strings.LastIndex(head, ": "); i >= 0 {
+			head = strings.TrimSpace(head[i+1:])
+		}
+		if head != "" {
+			out = append(out, head)
+		}
+	}
+	return out
+}
