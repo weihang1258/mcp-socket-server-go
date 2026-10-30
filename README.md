@@ -36,7 +36,7 @@ socketstack status
 ```
 
 ```
-版本      : v1.9.2
+版本      : v1.9.3
 agent 服务: active (socket_server.service)
 mcp 服务  : active (socketstack-mcp.service)
 
@@ -162,12 +162,12 @@ sudo socketstack agent start   # 单元 active 时用 systemctl restart socket_s
 ```
 /usr/local/bin/socketstack  ──┐   ← 敲命令用的入口（软链）
                               ↓
-/opt/socket/versions/current  ──→ versions/1.9.2/socket_server   ← 真身，systemd 执行它
+/opt/socket/versions/current  ──→ versions/1.9.3/socket_server   ← 真身，systemd 执行它
 ```
 
 | 路径 | 内容 |
 |---|---|
-| `/opt/socket/versions/1.9.2/socket_server` | **唯一的二进制真身**（版本目录） |
+| `/opt/socket/versions/1.9.3/socket_server` | **唯一的二进制真身**（版本目录） |
 | `/opt/socket/versions/current` | 指向当前版本目录的软链 —— 升级/回滚只切这个链接 |
 | `/usr/local/bin/socketstack` | 指向 `current/socket_server` 的软链（PATH 入口，不在 PATH 加第二个文件） |
 
