@@ -16,7 +16,7 @@ func TestWriteUnitFileBacksUpExisting(t *testing.T) {
 	if err := os.WriteFile(path, []byte("OLD"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeUnitFile(path, "NEW"); err != nil {
+	if _, err := writeUnitFile(path, "NEW"); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(path)
@@ -36,7 +36,7 @@ func TestWriteUnitFileBacksUpExisting(t *testing.T) {
 func TestWriteUnitFileNoBackupOnFirstWrite(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "x.service")
-	if err := writeUnitFile(path, "NEW"); err != nil {
+	if _, err := writeUnitFile(path, "NEW"); err != nil {
 		t.Fatal(err)
 	}
 	if baks, _ := filepath.Glob(path + bakGlob); len(baks) != 0 {
@@ -50,7 +50,7 @@ func TestWriteUnitFileKeepsThreeBackups(t *testing.T) {
 	path := filepath.Join(dir, "x.service")
 	os.WriteFile(path, []byte("v0"), 0o644)
 	for i := 0; i < 6; i++ {
-		if err := writeUnitFile(path, "v"+string(rune('1'+i))); err != nil {
+		if _, err := writeUnitFile(path, "v"+string(rune('1'+i))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -65,7 +65,7 @@ func TestWriteUnitFileSkipsWhenUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "x.service")
 	os.WriteFile(path, []byte("same"), 0o644)
-	if err := writeUnitFile(path, "same"); err != nil {
+	if _, err := writeUnitFile(path, "same"); err != nil {
 		t.Fatal(err)
 	}
 	if baks, _ := filepath.Glob(path + bakGlob); len(baks) != 0 {
@@ -89,7 +89,7 @@ func TestWriteUnitFileAbortsWhenBackupFails(t *testing.T) {
 	}
 	defer os.Chmod(dir, 0o755)
 
-	err := writeUnitFile(path, "NEW")
+	_, err := writeUnitFile(path, "NEW")
 	if err == nil {
 		t.Fatal("备份失败时必须返回错误，不能静默覆写")
 	}
@@ -115,7 +115,7 @@ func TestWriteUnitFileErrorsOnUnreadable(t *testing.T) {
 	}
 	defer os.Chmod(path, 0o644)
 
-	if err := writeUnitFile(path, "NEW"); err == nil {
+	if _, err := writeUnitFile(path, "NEW"); err == nil {
 		t.Fatal("读不到旧文件时应报错，不能当不存在直接覆写")
 	}
 	os.Chmod(path, 0o644)
@@ -141,7 +141,7 @@ func TestBackupNameFixedWidth(t *testing.T) {
 	defer func() { timeNowFn = prev }()
 	for _, ns := range []int64{1, 999999999999999999} {
 		timeNowFn = func() time.Time { return time.Unix(0, ns) }
-		if err := writeUnitFile(path, "v"+strconv.FormatInt(ns, 10)); err != nil {
+		if _, err := writeUnitFile(path, "v"+strconv.FormatInt(ns, 10)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -154,5 +154,18 @@ func TestBackupNameFixedWidth(t *testing.T) {
 		if len(stamp) != 19 {
 			t.Fatalf("时间戳须零填充到 19 位，实际 %q（来自 %s）", stamp, b)
 		}
+	}
+}
+
+// 内容未变时 WriteUnit 不该 daemon-reload——EnsureUnitCorrect 每次启动都走这里。
+// 用不可达的 PATH 让 systemctl 必然失败：只要它被调用，WriteUnit 就会返回错误。
+func TestWriteUnitSkipsDaemonReloadWhenUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.service")
+	os.WriteFile(path, []byte("same"), 0o644)
+
+	t.Setenv("PATH", dir) // 找不到 systemctl
+	if err := WriteUnit(path, "same"); err != nil {
+		t.Fatalf("内容未变不该触发 daemon-reload（找到了 systemctl）: %v", err)
 	}
 }

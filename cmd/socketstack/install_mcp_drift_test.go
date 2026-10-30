@@ -153,3 +153,53 @@ func TestInstallWarnsWhenDriftPersistsAfterRestart(t *testing.T) {
 		t.Fatalf("重启后仍漂移时必须如实告警，实际输出:\n%s", got)
 	}
 }
+
+// mcp active 且无漂移 → install 不该 restart 它。stubNoDrift 把 svcMCPActive
+// 强制为 false，原来那条用例其实没覆盖到 else-if 的短路语义。
+func TestInstallNoRestartWhenMCPHealthy(t *testing.T) {
+	dir := t.TempDir()
+	prevExe, prevDirs := exePathFn, svcEnsureDirs
+	prevVersions, prevBin := svcVersionsDir, svcBinPath
+	prevEnable, prevRestart := svcAgentEnable, svcAgentRestartFn
+	prevMCPActive, prevMCPRestart := svcMCPActive, svcMCPRestartFn
+	prevPID, prevExe2, prevInode, prevExec := mainPIDFn, procExeFn, statInodeFn, execStartPathFn
+	prevDeps := installDeps
+	defer func() {
+		exePathFn, svcEnsureDirs = prevExe, prevDirs
+		svcVersionsDir, svcBinPath = prevVersions, prevBin
+		svcAgentEnable, svcAgentRestartFn = prevEnable, prevRestart
+		svcMCPActive, svcMCPRestartFn = prevMCPActive, prevMCPRestart
+		mainPIDFn, procExeFn, statInodeFn, execStartPathFn = prevPID, prevExe2, prevInode, prevExec
+		installDeps = prevDeps
+	}()
+	installDeps = func() []string { return nil }
+	svcVersionsDir = filepath.Join(dir, "versions")
+	svcBinPath = filepath.Join(dir, "bin", "socketstack")
+	os.MkdirAll(filepath.Dir(svcBinPath), 0o755)
+	src := filepath.Join(dir, "src")
+	os.WriteFile(src, []byte("BIN"), 0o755)
+	exePathFn = func() (string, error) { return src, nil }
+	svcEnsureDirs = func() error { return nil }
+	svcAgentEnable = func() error { return nil }
+	svcAgentRestartFn = func() error { return nil }
+	svcMCPActive = func() bool { return true } // 在跑
+	// 进程 exe 与磁盘 inode 一致 → 无漂移
+	mainPIDFn = func(unit string) int {
+		if unit == "socketstack-mcp" {
+			return 77
+		}
+		return 0
+	}
+	procExeFn = func(int) string { return "/opt/socket/versions/current/socket_server" }
+	execStartPathFn = func(string) string { return "" }
+	statInodeFn = func(string) uint64 { return 5 } // 两边同 inode
+	var n int
+	svcMCPRestartFn = func() error { n++; return nil }
+
+	if err := installSelf(false); err != nil {
+		t.Fatalf("installSelf: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("mcp 健康时不该被重启，实际 %d 次", n)
+	}
+}

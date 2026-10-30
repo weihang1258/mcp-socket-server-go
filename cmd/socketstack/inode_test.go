@@ -95,7 +95,10 @@ func TestUnitDriftWarnsWhenUnreadable(t *testing.T) {
 	mainPIDFn = func(string) int { return 4242 }
 	procExeFn = func(int) string { return "" } // 无权限
 
-	msg := unitDrift("socketstack-mcp", "/x/socket_server")
+	drifted, msg := unitDrift("socketstack-mcp", "/x/socket_server")
+	if drifted {
+		t.Fatal("读不到进程 exe 不是漂移，不能据此去 restart")
+	}
 	if !strings.Contains(msg, "root") {
 		t.Fatalf("无权限时须提示需 root，实际 %q", msg)
 	}
@@ -110,8 +113,7 @@ func TestUnitDriftUsesExecStartPath(t *testing.T) {
 	}()
 	mainPIDFn = func(string) int { return 4242 }
 	procExeFn = func(int) string { return "/opt/socket/socket_server" }
-	prevExec = func(string) string { return "/opt/socket/socket_server" }
-	execStartPathFn = prevExec
+	execStartPathFn = func(string) string { return "/opt/socket/socket_server" }
 	// 按路径返回不同 inode：进程与 ExecStart 一致 → 不报
 	statInodeFn = func(p string) uint64 {
 		if p == "/opt/socket/socket_server" {
@@ -120,7 +122,7 @@ func TestUnitDriftUsesExecStartPath(t *testing.T) {
 		return 99 // current 下是另一个文件
 	}
 
-	if msg := unitDrift("socket_server", "/opt/socket/versions/current/socket_server"); msg != "" {
+	if drifted, msg := unitDrift("socket_server", "/opt/socket/versions/current/socket_server"); drifted {
 		t.Fatalf("进程与单元 ExecStart 一致时不该报漂移，实际 %q", msg)
 	}
 }

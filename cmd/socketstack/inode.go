@@ -19,9 +19,7 @@ var (
 		// 降级解析普通的 "MainPID=123" 行，别让整个检测静默失效。
 		out, err := systemctlShowFn(unit, "MainPID", true)
 		if err == nil {
-			if pid := parseMainPID(out); pid != 0 {
-				return pid
-			}
+			return parseMainPID(out) // 0 = 未运行，不必再查
 		}
 		out, err = systemctlShowFn(unit, "MainPID", false)
 		if err != nil {
@@ -52,7 +50,13 @@ var (
 	// execStartPathFn 取单元真实的 ExecStart 可执行路径（parse 失败返回 ""）。
 	// 老机器上残留的旧 ExecStart 指向别处时，硬编码 current 会误报漂移。
 	execStartPathFn = func(unit string) string {
-		out, err := systemctlShowFn(unit, "ExecStart", true)
+		// 与 mainPIDFn 同构：老 systemd 没有 --value，降级重试一次。
+		if out, err := systemctlShowFn(unit, "ExecStart", true); err == nil {
+			if p := parseExecStartPath(out); p != "" {
+				return p
+			}
+		}
+		out, err := systemctlShowFn(unit, "ExecStart", false)
 		if err != nil {
 			return ""
 		}
@@ -112,20 +116,24 @@ func binaryDrift(procInode, diskInode uint64, exeTarget, unit string) string {
 	return fmt.Sprintf("  进程 inode %d ≠ 磁盘 inode %d，跑的可能是旧二进制\n  修复: systemctl restart %s", procInode, diskInode, unit)
 }
 
-// unitDrift 某单元是否在跑与磁盘不一致的二进制；返回诊断文案（空=正常/未运行）。
+// unitDrift 某单元是否在跑与磁盘不一致的二进制。
+// drifted 才是判断依据；msg 只用于打印（可能是「需 root」这类诊断，
+// 那不是漂移——把它当漂移会让 install 去做无意义的重启）。
 // binaryPath 是回退基准：单元 ExecStart 解析不出来时才用它。
-func unitDrift(unit, binaryPath string) string {
+func unitDrift(unit, binaryPath string) (drifted bool, msg string) {
 	pid := mainPIDFn(unit)
 	if pid == 0 {
-		return "" // 未运行不算漂移
+		return false, "" // 未运行不算漂移
 	}
 	exe := procExeFn(pid)
 	if exe == "" {
-		// 非 root 读不到别人的 /proc/<pid>/exe。静默跳过会让用户以为检测过了。
-		return fmt.Sprintf("  需 root 才能检测 %s 的二进制漂移", unit)
+		// 非 root 读不到别人的 /proc/<pid>/exe。静默跳过会让用户以为检测过了，
+		// 但这不是「在跑旧二进制」，只是查不到。
+		return false, fmt.Sprintf("  需 root 才能检测 %s 的二进制漂移", unit)
 	}
 	if p := execStartPathFn(unit); p != "" {
 		binaryPath = p
 	}
-	return binaryDrift(statInodeFn(exe), statInodeFn(binaryPath), exe, unit)
+	m := binaryDrift(statInodeFn(exe), statInodeFn(binaryPath), exe, unit)
+	return m != "", m
 }

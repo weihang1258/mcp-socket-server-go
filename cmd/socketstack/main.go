@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/weihang1258/mcp-socket-server-go/internal/agent"
 	"github.com/weihang1258/mcp-socket-server-go/internal/config"
@@ -68,7 +69,7 @@ func main() {
 	case "install":
 		runInstall(args[1:])
 	case "uninstall":
-		runUninstall()
+		runUninstall(args[1:])
 	case "status":
 		fmt.Print(statusReport())
 	case "version", "-v", "--version":
@@ -129,18 +130,36 @@ func startAgent(cfg config.Config, testMode bool) (ln interface{}, addr string, 
 	return tcpLn, tcpLn.Addr().String(), func() { tcpLn.Close() }
 }
 
-func runMCP(args []string) {
-	if len(args) > 0 {
-		switch args[0] {
-		case "serve":
-			runMCPServeFn()
-			return
-		case "start", "stop", "status", "enable", "disable":
-			svcDispatchFn("mcp", args[0])
-			return
-		}
+// mcpAction 判定 mcp 子命令动作：serve / 单元操作 / stdio / help。
+//
+// `mcp --help` 不能掉进 stdio——那会阻塞在读 stdin 上，用户以为卡死。
+func mcpAction(args []string) string {
+	if len(args) == 0 {
+		return "stdio"
 	}
-	runMCPStdioFn()
+	switch args[0] {
+	case "serve":
+		return "serve"
+	case "start", "stop", "status", "enable", "disable":
+		return "svc:" + args[0]
+	case "-h", "--help", "help":
+		return "help"
+	}
+	return "stdio"
+}
+
+func runMCP(args []string) {
+	act := mcpAction(args)
+	switch {
+	case act == "serve":
+		runMCPServeFn()
+	case act == "help":
+		fmt.Println(agentUsage)
+	case strings.HasPrefix(act, "svc:"):
+		svcDispatchFn("mcp", strings.TrimPrefix(act, "svc:"))
+	default:
+		runMCPStdioFn()
+	}
 }
 
 // installUsage install 子命令的用法（认识参数时才打印）。
@@ -178,19 +197,53 @@ func runInstall(args []string) {
 		return
 	case "unknown":
 		fmt.Fprintln(os.Stderr, "install: 未知参数\n"+installUsage)
-		os.Exit(2)
+		exitFn(2)
+		return // exitFn 生产实现会退出；可注入实现不会，必须显式返回
 	}
-	if err := installSelf(withMCP); err != nil {
+	if err := installSelfFn(withMCP); err != nil {
 		fmt.Fprintln(os.Stderr, "install 失败:", err)
-		os.Exit(1)
+		exitFn(1)
 	}
 	fmt.Println("install 完成" + map[bool]string{true: "（含 mcp 单元）", false: ""}[withMCP])
 }
 
-func runUninstall() {
-	if err := uninstallSelf(); err != nil {
+// uninstallUsage uninstall 子命令的用法。
+const uninstallUsage = `用法: socketstack uninstall
+
+停用并删除 agent / mcp 单元，移除 current 软链与 PATH 入口。
+/opt/socket/versions、配置与 mcp 数据库保留。`
+
+// parseNoArgCommand 解析「不带任何有效参数」的子命令（uninstall）。
+// 返回 run / help / unknown。help 与 unknown 都不得执行实际操作——
+// 卸载会 disable 单元、删 current 软链，误执行代价比安装大得多。
+func parseNoArgCommand(args []string) string {
+	act := "run"
+	for _, a := range args {
+		switch a {
+		case "-h", "--help", "help":
+			if act == "run" {
+				act = "help"
+			}
+		default:
+			act = "unknown"
+		}
+	}
+	return act
+}
+
+func runUninstall(args []string) {
+	switch parseNoArgCommand(args) {
+	case "help":
+		fmt.Println(uninstallUsage)
+		return
+	case "unknown":
+		fmt.Fprintln(os.Stderr, "uninstall: 未知参数\n"+uninstallUsage)
+		exitFn(2)
+		return // 同上：注入的 exitFn 不退出时必须显式返回，否则照样会卸载
+	}
+	if err := uninstallSelfFn(); err != nil {
 		fmt.Fprintln(os.Stderr, "uninstall 失败:", err)
-		os.Exit(1)
+		exitFn(1)
 	}
 	fmt.Println("uninstall 完成（/opt/socket/versions、配置与 mcp DB 保留）")
 }

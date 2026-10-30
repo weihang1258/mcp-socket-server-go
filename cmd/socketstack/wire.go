@@ -98,23 +98,31 @@ func installSelf(withMCP bool) error {
 			return err
 		}
 		fmt.Println("mcp 单元已启用并启动（同机调试；标准部署请分机安装）")
-	} else if svcMCPActive() &&
-		unitDrift(svc.MCPService, filepath.Join(svcVersionsDir, "current", "socket_server")) != "" {
+	} else if svcMCPActive() && mcpDrifted() {
 		// agent 与 mcp 共享 current/socket_server（软链布局）。不带 --with-mcp 时
 		// 本来不碰 mcp，但它要是在跑被 rename 替换掉的旧 inode，就会一直跑旧代码，
 		// 而 status 显示的是新版本号。只重启、不改 mcp 配置。
 		if err := svcMCPRestartFn(); err != nil {
 			fmt.Fprintln(os.Stderr, "警告: mcp 跑的是旧二进制，自动重启失败:", err)
-		} else if again := unitDrift(svc.MCPService, filepath.Join(svcVersionsDir, "current", "socket_server")); again != "" {
+		} else if drifted, msg := unitDrift(svc.MCPService, mcpBinaryPath()); drifted {
 			// 重启后仍然漂移：说明单元的 ExecStart 压根不指向当前版本
 			// （老机器残留配置），重启治不好，必须如实说出来。
 			fmt.Fprintln(os.Stderr, "警告: mcp 已重启，但仍与磁盘二进制不一致——单元的 ExecStart 可能指向别处，请检查:")
-			fmt.Fprintln(os.Stderr, again)
+			fmt.Fprintln(os.Stderr, msg)
 		} else {
 			fmt.Println("mcp 单元检测到旧二进制，已重启")
 		}
 	}
 	return nil
+}
+
+// mcpBinaryPath 漂移比对的兜底基准（单元 ExecStart 解析失败时才用）。
+func mcpBinaryPath() string { return filepath.Join(svcVersionsDir, "current", "socket_server") }
+
+// mcpDrifted mcp 单元当前是否在跑旧二进制（「需 root」等诊断不算漂移）。
+func mcpDrifted() bool {
+	d, _ := unitDrift(svc.MCPService, mcpBinaryPath())
+	return d
 }
 
 // currentVersion 当前安装版本号（安装路径与 softlink 目标的一环）。
@@ -201,12 +209,12 @@ func statusReport() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "版本      : v%s\n", agent.Version)
 	fmt.Fprintf(&b, "agent 服务: %s (%s.service)\n", activeText(svcAgentActive()), svc.ServiceName)
-	if drift := unitDrift(svc.ServiceName, filepath.Join(svcVersionsDir, "current", "socket_server")); drift != "" {
-		b.WriteString(drift + "\n")
+	if _, msg := unitDrift(svc.ServiceName, mcpBinaryPath()); msg != "" {
+		b.WriteString(msg + "\n")
 	}
 	fmt.Fprintf(&b, "mcp 服务  : %s (%s.service)\n", activeText(svcMCPActive()), svc.MCPService)
-	if drift := unitDrift(svc.MCPService, filepath.Join(svcVersionsDir, "current", "socket_server")); drift != "" {
-		b.WriteString(drift + "\n")
+	if _, msg := unitDrift(svc.MCPService, mcpBinaryPath()); msg != "" {
+		b.WriteString(msg + "\n")
 	}
 	b.WriteString("\n路径\n")
 	fmt.Fprintf(&b, "  入口 (CLI)   %s -> %s/current/socket_server\n", svcBinPath, svcVersionsDir)
@@ -298,3 +306,11 @@ var (
 func agentSetAutoupgrade(state string) error {
 	return agent.SetAutoupgrade(state)
 }
+
+// CLI 动作与退出可注入点（测试用）：让 runInstall/runUninstall 在 help/unknown
+// 分支可断言「没有执行任何实际操作」。
+var (
+	installSelfFn   = installSelf
+	uninstallSelfFn = uninstallSelf
+	exitFn          = os.Exit
+)
