@@ -152,6 +152,13 @@ var (
 
 var _ = errors.New
 
+// CLI 分派可注入点（测试用）。
+var (
+	svcDispatchFn = svcDispatch
+	runMCPServeFn = func() { runMCPServe(loadCfg()) }
+	runMCPStdioFn = runMCPStdio
+)
+
 // agent 启动编排的可注入点（测试替换，避免触碰真实 /opt/socket 与环境）。
 var (
 	setupEnv         = agent.SetupEnvironment

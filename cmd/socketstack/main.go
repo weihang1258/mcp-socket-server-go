@@ -127,12 +127,17 @@ func startAgent(cfg config.Config, testMode bool) (ln interface{}, addr string, 
 }
 
 func runMCP(args []string) {
-	if len(args) > 0 && args[0] == "serve" {
-		cfg := loadCfg()
-		runMCPServe(cfg)
-		return
+	if len(args) > 0 {
+		switch args[0] {
+		case "serve":
+			runMCPServeFn()
+			return
+		case "start", "stop", "status", "enable", "disable":
+			svcDispatchFn("mcp", args[0])
+			return
+		}
 	}
-	runMCPStdio()
+	runMCPStdioFn()
 }
 
 func runInstall(args []string) {

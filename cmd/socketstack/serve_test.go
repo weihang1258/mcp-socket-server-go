@@ -83,3 +83,45 @@ func TestStartAgentNoPrefetchWhenDisabled(t *testing.T) {
 		t.Fatalf("默认配置不得预取，实际调用 %d 次", called.Load())
 	}
 }
+
+// `socketstack mcp start` 必须走 systemd 单元操作，不能落进 stdio 模式。
+// 落错的后果：它去打开 mcp 数据库并阻塞在 stdio，用户看到的却是「registry 打开失败」。
+func TestMCPSubcommandsDispatchToService(t *testing.T) {
+	var got []string
+	prev := svcDispatchFn
+	svcDispatchFn = func(target, action string) { got = append(got, target+"/"+action) }
+	t.Cleanup(func() { svcDispatchFn = prev })
+
+	for _, action := range []string{"start", "stop", "status", "enable", "disable"} {
+		got = nil
+		runMCP([]string{action})
+		if len(got) != 1 || got[0] != "mcp/"+action {
+			t.Fatalf("mcp %s 须分派到单元操作，实际 %v", action, got)
+		}
+	}
+	// `mcp serve` 仍是 HTTP 服务，不能当单元操作
+	if got := runMCPWithCapture(t, "serve"); got != "" {
+		t.Fatalf("mcp serve 不得当作单元操作: %v", got)
+	}
+	// 无参数仍是 stdio
+	if got := runMCPWithCapture(t); got != "" {
+		t.Fatalf("无参数不得当作单元操作: %v", got)
+	}
+}
+
+// runMCPWithCapture 跑一次 runMCP，返回若发生单元分派则返回其 target/action。
+func runMCPWithCapture(t *testing.T, args ...string) string {
+	t.Helper()
+	prev := svcDispatchFn
+	var hit string
+	svcDispatchFn = func(target, action string) { hit = target + "/" + action }
+	defer func() { svcDispatchFn = prev }()
+	// serve / 无参数会阻塞（起 HTTP 或 stdio），用子调用的方式跑不行，
+	// 这里只验证分派函数没被调用：先替换 stdio/HTTP 入口为立即返回。
+	prevServe, prevStdio := runMCPServeFn, runMCPStdioFn
+	runMCPServeFn = func() {}
+	runMCPStdioFn = func() {}
+	defer func() { runMCPServeFn, runMCPStdioFn = prevServe, prevStdio }()
+	runMCP(args)
+	return hit
+}
