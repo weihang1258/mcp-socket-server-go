@@ -1,9 +1,11 @@
 package mcpbridge
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -174,5 +176,54 @@ func TestWithMirrorDoesNotMutate(t *testing.T) {
 	}
 	if got := withMirror("U"); got != "https://gh-proxy.com/U" {
 		t.Fatalf("拼接结果不对: %q", got)
+	}
+}
+
+// 显式"直连"必须可表达：旧键里配了 proxy= 时，若用户在网络更好的机器上
+// 不想走代理，仅写 proxy: "" 无效（YAML 空串与未配置无法区分），会被回退到
+// 旧键的代理。因此支持 proxy: "none" 强制直连。
+func TestResolveProxyExplicitDirect(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config")
+	os.WriteFile(cfg, []byte("proxy=http://10.12.186.204:7897\n"), 0o644)
+	prev := legacyProxyPath
+	legacyProxyPath = cfg
+	defer func() { legacyProxyPath = prev }()
+
+	if got := ResolveProxy(""); got != "http://10.12.186.204:7897" {
+		t.Fatalf("空配置应回退旧键，实际 %q", got)
+	}
+	for _, v := range []string{"none", "NONE", "-"} {
+		if got := ResolveProxy(v); got != "" {
+			t.Fatalf("%q 应表示强制直连，实际 %q", v, got)
+		}
+	}
+	if got := ResolveProxy("http://p:1"); got != "http://p:1" {
+		t.Fatalf("显式代理应生效，实际 %q", got)
+	}
+}
+
+// 代理串写错（缺 scheme）时 url.Parse 直接报错，旧实现静默把 Proxy 留成 nil
+// → 请求变成直连，日志里一个字都没有，排查时完全看不出来。修完后必须留告警。
+func TestHTTPClientBadProxyWarns(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prevOut)
+
+	c := httpClient(5, "10.12.186.204:7897") // 缺 scheme
+	if tr, ok := c.Transport.(*http.Transport); !ok || tr.Proxy != nil {
+		t.Fatal("坏代理不得设成有效 Proxy")
+	}
+	if !strings.Contains(buf.String(), "代理配置无法解析") {
+		t.Fatalf("坏代理必须留告警日志，实际日志: %q", buf.String())
+	}
+
+	// 正常代理照旧生效
+	req, _ := http.NewRequest("GET", "http://example.com", nil)
+	c2 := httpClient(5, "http://10.12.186.204:7897")
+	u2, _ := c2.Transport.(*http.Transport).Proxy(req)
+	if u2 == nil || u2.Host != "10.12.186.204:7897" {
+		t.Fatalf("正常代理应生效，实际 %v", u2)
 	}
 }

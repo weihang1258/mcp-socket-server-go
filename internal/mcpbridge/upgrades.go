@@ -79,8 +79,16 @@ func legacyProxyFrom(path string) string {
 }
 
 // ResolveProxy 生效代理：显式配置优先，空则回退旧键 proxy=。
+//
+// 注意：`proxy: ""` 与「不写这个键」解析后无法区分，都是空串，所以没配代理时
+// 一定会回退旧键。想**强制直连**（旧键里配了代理但你不想用）用
+// `proxy: "none"`（或 config 的 mcp.no_proxy: true）显式关闭。
 func ResolveProxy(explicit string) string {
-	if p := strings.TrimSpace(explicit); p != "" {
+	p := strings.TrimSpace(explicit)
+	if p == "none" || p == "NONE" || p == "-" {
+		return "" // 显式直连
+	}
+	if p != "" {
 		return p
 	}
 	return legacyProxyFrom(legacyProxyPath)
@@ -120,10 +128,17 @@ var (
 func VersionOK(v string) bool { return versionRe.MatchString(v) }
 
 // httpClient proxy 非空时显式使用（对齐 httpx proxy=；空=环境变量/直连）。
+//
+// 代理串解析失败时**必须告警**：`url.Parse` 对 "10.12.186.204:7897"（缺
+// scheme）会成功但 Host 为空，对某些畸形串直接报错。静默忽略的结果是
+// "配了代理却裸连"，排查时完全看不出来。
 func httpClient(timeout int, proxy string) *http.Client {
 	t := &http.Transport{}
 	if proxy != "" {
-		if u, err := url.Parse(proxy); err == nil {
+		if u, err := url.Parse(proxy); err != nil || u.Host == "" {
+			log.Printf("代理配置无法解析，本次按直连处理: %q（应为 http://host:port）", proxy)
+			t.Proxy = nil
+		} else {
 			t.Proxy = http.ProxyURL(u)
 		}
 	} else {
