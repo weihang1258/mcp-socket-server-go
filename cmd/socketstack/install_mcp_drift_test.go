@@ -17,16 +17,13 @@ func TestInstallRestartsDriftedMCP(t *testing.T) {
 	prevEnable, prevRestart := svcAgentEnable, svcAgentRestartFn
 	prevMCPActive, prevMCPRestart := svcMCPActive, svcMCPRestartFn
 	prevPID, prevExe2, prevInode, prevExec := mainPIDFn, procExeFn, statInodeFn, execStartPathFn
-	prevDeps := installDeps
 	defer func() {
 		exePathFn, svcEnsureDirs = prevExe, prevDirs
 		svcVersionsDir, svcBinPath = prevVersions, prevBin
 		svcAgentEnable, svcAgentRestartFn = prevEnable, prevRestart
 		svcMCPActive, svcMCPRestartFn = prevMCPActive, prevMCPRestart
 		mainPIDFn, procExeFn, statInodeFn, execStartPathFn = prevPID, prevExe2, prevInode, prevExec
-		installDeps = prevDeps
 	}()
-	installDeps = func() []string { return nil }
 	svcVersionsDir = filepath.Join(dir, "versions")
 	svcBinPath = filepath.Join(dir, "bin", "socketstack")
 	os.MkdirAll(filepath.Dir(svcBinPath), 0o755)
@@ -66,16 +63,13 @@ func TestInstallLeavesHealthyMCPAlone(t *testing.T) {
 	prevEnable, prevRestart := svcAgentEnable, svcAgentRestartFn
 	prevMCPActive, prevMCPRestart := svcMCPActive, svcMCPRestartFn
 	prevPID, prevExe2, prevInode, prevExec := mainPIDFn, procExeFn, statInodeFn, execStartPathFn
-	prevDeps := installDeps
 	defer func() {
 		exePathFn, svcEnsureDirs = prevExe, prevDirs
 		svcVersionsDir, svcBinPath = prevVersions, prevBin
 		svcAgentEnable, svcAgentRestartFn = prevEnable, prevRestart
 		svcMCPActive, svcMCPRestartFn = prevMCPActive, prevMCPRestart
 		mainPIDFn, procExeFn, statInodeFn, execStartPathFn = prevPID, prevExe2, prevInode, prevExec
-		installDeps = prevDeps
 	}()
-	installDeps = func() []string { return nil }
 	svcVersionsDir = filepath.Join(dir, "versions")
 	svcBinPath = filepath.Join(dir, "bin", "socketstack")
 	os.MkdirAll(filepath.Dir(svcBinPath), 0o755)
@@ -106,16 +100,13 @@ func TestInstallWarnsWhenDriftPersistsAfterRestart(t *testing.T) {
 	prevEnable, prevRestart := svcAgentEnable, svcAgentRestartFn
 	prevMCPActive, prevMCPRestart := svcMCPActive, svcMCPRestartFn
 	prevPID, prevExe2, prevInode, prevExec := mainPIDFn, procExeFn, statInodeFn, execStartPathFn
-	prevDeps := installDeps
 	defer func() {
 		exePathFn, svcEnsureDirs = prevExe, prevDirs
 		svcVersionsDir, svcBinPath = prevVersions, prevBin
 		svcAgentEnable, svcAgentRestartFn = prevEnable, prevRestart
 		svcMCPActive, svcMCPRestartFn = prevMCPActive, prevMCPRestart
 		mainPIDFn, procExeFn, statInodeFn, execStartPathFn = prevPID, prevExe2, prevInode, prevExec
-		installDeps = prevDeps
 	}()
-	installDeps = func() []string { return nil }
 	svcVersionsDir = filepath.Join(dir, "versions")
 	svcBinPath = filepath.Join(dir, "bin", "socketstack")
 	os.MkdirAll(filepath.Dir(svcBinPath), 0o755)
@@ -163,16 +154,13 @@ func TestInstallNoRestartWhenMCPHealthy(t *testing.T) {
 	prevEnable, prevRestart := svcAgentEnable, svcAgentRestartFn
 	prevMCPActive, prevMCPRestart := svcMCPActive, svcMCPRestartFn
 	prevPID, prevExe2, prevInode, prevExec := mainPIDFn, procExeFn, statInodeFn, execStartPathFn
-	prevDeps := installDeps
 	defer func() {
 		exePathFn, svcEnsureDirs = prevExe, prevDirs
 		svcVersionsDir, svcBinPath = prevVersions, prevBin
 		svcAgentEnable, svcAgentRestartFn = prevEnable, prevRestart
 		svcMCPActive, svcMCPRestartFn = prevMCPActive, prevMCPRestart
 		mainPIDFn, procExeFn, statInodeFn, execStartPathFn = prevPID, prevExe2, prevInode, prevExec
-		installDeps = prevDeps
 	}()
-	installDeps = func() []string { return nil }
 	svcVersionsDir = filepath.Join(dir, "versions")
 	svcBinPath = filepath.Join(dir, "bin", "socketstack")
 	os.MkdirAll(filepath.Dir(svcBinPath), 0o755)

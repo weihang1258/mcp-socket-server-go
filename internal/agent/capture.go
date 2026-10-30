@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // 抓包（capture.py 移植，设计 §3 抓包段）。
@@ -497,39 +499,37 @@ func tcpdumpStop(path string) bool {
 }
 
 // 配置单队列（best-effort：任何失败仅 warn 不阻断，设计 §3 单队列段）。
+// 队列读写走 SIOCETHTOOL ioctl（ethtool -l/-L 的内核等价），capture.py 同语义。
 func configureSingleQueue(eth string, count int) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("单队列配置失败(忽略，仍可抓包): %v", r)
 		}
 	}()
-	code, out, _ := execCmdArgs("ethtool", "-l", eth)
-	if code != 0 {
-		log.Printf("ethtool -l 失败(忽略): %s", eth)
+	var cur ethtoolChannels
+	cur.cmd = unix.ETHTOOL_GCHANNELS
+	if err := ethtoolCtlFn(eth, &cur); err != nil {
+		log.Printf("读取网卡 %s 队列数失败(忽略): %v", eth, err)
 		return
 	}
-	// 解析 Combined 当前值
-	cur := -1
-	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, "Combined") {
-			fmt.Sscanf(strings.TrimSpace(strings.Split(line, ":")[1]), "%d", &cur)
-		}
-	}
-	if cur == count {
+	if int(cur.combinedCount) == count {
 		log.Printf("网卡 %s 已是单队列，仍尝试绑定CPU", eth)
 		bindIRQToFreeCPU(eth, count) // Python：已是单队列仍绑（capture.py:841-844）
 		return
 	}
-	if c, _, err := runCombined("ethtool", "-L", eth, "combined", fmt.Sprint(count)); c != 0 || err != nil {
-		// fallback：ethtool -L rx/tx（capture.py:847-848）
-		if c2, _, err2 := runCombined("ethtool", "-L", eth, "rx", fmt.Sprint(count), "tx", fmt.Sprint(count)); c2 != 0 || err2 != nil {
-			log.Printf("ethtool -L 失败(忽略): %s", eth)
+	// ethtool(8) 的语义：只置指定字段，其余为 0
+	setReq := ethtoolChannels{cmd: unix.ETHTOOL_SCHANNELS, combinedCount: uint32(count)}
+	if err := ethtoolCtlFn(eth, &setReq); err != nil {
+		// fallback：rx/tx 分开设（capture.py:847-848）
+		alt := ethtoolChannels{cmd: unix.ETHTOOL_SCHANNELS, rxCount: uint32(count), txCount: uint32(count)}
+		if err2 := ethtoolCtlFn(eth, &alt); err2 != nil {
+			log.Printf("设置网卡 %s 单队列失败(忽略，combined: %v，rx/tx: %v)", eth, err, err2)
 			return
 		}
 	}
-	time.Sleep(3 * time.Second)
+	queueSleepFn(3 * time.Second)
 	bindIRQToFreeCPU(eth, count)
-	time.Sleep(2 * time.Second)
+	queueSleepFn(2 * time.Second)
 }
 
 // bindIRQToFreeCPU IRQ 三路查找（msi_irqs → /proc/interrupts 名称匹配含 mlx5 → grep）
@@ -663,15 +663,6 @@ func disableRPSRFS(eth string) {
 			os.WriteFile(p, []byte("0"), 0o644)
 		}
 	}
-}
-
-// runCombined 组合执行（供 configureSingleQueue）。
-func runCombined(name string, args ...string) (int, string, error) {
-	c := exec.Command(name, args...)
-	var out bytes.Buffer
-	c.Stdout = &out
-	err := c.Run()
-	return exitCodeOfCmd(c, err), out.String(), err
 }
 
 func exitCodeOfCmd(c *exec.Cmd, err error) int {

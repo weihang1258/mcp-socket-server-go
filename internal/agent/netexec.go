@@ -4,10 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
-	"regexp"
-	"strconv"
 	"strings"
 )
 
@@ -81,37 +80,10 @@ func execCmdArgs(argv ...string) (code int, stdout, stderr string) {
 	return code, stdoutBuf.String(), stderrBuf.String()
 }
 
-// routeinfo 复刻 netutils.routeinfo：`route -n` 解析，非零退出/缺失 → error（断连）。
-// 返回按 Destination 键控的行字段 map（Python defaultdict(zip(head, fields))）。
+// routeinfo 复刻 netutils.routeinfo：原生读 /proc/net/route（route -n 的数据源），
+// 输出同构（Destination 键控行字段 map）；读不到 → error（断连）。
 func routeinfo() (map[string]map[string]any, error) {
-	code, stdout, stderr := execCmd("route -n")
-	if code != 0 {
-		return nil, fmt.Errorf("执行：route -n，返回：code=%d stdout=%q stderr=%q", code, stdout, stderr)
-	}
-	lines := strings.Split(strings.TrimSpace(stdout), "\n")
-	res := map[string]map[string]any{}
-	if len(lines) > 2 {
-		head := strings.Fields(strings.TrimSpace(lines[1]))
-		for _, line := range lines[2:] {
-			fields := strings.Fields(strings.TrimSpace(line))
-			if len(fields) == 0 {
-				continue
-			}
-			row := map[string]any{}
-			for i, h := range head {
-				if h == "Destination" || i >= len(fields) {
-					continue
-				}
-				row[h] = fields[i]
-			}
-			// key = Destination 字段值（首列）
-			dest := fields[0]
-			if len(head) > 0 && head[0] == "Destination" {
-				res[dest] = row
-			}
-		}
-	}
-	return res, nil
+	return nativeRouteInfo()
 }
 
 // ensureCommand 复刻 netutils.ensure_command：PATH 查找（不带 install_cmd 分支——dt18 不传）。
@@ -127,40 +99,19 @@ func ensureCommand(cmd, installCmd string) bool {
 	return false
 }
 
-var (
-	mtuNewRe = regexp.MustCompile(`(?i)\bmtu\s+(\d+)`) // 新式 "mtu 1500"
-	mtuOldRe = regexp.MustCompile(`MTU:(\d+)`)         // 老式 "MTU:1500"
-)
-
-// setMTU 复刻 netutils.mtu：ifconfig 缺失 → error；解析当前 MTU（两种格式）；
-// 与 value 相等不动；不等则 `ifconfig eth mtu value`（list-args 语义经 sh 传参拼接，
-// eth/value 已按 Python 端解析为受控输入）。
+// setMTU dt10 实现：ioctl 读当前 MTU，相等不动；不等则 ioctl 设置。
+// 设置失败仅记日志（Python exec 吞错误 → sleep(5) → res null 同语义，网卡
+// 状态以实际为准）；查询失败 = 原 ifconfig 缺失路径 → error → 断连。
 func setMTU(eth string, value int) (set bool, err error) {
-	if !ensureCommand("ifconfig", "") {
-		return false, errors.New("请检查系统是否存在命令：ifconfig")
+	cur, err := getMTUFn(eth)
+	if err != nil {
+		return false, fmt.Errorf("查询网卡 %s MTU 失败: %w", eth, err)
 	}
-	code, stdout, stderr := execCmdArgs("ifconfig", eth)
-	if code != 0 {
-		return false, fmt.Errorf("执行 ifconfig %s 失败: %s", eth, stderr)
-	}
-	cur := ""
-	for _, line := range strings.Split(stdout, "\n") {
-		if m := mtuNewRe.FindStringSubmatch(line); m != nil {
-			cur = m[1]
-			break
-		}
-		if m := mtuOldRe.FindStringSubmatch(line); m != nil {
-			cur = m[1]
-			break
-		}
-	}
-	if cur == "" {
-		return false, fmt.Errorf("无法从 ifconfig %s 输出中解析 mtu", eth)
-	}
-	if n, _ := strconv.Atoi(cur); n == value {
+	if cur == value {
 		return false, nil
 	}
-	// Python 以 list args 防注入：eth 原样进 argv，value 整数化。
-	execCmdArgs("ifconfig", eth, "mtu", strconv.Itoa(value))
+	if serr := setMTUFn(eth, value); serr != nil {
+		log.Printf("设置网卡 %s MTU=%d 失败(忽略): %v", eth, value, serr)
+	}
 	return true, nil
 }

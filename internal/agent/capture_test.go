@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -315,13 +316,14 @@ func TestCaptureNoAuxdataUntouched(t *testing.T) {
 // dt5 eth 空：routeinfo 默认路由网卡
 func TestCaptureDefaultIface(t *testing.T) {
 	resetCapture(t)
-	fake := t.TempDir()
-	t.Setenv("PATH", fake)
-	os.WriteFile(filepath.Join(fake, "route"), []byte(`#!/bin/sh
-echo "Kernel IP routing table"
-echo "Destination     Gateway         Genmask         Flags Metric Ref    Use Iface"
-echo "0.0.0.0         10.0.0.1        0.0.0.0         UG    0      0        0 ens19"
-`), 0o755)
+	// 原生 routeinfo：注入 /proc/net/route fixture
+	fixture := "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT   \n" +
+		"ens19\t00000000\t0100000A\t0003\t0\t0\t0\t00000000\t0\t0\t0    \n"
+	p := filepath.Join(t.TempDir(), "route")
+	os.WriteFile(p, []byte(fixture), 0o644)
+	prevProc := routeTablePath
+	routeTablePath = p
+	t.Cleanup(func() { routeTablePath = prevProc })
 	var gotEth string
 	src := newFakeSource()
 	prev := openPacketSocketFn
@@ -338,9 +340,11 @@ echo "0.0.0.0         10.0.0.1        0.0.0.0         UG    0      0        0 en
 // dt5 eth 空且无默认路由 → res:false（routeinfo 成功但无 Iface）
 func TestCaptureNoDefaultRoute(t *testing.T) {
 	resetCapture(t)
-	fake := t.TempDir()
-	t.Setenv("PATH", fake)
-	os.WriteFile(filepath.Join(fake, "route"), []byte("#!/bin/sh\necho \"Kernel IP routing table\"\n"), 0o755)
+	// 只有头行、无数据行 = 无默认路由（/proc/net/route 空表形态）
+	prevProc := routeTablePath
+	routeTablePath = filepath.Join(t.TempDir(), "route")
+	os.WriteFile(routeTablePath, []byte("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT   \n"), 0o644)
+	t.Cleanup(func() { routeTablePath = prevProc })
 	resp, err := runDT(t, 5, mustJSON(t, map[string]string{"path": "/tmp/nr.pcap"}))
 	if err != nil {
 		t.Fatal(err)
@@ -350,13 +354,22 @@ func TestCaptureNoDefaultRoute(t *testing.T) {
 	}
 }
 
-// 单队列 best-effort：ethtool 脚本记录调用；失败不影响抓包
+// 单队列 best-effort（原生 SIOCETHTOOL ioctl）：读到多队列 → 设置 combined=1；
+// 任何失败不影响抓包继续。
 func TestCaptureSingleQueueBestEffort(t *testing.T) {
 	resetCapture(t)
-	fake := t.TempDir()
-	t.Setenv("PATH", fake)
-	calls := filepath.Join(fake, "ethtool.calls")
-	os.WriteFile(filepath.Join(fake, "ethtool"), []byte("#!/bin/sh\necho \"$1 $2 $3\" >> "+calls+"\necho \"Combined:       4\"\n"), 0o755)
+	prevCtl, prevSleep := ethtoolCtlFn, queueSleepFn
+	defer func() { ethtoolCtlFn, queueSleepFn = prevCtl, prevSleep }()
+	var setCalls []string
+	ethtoolCtlFn = func(eth string, ch *ethtoolChannels) error {
+		if ch.cmd == 0x3c { // ETHTOOL_GCHANNELS
+			ch.combinedCount = 4 // 多队列
+			return nil
+		}
+		setCalls = append(setCalls, fmt.Sprintf("combined=%d rx=%d tx=%d", ch.combinedCount, ch.rxCount, ch.txCount))
+		return nil
+	}
+	queueSleepFn = func(time.Duration) {}
 	src := newFakeSource()
 	prev := openPacketSocketFn
 	openPacketSocketFn = func(string) (pktSource, error) { return src, nil }
@@ -365,8 +378,68 @@ func TestCaptureSingleQueueBestEffort(t *testing.T) {
 	if ok, _ := tcpdumpStart("eth0", filepath.Join(t.TempDir(), "sq.pcap"), "", true); !ok {
 		t.Fatal("start with single_queue")
 	}
-	if _, err := os.Stat(calls); err != nil {
-		t.Fatal("ethtool not invoked for single_queue=true")
+	if len(setCalls) != 1 || setCalls[0] != "combined=1 rx=0 tx=0" {
+		t.Fatalf("ethtool set not invoked for single_queue=true: %v", setCalls)
+	}
+}
+
+// 已是单队列 → 不再调用设置（仍绑 CPU，capture.py:841-844 语义）
+func TestConfigureSingleQueueAlreadySingle(t *testing.T) {
+	prevCtl := ethtoolCtlFn
+	defer func() { ethtoolCtlFn = prevCtl }()
+	var setCalls int
+	ethtoolCtlFn = func(eth string, ch *ethtoolChannels) error {
+		if ch.cmd == 0x3c {
+			ch.combinedCount = 1
+			return nil
+		}
+		setCalls++
+		return nil
+	}
+	configureSingleQueue("eth9-fake", 1) // 假网卡：bindIRQ 读不到 /sys，全空转
+	if setCalls != 0 {
+		t.Fatalf("已是单队列不该再设置，实际 %d 次", setCalls)
+	}
+}
+
+// combined 设置失败 → 回退 rx/tx 分开设（capture.py:847-848 语义）
+func TestConfigureSingleQueueFallbackRxTx(t *testing.T) {
+	prevCtl, prevSleep := ethtoolCtlFn, queueSleepFn
+	defer func() { ethtoolCtlFn, queueSleepFn = prevCtl, prevSleep }()
+	queueSleepFn = func(time.Duration) {}
+	var attempts []string
+	ethtoolCtlFn = func(eth string, ch *ethtoolChannels) error {
+		if ch.cmd == 0x3c {
+			ch.combinedCount = 4
+			return nil
+		}
+		if ch.combinedCount == 1 {
+			return errors.New("combined not supported") // 第一次设置失败
+		}
+		attempts = append(attempts, fmt.Sprintf("rx=%d tx=%d", ch.rxCount, ch.txCount))
+		return nil
+	}
+	configureSingleQueue("eth9-fake", 1)
+	if len(attempts) != 1 || attempts[0] != "rx=1 tx=1" {
+		t.Fatalf("应回退到 rx/tx 设置，实际 %v", attempts)
+	}
+}
+
+// 读队列数失败 → 直接返回（不设置、不 panic）
+func TestConfigureSingleQueueReadFailNoop(t *testing.T) {
+	prevCtl := ethtoolCtlFn
+	defer func() { ethtoolCtlFn = prevCtl }()
+	var setCalls int
+	ethtoolCtlFn = func(eth string, ch *ethtoolChannels) error {
+		if ch.cmd == 0x3c {
+			return errors.New("not supported")
+		}
+		setCalls++
+		return nil
+	}
+	configureSingleQueue("eth9-fake", 1)
+	if setCalls != 0 {
+		t.Fatalf("读取失败不该设置，实际 %d 次", setCalls)
 	}
 }
 

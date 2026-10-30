@@ -26,11 +26,18 @@ const AgentLogPath = "/var/log/socket_server.log"
 const LogrotateConfigPath = "/etc/logrotate.d/socketstack"
 
 // LogrotateContent 生成 logrotate 配置。
+//
+// 保留策略：只留最近 7 天（daily + maxage 7 + rotate 7）。
+// 单日暴涨用 maxsize 60M 兜底——不能用 size（size 是绝对条件，会覆盖 daily，
+// 日志不涨满 60M 就永不轮转，7 天保留失效）；maxsize 是「到期照轮、超限提前」。
+// copytruncate 见上。
 func LogrotateContent() string {
 	return strings.Join([]string{
 		AgentLogPath + " {",
-		"    size 60M",
-		"    rotate 5",
+		"    daily",
+		"    maxsize 60M",
+		"    maxage 7",
+		"    rotate 7",
 		"    copytruncate",
 		"    missingok",
 		"    notifempty",

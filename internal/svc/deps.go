@@ -1,13 +1,13 @@
-// Package svc 系统依赖管理（install 期 best-effort 安装）。
+// Package svc 浏览器拨测依赖的按需安装。
 //
-// Python 版 install.sh 有 `yum install -y ethtool net-tools` 这一段，Go 版
-// 最初漏移植：抓包配单队列要 ethtool、排错要 net-tools，缺了要等第一次抓包
-// 才报错。chromium 那串运行期库也一样——只在下游 boce 首次拨测时现场装，
-// 内网装不上就只留一句 .so 名。
+// v1.9.7 起 install 完全不碰包管理器：route/ifconfig/ethtool 已由内核接口
+// 原生实现（internal/agent netnative.go），chromium 运行库只服务浏览器拨测，
+// 改由 `deps install-browser` 显式安装（失败即非 0 退出，不再静默吞掉）。
 package svc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -27,9 +27,6 @@ func DetectPkgManager() string {
 	}
 	return ""
 }
-
-// systemDepPackages install 期的基础系统依赖。
-func systemDepPackages() []string { return []string{"ethtool", "net-tools"} }
 
 // chromiumDepPackages chromium 运行期库（boce 重定向拨测要）。
 // 与 boce.go 首次拨测时的现场安装列表同源，这里提前到 install 期。
@@ -99,25 +96,25 @@ func MissingLibsFromLdd(out string) []string {
 // 这里是用户等了半天不知道在干什么的 CLI）。
 var depsInstallTimeout = 10 * time.Minute
 
-// InstallDeps best-effort 安装系统依赖；失败仅告警不中断（对齐 Python install.sh）。
-// 返回失败包的告警文案列表（由调用方打印），永不返回 error。
-func InstallDeps() []string {
-	var warns []string
+// depsRunner 注入点（测试替换；生产 = runWithTimeout）。
+var depsRunner = runWithTimeout
+
+// InstallBrowserDeps 显式安装浏览器拨测（boce_run 浏览器模式）所需的
+// chromium 运行库。只在用户主动执行 `deps install-browser` 时调用——
+// 默认 install 完全不碰包管理器（抓包/回放/命令执行都用不着这串库）。
+// 失败必须返回 error（CLI 非 0 退出）：用户主动要求的事，失败不该被
+// 静默吞掉。
+func InstallBrowserDeps() error {
 	pm := DetectPkgManager()
 	if pm == "" {
-		return []string{"未找到 yum/dnf/apt-get，跳过系统依赖安装（不影响核心功能）"}
+		return errors.New("未找到 yum/dnf/apt-get，无法自动安装；请手动安装 chromium 运行库")
 	}
-	for _, set := range [][]string{systemDepPackages(), ChromiumDepPackages()} {
-		cmd := InstallDepsCommand(pm, set)
-		if cmd == "" {
-			continue
-		}
-		if out, err := runWithTimeout(cmd, depsInstallTimeout); err != nil {
-			warns = append(warns, "系统依赖安装未全部成功（不影响核心功能，可手动执行）: "+
-				cmd+"; 原因: "+firstLine(err.Error())+"; 输出: "+firstLine(out))
-		}
+	cmd := InstallDepsCommand(pm, ChromiumDepPackages())
+	out, err := depsRunner(cmd, depsInstallTimeout)
+	if err != nil {
+		return fmt.Errorf("浏览器依赖安装失败（%s）\n命令: %s\n输出: %s", firstLine(err.Error()), cmd, firstLine(out))
 	}
-	return warns
+	return nil
 }
 
 // runWithTimeout 跑 shell 命令带超时（超时 → kill 整个进程组）。

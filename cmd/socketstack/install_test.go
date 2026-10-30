@@ -32,13 +32,10 @@ func TestInstallPlacesSingleBinaryAndSymlinksCLI(t *testing.T) {
 
 	prevVersions, prevBin, prevExe := svcVersionsDir, svcBinPath, exePathFn
 	prevDirs, prevEnable, prevRestart := svcEnsureDirs, svcAgentEnable, svcAgentRestartFn
-	prevDeps := installDeps
 	defer func() {
 		svcVersionsDir, svcBinPath, exePathFn = prevVersions, prevBin, prevExe
 		svcEnsureDirs, svcAgentEnable, svcAgentRestartFn = prevDirs, prevEnable, prevRestart
-		installDeps = prevDeps
 	}()
-	installDeps = func() []string { return nil }
 	svcVersionsDir, svcBinPath = versions, binPath
 	exePathFn = func() (string, error) { return src, nil }
 	svcEnsureDirs = func() error { return os.MkdirAll(versions, 0o755) }
@@ -76,9 +73,8 @@ func TestInstallPlacesSingleBinaryAndSymlinksCLI(t *testing.T) {
 // 都必须被重启，用户不用再敲第二条命令。
 func TestInstallStartsServices(t *testing.T) {
 	stubNoDrift(t)
-	prev := []any{svcEnsureDirs, svcAgentEnable, svcAgentRestartFn, svcMCPInstall, svcMCPRestartFn, exePathFn, svcVersionsDir, svcBinPath, installDeps}
+	prev := []any{svcEnsureDirs, svcAgentEnable, svcAgentRestartFn, svcMCPInstall, svcMCPRestartFn, exePathFn, svcVersionsDir, svcBinPath}
 	defer func() {
-		installDeps = prev[8].(func() []string)
 		svcEnsureDirs, svcAgentEnable = prev[0].(func() error), prev[1].(func() error)
 		svcAgentRestartFn = prev[2].(func() error)
 		svcMCPInstall, svcMCPRestartFn = prev[3].(func() error), prev[4].(func() error)
@@ -95,7 +91,6 @@ func TestInstallStartsServices(t *testing.T) {
 	svcEnsureDirs = func() error { return os.MkdirAll(svcVersionsDir, 0o755) }
 	svcAgentEnable = func() error { return nil }
 	svcMCPInstall = func() error { return nil }
-	installDeps = func() []string { return nil }
 	var agentStarted, mcpStarted atomic.Int32
 	svcAgentRestartFn = func() error { agentStarted.Add(1); return nil }
 	svcMCPRestartFn = func() error { mcpStarted.Add(1); return nil }
@@ -127,15 +122,12 @@ func TestInstallRestartsServices(t *testing.T) {
 	prevVersions, prevBin := svcVersionsDir, svcBinPath
 	prevEnable, prevRestart, prevStart := svcAgentEnable, svcAgentRestartFn, svcAgentStart
 	prevMCPInst, prevMCPRestart, prevMCPStart := svcMCPInstall, svcMCPRestartFn, svcMCPStart
-	prevDeps := installDeps
 	defer func() {
 		exePathFn, svcEnsureDirs = prevExe, prevDirs
 		svcVersionsDir, svcBinPath = prevVersions, prevBin
 		svcAgentEnable, svcAgentRestartFn, svcAgentStart = prevEnable, prevRestart, prevStart
 		svcMCPInstall, svcMCPRestartFn, svcMCPStart = prevMCPInst, prevMCPRestart, prevMCPStart
-		installDeps = prevDeps
 	}()
-	installDeps = func() []string { return nil }
 	svcVersionsDir = filepath.Join(dir, "versions")
 	svcBinPath = filepath.Join(dir, "bin", "socketstack")
 	os.MkdirAll(filepath.Dir(svcBinPath), 0o755)
@@ -235,13 +227,10 @@ func TestInstallOverwritesExistingVersion(t *testing.T) {
 
 	prevVersions, prevBin, prevExe := svcVersionsDir, svcBinPath, exePathFn
 	prevDirs, prevEnable, prevRestart := svcEnsureDirs, svcAgentEnable, svcAgentRestartFn
-	prevDeps := installDeps
 	defer func() {
 		svcVersionsDir, svcBinPath, exePathFn = prevVersions, prevBin, prevExe
 		svcEnsureDirs, svcAgentEnable, svcAgentRestartFn = prevDirs, prevEnable, prevRestart
-		installDeps = prevDeps
 	}()
-	installDeps = func() []string { return nil }
 	svcVersionsDir, svcBinPath = versions, binPath
 	exePathFn = func() (string, error) { return src, nil }
 	svcEnsureDirs = func() error { return nil }
@@ -263,70 +252,7 @@ func TestInstallOverwritesExistingVersion(t *testing.T) {
 	}
 }
 
-// install 必须做系统依赖的 best-effort 安装（Python install.sh 有这一段，
-// Go 版最初漏移植：ethtool 缺失要等第一次抓包才知道，chromium 库缺失要等
-// 第一次 boce 拨测才炸）。
-func TestInstallRunsDependencyInstall(t *testing.T) {
-	stubNoDrift(t)
-	dir := t.TempDir()
-	prevExe, prevDirs := exePathFn, svcEnsureDirs
-	prevVersions, prevBin := svcVersionsDir, svcBinPath
-	prevEnable, prevRestart, prevDeps := svcAgentEnable, svcAgentRestartFn, installDeps
-	defer func() {
-		exePathFn, svcEnsureDirs = prevExe, prevDirs
-		svcVersionsDir, svcBinPath = prevVersions, prevBin
-		svcAgentEnable, svcAgentRestartFn, installDeps = prevEnable, prevRestart, prevDeps
-	}()
-	svcVersionsDir = filepath.Join(dir, "versions")
-	svcBinPath = filepath.Join(dir, "bin", "socketstack")
-	os.MkdirAll(filepath.Dir(svcBinPath), 0o755)
-	src := filepath.Join(dir, "src")
-	os.WriteFile(src, []byte("BIN"), 0o755)
-	exePathFn = func() (string, error) { return src, nil }
-	svcEnsureDirs = func() error { return nil }
-	svcAgentEnable = func() error { return nil }
-	svcAgentRestartFn = func() error { return nil }
-	var called atomic.Int32
-	installDeps = func() []string { called.Add(1); return nil }
 
-	if err := installSelf(false); err != nil {
-		t.Fatalf("installSelf: %v", err)
-	}
-	if called.Load() != 1 {
-		t.Fatalf("install 须执行依赖安装 1 次，实际 %d", called.Load())
-	}
-}
-
-// 依赖安装失败只告警，不能中断安装（best-effort 语义，对齐 Python install.sh）。
-func TestInstallDepsFailureDoesNotAbort(t *testing.T) {
-	stubNoDrift(t)
-	dir := t.TempDir()
-	prevExe, prevDirs := exePathFn, svcEnsureDirs
-	prevVersions, prevBin := svcVersionsDir, svcBinPath
-	prevEnable, prevRestart, prevDeps := svcAgentEnable, svcAgentRestartFn, installDeps
-	defer func() {
-		exePathFn, svcEnsureDirs = prevExe, prevDirs
-		svcVersionsDir, svcBinPath = prevVersions, prevBin
-		svcAgentEnable, svcAgentRestartFn, installDeps = prevEnable, prevRestart, prevDeps
-	}()
-	svcVersionsDir = filepath.Join(dir, "versions")
-	svcBinPath = filepath.Join(dir, "bin", "socketstack")
-	os.MkdirAll(filepath.Dir(svcBinPath), 0o755)
-	src := filepath.Join(dir, "src")
-	os.WriteFile(src, []byte("BIN"), 0o755)
-	exePathFn = func() (string, error) { return src, nil }
-	svcEnsureDirs = func() error { return nil }
-	svcAgentEnable = func() error { return nil }
-	svcAgentRestartFn = func() error { return nil }
-	installDeps = func() []string { return []string{"装包失败"} }
-
-	if err := installSelf(false); err != nil {
-		t.Fatalf("依赖失败不应中断安装: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(svcVersionsDir, "current")); err != nil {
-		t.Fatalf("依赖失败后 current 仍须建好: %v", err)
-	}
-}
 
 // status 必须给出拨测依赖诊断：chromium 已下载但缺库时要列出缺哪些 .so、
 // 并给出可直接复制的装包命令。未装 chromium 时不该报（首次 boce 才下载）。
@@ -411,15 +337,14 @@ func TestInstallWritesLogrotate(t *testing.T) {
 	stubNoDrift(t)
 	prevExe, prevDirs := exePathFn, svcEnsureDirs
 	prevVersions, prevBin := svcVersionsDir, svcBinPath
-	prevEnable, prevRestart, prevDeps := svcAgentEnable, svcAgentRestartFn, installDeps
+	prevEnable, prevRestart := svcAgentEnable, svcAgentRestartFn
 	prevLog := installLogrotate
 	defer func() {
 		exePathFn, svcEnsureDirs = prevExe, prevDirs
 		svcVersionsDir, svcBinPath = prevVersions, prevBin
-		svcAgentEnable, svcAgentRestartFn, installDeps = prevEnable, prevRestart, prevDeps
+		svcAgentEnable, svcAgentRestartFn = prevEnable, prevRestart
 		installLogrotate = prevLog
 	}()
-	installDeps = func() []string { return nil }
 	svcVersionsDir = filepath.Join(dir, "versions")
 	svcBinPath = filepath.Join(dir, "bin", "socketstack")
 	os.MkdirAll(filepath.Dir(svcBinPath), 0o755)
@@ -446,15 +371,14 @@ func TestInstallLogrotateFailureDoesNotAbort(t *testing.T) {
 	stubNoDrift(t)
 	prevExe, prevDirs := exePathFn, svcEnsureDirs
 	prevVersions, prevBin := svcVersionsDir, svcBinPath
-	prevEnable, prevRestart, prevDeps := svcAgentEnable, svcAgentRestartFn, installDeps
+	prevEnable, prevRestart := svcAgentEnable, svcAgentRestartFn
 	prevLog := installLogrotate
 	defer func() {
 		exePathFn, svcEnsureDirs = prevExe, prevDirs
 		svcVersionsDir, svcBinPath = prevVersions, prevBin
-		svcAgentEnable, svcAgentRestartFn, installDeps = prevEnable, prevRestart, prevDeps
+		svcAgentEnable, svcAgentRestartFn = prevEnable, prevRestart
 		installLogrotate = prevLog
 	}()
-	installDeps = func() []string { return nil }
 	svcVersionsDir = filepath.Join(dir, "versions")
 	svcBinPath = filepath.Join(dir, "bin", "socketstack")
 	os.MkdirAll(filepath.Dir(svcBinPath), 0o755)

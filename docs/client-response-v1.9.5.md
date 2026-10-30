@@ -237,3 +237,41 @@ sudo truncate -s 0 /var/log/socket_server.log
 原因：MCP 进程与被升级的 agent 是两个独立进程，agent 重启不影响 MCP 自身的 HTTP 服务；只有 `switchTo` 里那句「顺带重启 mcp」会中断 MCP——而这正是第 1 条修掉的行为（现在 mcp 在 agent 重启前有序重启，重启完成后再没有对 MCP 的干扰）。
 
 如果你们在 v1.9.5 上遇到 `unexpected end of JSON input`，那大概率就是 v1.9.5 这个顺序 bug 的连带效果。若在 v1.9.6 上仍能复现，请把审计里那条 `upgrade_run` 的 `error` 字段发给我们——现在它会被记录下来了。
+
+---
+
+## 九、v1.9.7 —— 去外部依赖 + 日志保留策略
+
+### 1. `route` / `ifconfig` / `ethtool` 改为内核接口原生实现
+
+这三个命令本身只是内核接口的薄封装（`route -n` 读的就是 `/proc/net/route`，ifconfig 的 MTU 走 SIOCGIFMTU/SIOCSIFMTU，ethtool 的队列查询/设置走 SIOCETHTOOL）。现在 agent 直接调内核接口，不再执行这三个外部命令。
+
+真机对拍（同机逐字段比对）：
+
+- 原生 routeinfo 输出与 `route -n` 解析结果完全一致（含点分十进制、UG/U 标志、Metric）
+- MTU 读数与 `/sys/class/net/*/mtu` 一致；设置在 root 下完成 1500↔65536 往返
+- 网卡队列读数与 `ethtool -l` 一致（本机 eno4 当前 combined=1）
+
+**行为差异**（有意变更，见设计文档 §12 #53）：dt10 原「ifconfig 缺失 → 断连」变为「MTU 查询失败 → 断连」——网卡不存在时行为相同；设置失败仍吞错（对齐 Python exec 语义）。
+
+### 2. `install` 不再调用包管理器
+
+原先每次 install 都会执行 apt/yum 装两批包：ethtool + net-tools、chromium 的二十多个运行库。前者已因原生实现无必要；后者只有**浏览器拨测**（boce_run 浏览器模式）用得着，抓包/回放/命令执行完全不需要。
+
+这正是验收发现的「install 白等 dpkg 锁」的主要来源。现在：
+
+- `socketstack install` 只装服务本身，内网无软件源的机器不再有等待
+- 需要浏览器拨测的机器，显式执行 `sudo socketstack deps install-browser`
+- `deps install-browser` **失败以非 0 退出**（不再警告后照常成功）；apt 拿不到锁立即失败（DPkg::Lock::Timeout=0）
+- 缺库诊断仍保留：`status` 会列出 chromium 缺哪些 `.so` 并给出修复命令
+
+### 3. 日志保留 7 天
+
+logrotate 配置改为：`daily + size 60M + maxage 7 + rotate 7 + copytruncate + compress`。超过 7 天的归档由 logrotate 自动删除，不再永久累积。
+
+历史处置：清空日志时保留在 /tmp 的 364MB 归档已按「只留 7 天」原则删除（其中 99% 是 3 月～10 月的 Python 时代日志）。当前 /var/log 下只有 7 天内的两份小文件。
+
+### 4. 未动的两项（经评估不做伪替代）
+
+- **tcpdump**：agent 只用它把用户填写的过滤表达式编译成内核 BPF 指令（`tcpdump -ddd`），并不用 tcpdump 抓包。自行手写 BPF 编译器一旦语义有偏差，会「静默抓错包」，比保留这个依赖危险得多。系统普遍自带 tcpdump，不进安装清单。
+- **chromium 本体**：普通 HTTP 客户端不能执行页面 JS、不能模拟浏览器重定向/弹窗，用它冒充拨测会让「拨测成功」失去意义。需要无库部署时，方向是把带完整运行环境的浏览器做成独立组件包，单独评估。

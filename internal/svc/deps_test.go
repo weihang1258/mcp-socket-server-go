@@ -7,16 +7,43 @@ import (
 	"time"
 )
 
-// install 必须 best-effort 装上系统依赖（ethtool / net-tools）。
-// Python 版 install.sh 有这一段，Go 版漏移植：抓包配单队列要 ethtool、
-// 拍错要 net-tools，缺了要等第一次抓包报错才发现。
-func TestSystemDepPackages(t *testing.T) {
-	got := systemDepPackages()
-	joined := strings.Join(got, " ")
-	for _, want := range []string{"ethtool", "net-tools"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("系统依赖应含 %s，实际 %v", want, got)
+// deps install-browser：用户显式要求装浏览器库，失败必须报错（CLI 非 0 退出）。
+func TestInstallBrowserDeps(t *testing.T) {
+	prev := depsRunner
+	defer func() { depsRunner = prev }()
+
+	// 无包管理器 → 明确报错
+	prevLook := lookPathFn
+	lookPathFn = func(string) (string, error) { return "", exec.ErrNotFound }
+	err := InstallBrowserDeps()
+	lookPathFn = prevLook
+	if err == nil || !strings.Contains(err.Error(), "yum/dnf/apt-get") {
+		t.Fatalf("无包管理器应报错: %v", err)
+	}
+
+	// 装包失败 → error 带输出
+	lookPathFn = func(name string) (string, error) {
+		if name == "apt-get" {
+			return "/usr/bin/apt-get", nil
 		}
+		return "", exec.ErrNotFound
+	}
+	defer func() { lookPathFn = prevLook }()
+	depsRunner = func(cmd string, d time.Duration) (string, error) {
+		if !strings.Contains(cmd, "DPkg::Lock::Timeout=0") || !strings.Contains(cmd, "libgtk-3-0") {
+			t.Errorf("命令不对: %q", cmd)
+		}
+		return "E: Could not get lock", exec.ErrNotFound
+	}
+	err = InstallBrowserDeps()
+	if err == nil || !strings.Contains(err.Error(), "Could not get lock") {
+		t.Fatalf("装包失败应带原因返回: %v", err)
+	}
+
+	// 成功 → nil
+	depsRunner = func(string, time.Duration) (string, error) { return "", nil }
+	if err := InstallBrowserDeps(); err != nil {
+		t.Fatalf("成功路径不该报错: %v", err)
 	}
 }
 

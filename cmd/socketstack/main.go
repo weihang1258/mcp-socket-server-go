@@ -30,6 +30,7 @@ const agentUsage = `socketstack — socket_server(agent) + mcp_socket_server(mcp
   socketstack serve               agent 模式别名（旧 unit 兼容入口）
   socketstack install [--with-mcp]
   socketstack uninstall
+  socketstack deps install-browser  安装浏览器拨测（boce）所需 chromium 运行库
   socketstack status              一屏看版本/服务状态/路径/日志
   socketstack agent|mcp start|stop|status|enable|disable
   socketstack agent autoupgrade on|off
@@ -70,6 +71,9 @@ func main() {
 		runInstall(args[1:])
 	case "uninstall":
 		runUninstall(args[1:])
+	case "deps":
+		runDeps(args[1:])
+		return
 	case "status":
 		fmt.Print(statusReport())
 	case "version", "-v", "--version":
@@ -187,6 +191,43 @@ func parseInstallArgs(args []string) (bool, string) {
 		}
 	}
 	return withMCP, act
+}
+
+// depsUsage deps 子命令用法。
+const depsUsage = `用法: socketstack deps install-browser
+
+安装浏览器拨测（boce_run 浏览器模式）所需的 chromium 运行库。
+默认 install 不安装任何系统包；只有需要浏览器拨测的机器才执行本命令。
+安装失败以非 0 退出。`
+
+// runDeps deps 子命令：目前唯一动作 install-browser。严格解析，
+// 与 install/uninstall 同约定（help 退 0、未知参数退 2、均不执行）。
+func runDeps(args []string) {
+	act := "unknown"
+	switch len(args) {
+	case 1:
+		switch args[0] {
+		case "install-browser":
+			act = "run"
+		case "-h", "--help", "help":
+			act = "help"
+		}
+	}
+	switch act {
+	case "help":
+		fmt.Println(depsUsage)
+		return
+	case "unknown":
+		fmt.Fprintln(os.Stderr, "deps: 未知参数\n"+depsUsage)
+		exitFn(2)
+		return
+	}
+	if err := installBrowserDepsFn(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		exitFn(1)
+		return
+	}
+	fmt.Println("浏览器依赖已安装")
 }
 
 func runInstall(args []string) {

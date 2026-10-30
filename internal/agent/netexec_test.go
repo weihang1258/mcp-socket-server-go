@@ -2,6 +2,8 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -121,16 +123,19 @@ func TestDT19VersionDetail(t *testing.T) {
 }
 
 // dt4 routeinfo：route -n 输出解析（2 行头 + 数据行 zip 到 Destination 键）
+// dt4 routeinfo 原生实现：读 /proc/net/route（route -n 的数据源），
+// 输出与 route -n 解析同构：外层按 Destination 键控，行含
+// Gateway/Genmask/Flags/Metric/Ref/Use/Iface，值为 route -n 的文本格式
+// （IP 点分、Flags 字母、Metric/Ref/Use 十进制）。fixture 抄自真机格式。
 func TestDT4Routeinfo(t *testing.T) {
-	fake := t.TempDir()
-	t.Setenv("PATH", fake)
-	route := `#!/bin/sh
-echo "Kernel IP routing table"
-echo "Destination     Gateway         Genmask         Flags Metric Ref    Use Iface"
-echo "0.0.0.0         192.168.1.1     0.0.0.0         UG    100    0        0 eth0"
-echo "192.168.1.0     0.0.0.0         255.255.255.0   U     100    0        0 eth0"
-`
-	os.WriteFile(filepath.Join(fake, "route"), []byte(route), 0o755)
+	fixture := "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT   \n" +
+		"eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0    \n" +
+		"eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0    \n"
+	p := filepath.Join(t.TempDir(), "route")
+	os.WriteFile(p, []byte(fixture), 0o644)
+	prev := routeTablePath
+	routeTablePath = p
+	t.Cleanup(func() { routeTablePath = prev })
 
 	resp, err := runDT(t, 4, nil)
 	if err != nil {
@@ -140,50 +145,82 @@ echo "192.168.1.0     0.0.0.0         255.255.255.0   U     100    0        0 et
 	if err := json.Unmarshal(resp, &m); err != nil {
 		t.Fatalf("dt4 resp not object-keyed-by-destination: %v (%q)", err, resp)
 	}
-	eth0 := m["0.0.0.0"]
-	if eth0 == nil || eth0["Iface"] != "eth0" {
-		t.Fatalf("default route wrong: %v", eth0)
+	def := m["0.0.0.0"]
+	if def == nil || def["Iface"] != "eth0" {
+		t.Fatalf("default route wrong: %v", def)
 	}
-	if m["192.168.1.0"] == nil {
+	// 值必须是 route -n 的文本格式（与旧实现逐字段一致，客户端契约）
+	if def["Gateway"] != "192.168.1.1" || def["Flags"] != "UG" || def["Metric"] != "100" || def["Genmask"] != "0.0.0.0" {
+		t.Fatalf("default route fields wrong: %v", def)
+	}
+	lan := m["192.168.1.0"]
+	if lan == nil {
 		t.Fatalf("second route missing: %v", m)
 	}
+	if lan["Genmask"] != "255.255.255.0" || lan["Flags"] != "U" || lan["Gateway"] != "0.0.0.0" {
+		t.Fatalf("lan route fields wrong: %v", lan)
+	}
 }
 
-// dt4：route -n 失败 → RuntimeError → 断连（Do 返回 error）
+// dt4：路由表读不到 → error → 断连（对齐 Python routeinfo() 异常冒泡）
 func TestDT4RouteFailureErrors(t *testing.T) {
-	fake := t.TempDir()
-	t.Setenv("PATH", fake) // 无 route 命令
+	prev := routeTablePath
+	routeTablePath = filepath.Join(t.TempDir(), "not-exist")
+	t.Cleanup(func() { routeTablePath = prev })
 	if _, err := runDT(t, 4, nil); err == nil {
-		t.Fatal("want error for missing route cmd")
-	}
-	// 命令存在但非零退出
-	os.WriteFile(filepath.Join(fake, "route"), []byte("#!/bin/sh\nexit 3\n"), 0o755)
-	if _, err := runDT(t, 4, nil); err == nil {
-		t.Fatal("want error for route nonzero exit")
+		t.Fatal("want error for unreadable route table")
 	}
 }
 
-// dt10 改 MTU：新式 "mtu 1500" 与老式 "MTU:1500" 两种解析；值相等不设置；
-// 不等则执行 ifconfig eth mtu <value>（fake 记录调用）
+// /proc/net/route 十六进制字段解码（真机实测样例：网关 FE830C0A=10.12.131.254）
+func TestRouteDecodeHelpers(t *testing.T) {
+	if got := hexIP("FE830C0A"); got != "10.12.131.254" {
+		t.Fatalf("hexIP(FE830C0A)=%q", got)
+	}
+	if got := hexIP("0101A8C0"); got != "192.168.1.1" {
+		t.Fatalf("hexIP(0101A8C0)=%q", got)
+	}
+	if got := hexIP("00000000"); got != "0.0.0.0" {
+		t.Fatalf("hexIP(00000000)=%q", got)
+	}
+	if got := hexIP("00FFFFFF"); got != "255.255.255.0" {
+		t.Fatalf("hexIP(00FFFFFF)=%q", got)
+	}
+	if got := routeFlagLetters("0003"); got != "UG" {
+		t.Fatalf("flags(0003)=%q", got)
+	}
+	if got := routeFlagLetters("0001"); got != "U" {
+		t.Fatalf("flags(0001)=%q", got)
+	}
+}
+
+// dt10 改 MTU（原生 ioctl）：值相等不设置；不等则调用设置并返回 {"res":null}。
+// 设置失败仅记日志（Python exec 吞错语义），查询失败才断连。
 func TestDT10MTU(t *testing.T) {
-	fake := t.TempDir()
-	t.Setenv("PATH", fake)
-	ifcfg := `#!/bin/sh
-if [ "$2" = "mtu" ]; then echo "SET $@" >> '` + filepath.Join(fake, "calls") + `'; exit 0; fi
-echo "eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500"
-echo "        inet 192.168.1.10  netmask 255.255.255.0"`
-	os.WriteFile(filepath.Join(fake, "ifconfig"), []byte(ifcfg), 0o755)
+	prevGet, prevSet := getMTUFn, setMTUFn
+	defer func() { getMTUFn, setMTUFn = prevGet, prevSet }()
+	var setCalls []string
+	getMTUFn = func(eth string) (int, error) {
+		if eth != "eth0" {
+			t.Errorf("getMTUFn eth=%q, want eth0", eth)
+		}
+		return 1500, nil
+	}
+	setMTUFn = func(eth string, mtu int) error {
+		setCalls = append(setCalls, fmt.Sprintf("%s %d", eth, mtu))
+		return nil
+	}
 
 	// 值相等 → 不调用设置
 	payload, _ := json.Marshal(map[string]any{"eth": "eth0", "value": 1500})
 	if _, err := runDT(t, 10, payload); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(fake, "calls")); !os.IsNotExist(err) {
+	if len(setCalls) != 0 {
 		t.Fatal("equal mtu must not invoke set")
 	}
 
-	// 值不等 → 调用 ifconfig eth0 mtu 2000；返回 {"res":null}
+	// 值不等 → 设置 eth0 mtu 2000；返回 {"res":null}
 	payload, _ = json.Marshal(map[string]any{"eth": "eth0", "value": 2000})
 	resp, err := runDT(t, 10, payload)
 	if err != nil {
@@ -192,31 +229,18 @@ echo "        inet 192.168.1.10  netmask 255.255.255.0"`
 	if string(resp) != `{"res":null}` {
 		t.Fatalf("want {\"res\":null}, got %q", resp)
 	}
-	calls, _ := os.ReadFile(filepath.Join(fake, "calls"))
-	if string(calls) != "SET eth0 mtu 2000\n" {
-		t.Fatalf("set call wrong: %q", calls)
+	if len(setCalls) != 1 || setCalls[0] != "eth0 2000" {
+		t.Fatalf("set call wrong: %v", setCalls)
 	}
 }
 
-// dt10 老式 MTU:1500 格式解析
-func TestDT10MTUOldFormat(t *testing.T) {
-	fake := t.TempDir()
-	t.Setenv("PATH", fake)
-	os.WriteFile(filepath.Join(fake, "ifconfig"), []byte(`#!/bin/sh
-echo "eth0      Link encap:Ethernet  HWaddr AA:BB  MTU:1500"
-`), 0o755)
-	payload, _ := json.Marshal(map[string]any{"eth": "eth0", "value": 1500})
-	if _, err := runDT(t, 10, payload); err != nil {
-		t.Fatalf("old-format parse failed: %v", err)
-	}
-}
-
-// dt10 ifconfig 缺失 → RuntimeError → 断连
-func TestDT10MissingIfconfig(t *testing.T) {
-	fake := t.TempDir()
-	t.Setenv("PATH", fake)
-	payload, _ := json.Marshal(map[string]any{"eth": "eth0", "value": 1500})
+// dt10 查询 MTU 失败（网卡不存在等）→ error → 断连（原 ifconfig 缺失同路径）
+func TestDT10GetMTUError(t *testing.T) {
+	prevGet := getMTUFn
+	defer func() { getMTUFn = prevGet }()
+	getMTUFn = func(string) (int, error) { return 0, errors.New("no such device") }
+	payload, _ := json.Marshal(map[string]any{"eth": "eth9", "value": 1500})
 	if _, err := runDT(t, 10, payload); err == nil {
-		t.Fatal("want error for missing ifconfig")
+		t.Fatal("want error for MTU query failure")
 	}
 }

@@ -75,11 +75,6 @@ func installSelf(withMCP bool) error {
 	if err := linkCLI(); err != nil {
 		return err
 	}
-	// 系统依赖 best-effort（与 Python install.sh 同策略）：失败仅告警不中断。
-	// 启动服务之前装，这样 agent 起来时 ethtool/拨测库已经就位。
-	for _, w := range installDeps() {
-		fmt.Fprintln(os.Stderr, "警告:", w)
-	}
 	// 日志轮转：agent 由 systemd 常驻并长期持有日志 fd，日志会无限增长
 	// （真机实测 364MB）。写入失败只告警，不影响核心功能。
 	if err := installLogrotate(); err != nil {
@@ -265,7 +260,7 @@ func chromiumDepsDiag() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "  缺 %d 个库（boce_run 会失败）: %s\n", len(missing), strings.Join(missing, ", "))
 	if pm != "" {
-		fmt.Fprintf(&b, "  修复: sudo %s\n", svc.InstallDepsCommand(pm, svc.ChromiumDepPackages()))
+		fmt.Fprintf(&b, "  修复: sudo socketstack deps install-browser（或手动: %s）\n", svc.InstallDepsCommand(pm, svc.ChromiumDepPackages()))
 	}
 	return b.String()
 }
@@ -292,8 +287,10 @@ var (
 	svcMCPRestartFn   = svc.MCPRestart
 	svcMCPDisable     = svc.MCPDisable
 	svcMCPActive      = svc.MCPActive
-	installDeps       = svc.InstallDeps
-	installLogrotate  = svc.WriteLogrotate
+	installLogrotate = svc.WriteLogrotate
+
+	// deps 子命令安装动作（测试注入点）。
+	installBrowserDepsFn = svc.InstallBrowserDeps
 	svcLogrotatePath  = svc.LogrotateConfigPath
 	// exePathFn 取自身可执行文件路径（测试替换，避免依赖真实的 /proc/self/exe）。
 	exePathFn = func() (string, error) { return os.Executable() }

@@ -9,11 +9,15 @@ import (
 
 // P1-4：日志无轮转。实测 364MB（大头是 Python 时代的回放日志，Go 版只写了 81 行），
 // 但不清历史 + 不加轮转，将来异常场景仍会无限增长。
+// 保留策略（用户指定）：只留最近 7 天，超期归档直接删。
 func TestLogrotateContent(t *testing.T) {
 	c := LogrotateContent()
 	for _, want := range []string{
 		"/var/log/socket_server.log",
-		"rotate 5",
+		"maxsize 60M",
+		"daily",
+		"maxage 7", // 超过 7 天的归档文件直接删除
+		"rotate 7",
 		"copytruncate", // agent 持有 fd 持续写，不能靠 rename
 		"missingok",
 		"notifempty",
