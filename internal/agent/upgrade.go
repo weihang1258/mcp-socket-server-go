@@ -182,8 +182,21 @@ func switchTo(version string) bool {
 	if err := restartServiceFn(); err != nil {
 		log.Printf("service restart 失败: %v", err)
 	}
+	if mcpActiveFn() {
+		if err := mcpRestartFn(); err != nil {
+			log.Printf("mcp 单元重启失败（同机部署时它仍在跑旧二进制）: %v", err)
+		}
+	}
 	return true
 }
+
+// 同机部署时 mcp 单元也走 current/socket_server（软链布局）。切换后只重启
+// agent 会让 mcp 继续跑旧版本——与 install 路径同一个坑，这里一并处理。
+// mcp 未运行（分机部署）时不动它。
+var (
+	mcpActiveFn  = svc.MCPActive
+	mcpRestartFn = svc.MCPRestart
+)
 
 // applyPushedUpgrade dt20 同步段（_apply_pushed_upgrade 语义顺序）。
 // 返回响应字节；restartVersion 非空 → 后台 0.3s 后 switch_to。
