@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,19 +187,29 @@ func TestUninstallRemovesDanglingCLILink(t *testing.T) {
 
 	prevBin, prevVersions := svcBinPath, svcVersionsDir
 	prevMCPDis, prevAgentDis := svcMCPDisable, svcAgentDisable
+	prevLogrotate := svcLogrotatePath
 	defer func() {
 		svcBinPath, svcVersionsDir = prevBin, prevVersions
 		svcMCPDisable, svcAgentDisable = prevMCPDis, prevAgentDis
+		svcLogrotatePath = prevLogrotate
 	}()
 	svcBinPath, svcVersionsDir = binPath, versions
 	svcMCPDisable = func() error { return nil }
 	svcAgentDisable = func() error { return nil }
+	// logrotate 是 install 落的副作用文件，uninstall 要收走；绝不能碰真的
+	// /etc/logrotate.d/socketstack。
+	logrotatePath := filepath.Join(dir, "socketstack")
+	os.WriteFile(logrotatePath, []byte("x"), 0o644)
+	svcLogrotatePath = logrotatePath
 
 	if err := uninstallSelf(); err != nil {
 		t.Fatalf("uninstallSelf: %v", err)
 	}
 	if _, err := os.Lstat(binPath); !os.IsNotExist(err) {
 		t.Fatalf("PATH 入口软链应被清掉，实际 err=%v", err)
+	}
+	if _, err := os.Lstat(logrotatePath); !os.IsNotExist(err) {
+		t.Fatalf("logrotate 配置应被清掉，实际 err=%v", err)
 	}
 }
 
@@ -381,13 +392,81 @@ func stubNoDrift(t *testing.T) {
 	t.Helper()
 	prevPID, prevExe, prevInode, prevExec := mainPIDFn, procExeFn, statInodeFn, execStartPathFn
 	prevActive := svcMCPActive
+	prevLogrotate := installLogrotate
 	t.Cleanup(func() {
 		mainPIDFn, procExeFn, statInodeFn, execStartPathFn = prevPID, prevExe, prevInode, prevExec
-		svcMCPActive = prevActive
+		svcMCPActive, installLogrotate = prevActive, prevLogrotate
 	})
+	installLogrotate = func() error { return nil } // 别碰真实 /etc/logrotate.d
 	svcMCPActive = func() bool { return false }
 	mainPIDFn = func(string) int { return 0 }
 	procExeFn = func(int) string { return "" }
 	statInodeFn = func(string) uint64 { return 0 }
 	execStartPathFn = func(string) string { return "" }
+}
+
+// install 必须部署日志轮转：agent 长期持有日志 fd，不轮转会无限增长（真机 364MB）。
+func TestInstallWritesLogrotate(t *testing.T) {
+	dir := t.TempDir()
+	stubNoDrift(t)
+	prevExe, prevDirs := exePathFn, svcEnsureDirs
+	prevVersions, prevBin := svcVersionsDir, svcBinPath
+	prevEnable, prevRestart, prevDeps := svcAgentEnable, svcAgentRestartFn, installDeps
+	prevLog := installLogrotate
+	defer func() {
+		exePathFn, svcEnsureDirs = prevExe, prevDirs
+		svcVersionsDir, svcBinPath = prevVersions, prevBin
+		svcAgentEnable, svcAgentRestartFn, installDeps = prevEnable, prevRestart, prevDeps
+		installLogrotate = prevLog
+	}()
+	installDeps = func() []string { return nil }
+	svcVersionsDir = filepath.Join(dir, "versions")
+	svcBinPath = filepath.Join(dir, "bin", "socketstack")
+	os.MkdirAll(filepath.Dir(svcBinPath), 0o755)
+	src := filepath.Join(dir, "src")
+	os.WriteFile(src, []byte("BIN"), 0o755)
+	exePathFn = func() (string, error) { return src, nil }
+	svcEnsureDirs = func() error { return nil }
+	svcAgentEnable = func() error { return nil }
+	svcAgentRestartFn = func() error { return nil }
+	var n int
+	installLogrotate = func() error { n++; return nil }
+
+	if err := installSelf(false); err != nil {
+		t.Fatalf("installSelf: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("install 须部署日志轮转 1 次，实际 %d", n)
+	}
+}
+
+// 轮转配置失败只告警，不能中断安装。
+func TestInstallLogrotateFailureDoesNotAbort(t *testing.T) {
+	dir := t.TempDir()
+	stubNoDrift(t)
+	prevExe, prevDirs := exePathFn, svcEnsureDirs
+	prevVersions, prevBin := svcVersionsDir, svcBinPath
+	prevEnable, prevRestart, prevDeps := svcAgentEnable, svcAgentRestartFn, installDeps
+	prevLog := installLogrotate
+	defer func() {
+		exePathFn, svcEnsureDirs = prevExe, prevDirs
+		svcVersionsDir, svcBinPath = prevVersions, prevBin
+		svcAgentEnable, svcAgentRestartFn, installDeps = prevEnable, prevRestart, prevDeps
+		installLogrotate = prevLog
+	}()
+	installDeps = func() []string { return nil }
+	svcVersionsDir = filepath.Join(dir, "versions")
+	svcBinPath = filepath.Join(dir, "bin", "socketstack")
+	os.MkdirAll(filepath.Dir(svcBinPath), 0o755)
+	src := filepath.Join(dir, "src")
+	os.WriteFile(src, []byte("BIN"), 0o755)
+	exePathFn = func() (string, error) { return src, nil }
+	svcEnsureDirs = func() error { return nil }
+	svcAgentEnable = func() error { return nil }
+	svcAgentRestartFn = func() error { return nil }
+	installLogrotate = func() error { return errors.New("no perm") }
+
+	if err := installSelf(false); err != nil {
+		t.Fatalf("轮转失败不应中断安装: %v", err)
+	}
 }

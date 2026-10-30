@@ -45,16 +45,77 @@ func NewClient(host string, port, timeout int) *Client {
 	return &Client{Host: host, Port: port, Timeout: timeout}
 }
 
-func (c *Client) Connect() error {
+// 连接建立失败的重试。**只重试建连**，绝不重试已发出的请求——
+// cmd_exec 之类非幂等，重试会执行两次。
+var (
+	dialFn               = net.DialTimeout
+	dialBackoffSleepFn   = time.Sleep
+	dialRetryAttempts    = 3
+	dialRetryBaseBackoff = 500 * time.Millisecond
+	// dialConnectTimeout 建连单次超时上限。
+	//
+	// 不能直接用 c.Timeout：那是业务 socket 超时（cmd_exec 默认 60s、
+	// boce_run 是 timeout+10）。拿它当 dial 超时，靶机不可达时
+	// 3 次重试会把 60s 放大成 ~181s——重试本是为吃 5~15s 的重启窗口，
+	// 反而让每次失败等待更久。
+	dialConnectTimeout = 5 * time.Second
+)
+
+// dialTimeout 建连超时：取 min(业务超时, dialConnectTimeout)。
+func (c *Client) dialTimeout() time.Duration {
+	t := time.Duration(c.Timeout) * time.Second
+	if c.Timeout <= 0 || t > dialConnectTimeout {
+		return dialConnectTimeout
+	}
+	return t
+}
+
+// dialOnce 单次建连（不重试）。供轮询类调用方使用——它们自己就有循环。
+func (c *Client) dialOnce() error {
 	if c.conn != nil {
 		return nil
 	}
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(c.Host, strconv.Itoa(c.Port)), time.Duration(c.Timeout)*time.Second)
+	conn, err := dialFn("tcp", net.JoinHostPort(c.Host, strconv.Itoa(c.Port)), c.dialTimeout())
 	if err != nil {
 		return err
 	}
 	c.conn = conn
 	return nil
+}
+
+// connectWithRetry 建连失败时退避重试（靶机重启窗口用）。
+//
+// 为什么要有：upgrade_run 推包后靶机 systemd RestartSec=5，期间端口无人监听，
+// 客户端只拿到裸 "not connected" / "connection refused"，看起来像故障。
+//
+// 注意：**轮询类调用（upgrade_run 等靶机重启）不要用这个**——它自带重试，
+// 会把「3s 一轮」拖成「18s 一轮」，把 180s 预算白白耗掉。轮询用 dialOnce()。
+func (c *Client) connectWithRetry() error {
+	addr := net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
+	timeout := c.dialTimeout()
+	var lastErr error
+	backoff := dialRetryBaseBackoff
+	for i := 0; i < dialRetryAttempts; i++ {
+		conn, err := dialFn("tcp", addr, timeout)
+		if err == nil {
+			c.conn = conn
+			return nil
+		}
+		lastErr = err
+		if i < dialRetryAttempts-1 {
+			dialBackoffSleepFn(backoff)
+			backoff *= 2
+		}
+	}
+	return fmt.Errorf("连接 %s 失败（已重试 %d 次，靶机可能正在重启，请稍后重试）: %w",
+		addr, dialRetryAttempts, lastErr)
+}
+
+func (c *Client) Connect() error {
+	if c.conn != nil {
+		return nil
+	}
+	return c.connectWithRetry()
 }
 
 func (c *Client) Close() {
@@ -70,7 +131,7 @@ func (c *Client) SetTimeout(sec int) { c.Timeout = sec }
 // send [4B len][4B dt][payload]；每次发送前重置 deadline（防 0.5s 短探泄漏）。
 func (c *Client) send(dt int32, payload []byte) error {
 	if c.conn == nil {
-		return errors.New("not connected")
+		return errors.New("未连接到靶机（连接已断，请重试）")
 	}
 	c.conn.SetDeadline(time.Now().Add(time.Duration(c.Timeout) * time.Second))
 	return writeFull(c.conn, frame.Encode(dt, payload))

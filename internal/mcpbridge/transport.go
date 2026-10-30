@@ -33,7 +33,9 @@ func RunStreamableHTTP(ctx context.Context, b *Bridge, host string, port int) er
 		&mcp.StreamableHTTPOptions{DisableLocalhostProtection: true}) // 对齐 Python 显式关闭 rebinding 保护
 	addr := net.JoinHostPort(host, strconv.Itoa(port)) // 兼容 v6 字面量 host（"::" 等）
 	log.Printf("MCP Streamable HTTP 监听 %s/mcp (log_level=%s)", addr, b.Cfg.LogLevel)
-	srv := &http.Server{Addr: addr, Handler: handler}
+	// WithSourceIP 必须在 handler 外层：go-sdk 用 req.Context() 建会话，
+	// 中间件注入的值才能传到工具 handler（streamable.go:700）。
+	srv := &http.Server{Addr: addr, Handler: WithSourceIP(handler)}
 	err := srv.ListenAndServe()
 	if err == http.ErrServerClosed {
 		return nil

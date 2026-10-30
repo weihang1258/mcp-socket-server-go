@@ -386,6 +386,7 @@ type AuditEntry struct {
 	OkCount     int
 	FailedCount int
 	DurationMs  int
+	SourceIP    string
 }
 
 type Audit struct {
@@ -454,16 +455,16 @@ func (a *Audit) Write(tool string, params map[string]any, outcomes []map[string]
 func (a *Audit) LastEntry() *AuditEntry {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	var tool, params string
+	var tool, params, sourceIP string
 	var okCount, failedCount, durationMs int
-	err := a.conn.QueryRow("SELECT tool, params, ok_count, failed_count, duration_ms FROM audit_log ORDER BY id DESC LIMIT 1").
-		Scan(&tool, &params, &okCount, &failedCount, &durationMs)
+	err := a.conn.QueryRow("SELECT tool, params, ok_count, failed_count, duration_ms, source_ip FROM audit_log ORDER BY id DESC LIMIT 1").
+		Scan(&tool, &params, &okCount, &failedCount, &durationMs, &sourceIP)
 	if err != nil {
 		return nil
 	}
 	var pMap map[string]any
 	json.Unmarshal([]byte(params), &pMap)
-	return &AuditEntry{Tool: tool, Params: pMap, OkCount: okCount, FailedCount: failedCount, DurationMs: durationMs}
+	return &AuditEntry{Tool: tool, Params: pMap, OkCount: okCount, FailedCount: failedCount, DurationMs: durationMs, SourceIP: sourceIP}
 }
 
 func (a *Audit) Close() error { return a.conn.Close() }

@@ -14,6 +14,11 @@ import (
 // rmem/wmem_max≥32MB → java PATH+JAVA_HOME（找到 java 才写，硬编码不校验存在）→
 // 防火墙关闭命令组逐条。PLAYWRIGHT_BROWSERS_PATH 为 PyInstaller 专有，删除（§12#9）。
 
+// DefaultLogPath agent 的默认日志路径（未显式指定、无 env 时使用）。
+// svc.LogrotateContent 也引用它对应的字面量——两处必须一致，否则轮转配置
+// 指向一个没人写的文件。见 TestLogrotatePathMatchesAgentLogPath。
+const DefaultLogPath = "/var/log/socket_server.log"
+
 // logFileFor 日志路径优先级：显式 > env > 默认。
 func logFileFor(explicit string) string {
 	if explicit != "" {
@@ -22,7 +27,7 @@ func logFileFor(explicit string) string {
 	if p := os.Getenv("SOCKET_SERVER_LOG"); p != "" {
 		return p
 	}
-	return "/var/log/socket_server.log"
+	return DefaultLogPath
 }
 
 // SetupLogging 初始化文件日志（目录缺失跳过文件 handler 不崩）。

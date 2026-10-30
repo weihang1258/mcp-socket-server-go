@@ -80,6 +80,11 @@ func installSelf(withMCP bool) error {
 	for _, w := range installDeps() {
 		fmt.Fprintln(os.Stderr, "警告:", w)
 	}
+	// 日志轮转：agent 由 systemd 常驻并长期持有日志 fd，日志会无限增长
+	// （真机实测 364MB）。写入失败只告警，不影响核心功能。
+	if err := installLogrotate(); err != nil {
+		fmt.Fprintln(os.Stderr, "警告: 安装日志轮转配置失败（日志将无限增长）:", err)
+	}
 	if err := svcAgentEnable(); err != nil {
 		return err
 	}
@@ -196,6 +201,11 @@ func uninstallSelf() error {
 	svcMCPDisable()
 	svcAgentDisable()
 	os.Remove(filepath.Join(svcVersionsDir, "current")) // 数据式卸载：保留 versions/配置/DB
+	// logrotate 是 install 新增的纯运维副作用文件，与「配置/DB 保留」不同类：
+	// 留着它指向一个已无人写的日志，是脏残留。
+	if err := os.Remove(svcLogrotatePath); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintln(os.Stderr, "警告: 移除日志轮转配置失败:", err)
+	}
 	// PATH 入口是指向 current 的软链，current 一删就悬空——留着只会让
 	// 用户敲 socketstack 得到 "No such file or directory"。
 	if err := os.Remove(svcBinPath); err != nil && !os.IsNotExist(err) {
@@ -283,6 +293,8 @@ var (
 	svcMCPDisable     = svc.MCPDisable
 	svcMCPActive      = svc.MCPActive
 	installDeps       = svc.InstallDeps
+	installLogrotate  = svc.WriteLogrotate
+	svcLogrotatePath  = svc.LogrotateConfigPath
 	// exePathFn 取自身可执行文件路径（测试替换，避免依赖真实的 /proc/self/exe）。
 	exePathFn = func() (string, error) { return os.Executable() }
 )

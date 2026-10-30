@@ -327,3 +327,6 @@ frame(字节层) → config/svc(含 serve 别名+unit 模板)
 | 47 | `uninstall` / `mcp` 子命令同样严格解析参数：`-h/--help` 只打用法；未知参数退出 2 | 原先 `uninstall --help` 会真的卸载（disable 两个单元 + 删 current 软链），`mcp --help` 会掉进阻塞的 stdio 模式。卸载的破坏性比安装更直接 |
 | 48 | inode 漂移检测的比对基准取单元真实 `ExecStart`（解析失败才回退 `current/socket_server`）；读取 `/proc/<pid>/exe` 失败时提示「需 root」，且**不计作漂移** | 老机器残留的旧 `ExecStart` 指向别处时，硬编码 `current` 会误报漂移且 restart 修不好。把「查不到」当「漂移」会让 install 做无意义的重启。重启后复检，仍漂移则如实告警（ExecStart 指向别处重启治不好） |
 | 49 | dt20 推送升级 `switchTo` 切换 current 后，若 mcp 单元在运行则一并重启；未运行不动 | 与 install 路径同源：同机部署时 mcp 共享 `current/socket_server`，只重启 agent 会让 mcp 继续跑旧二进制（此时旧 inode 未删除，进程不显示 `(deleted)`，但 inode 比对能发现）。分机部署（靶机无 mcp 单元）不受影响 |
+| 50 | `install` 部署 `/etc/logrotate.d/socketstack`（60M × 5 份，`copytruncate`）；失败仅告警 | agent 由 systemd 常驻、长期持有日志 fd，日志无限增长（真机实测 364MB）。然而其中 2,157,560 / 2,158,148 行是 **Python 时代**写的（回放开始/完成各 91 万行），Go 版只写了 81 行——Go 的回放模块只在出错时打日志。所以这是防将来，不是治现在。必须 `copytruncate`：rename 后 agent 仍写旧 inode |
+| 51 | 连接建立失败时退避重试（3 次，500ms 起倍增）；**只重试建连，绝不重试已发出的请求** | `upgrade_run` 推包后靶机 `RestartSec=5`，期间端口无人监听，客户端原先只拿到裸 `not connected`。`cmd_exec` 等非幂等，重试已发请求会执行两次 |
+| 52 | 审计 `source_ip` 取真实来源：HTTP 中间件注入 `r.RemoteAddr`（`X-Forwarded-For` 优先）到 context，工具层取出；stdio 模式仍 `internal` | 原三处硬编码 `"internal"`，出事后无从追溯。go-sdk 用 `req.Context()` 建会话（streamable.go:700 明确说明「便于中间件加 context 值」），故外层包 middleware 即可 |
