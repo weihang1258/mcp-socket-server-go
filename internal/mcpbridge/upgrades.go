@@ -1,7 +1,7 @@
 // 中央升级编排（upgrades.py 移植，设计 §4 工具15 + upgrades 段）：
-// 查版 = raw version.py（非 API）；退避 1h→2h→4h 日志策略；
-// ensure_release_binary 幂等复用 + sha 校验原子落盘；push_binary 经 :9001；
-// 每日兜底先睡 24h 绝不自动升级。
+// 查版 = releases/latest 的 302 Location（非 API、非 raw version.py，见 §12#37）；
+// 退避 1h→2h→4h 日志策略；ensure_release_binary 幂等复用 + sha 校验原子落盘
+// （远端 .sha256 可选，§12#38）；push_binary 经 :9001；每日兜底先睡 24h 绝不自动升级。
 package mcpbridge
 
 import (
