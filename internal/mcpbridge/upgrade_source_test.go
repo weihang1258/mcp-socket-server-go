@@ -227,3 +227,28 @@ func TestHTTPClientBadProxyWarns(t *testing.T) {
 		t.Fatalf("正常代理应生效，实际 %v", u2)
 	}
 }
+
+// 版本归一化与 Python `str.strip().lstrip("v")` 一致：多个 v 前缀也剥。
+// 这是刻意保真的复刻（不是缺陷）——但必须锁住，否则有人"顺手修"成
+// strings.TrimPrefix(s, "v") 会与 Python 版行为分叉。
+// 安全性不依赖这里：剥完仍过 VersionOK 正则，路径穿越照挡。
+func TestVersionNormalizationMatchesPython(t *testing.T) {
+	cases := map[string]string{
+		"v1.9.3":    "1.9.3",
+		" vv1.9.3 ": "1.9.3",
+		"1.9.3":     "1.9.3",
+	}
+	for in, want := range cases {
+		got := strings.TrimLeft(strings.TrimSpace(in), "v")
+		if got != want {
+			t.Fatalf("归一化 %q → %q，期望 %q", in, got, want)
+		}
+	}
+	// 归一化后仍必须被正则拦住穿越
+	for _, bad := range []string{"../evil", "1.9.3/../x", "vv../evil"} {
+		norm := strings.TrimLeft(strings.TrimSpace(bad), "v")
+		if VersionOK(norm) {
+			t.Fatalf("%q 归一化成 %q 后不该通过校验", bad, norm)
+		}
+	}
+}
