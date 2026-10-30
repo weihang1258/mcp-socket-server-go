@@ -17,6 +17,11 @@ import (
 type Agent struct {
 	TCPPort int    `yaml:"tcp_port"`
 	LogFile string `yaml:"log_file"`
+	// ChromiumPrefetch agent 启动时后台预取默认 chromium。默认 **false**：
+	// 内网靶机连不上 npmmirror，无条件预取会让每次重启白跑一次 536MB 下载，
+	// 而 Python 是「用到才触发」（handlers.py:263）。能上外网的部署可开启，
+	// 以消除「首次 boce_run 被客户端 timeout+10 判死」。
+	ChromiumPrefetch bool `yaml:"chromium_prefetch"`
 }
 
 type Bind struct {
@@ -83,6 +88,9 @@ func Load(path string) Config {
 				}
 				if over.Agent.LogFile != "" {
 					cfg.Agent.LogFile = over.Agent.LogFile
+				}
+				if over.Agent.ChromiumPrefetch {
+					cfg.Agent.ChromiumPrefetch = true
 				}
 				if over.MCP.Bind.Host != "" {
 					cfg.MCP.Bind.Host = over.MCP.Bind.Host

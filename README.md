@@ -50,4 +50,5 @@ go test -race ./...
 ## 已知运行特性（与 Python 版一致，非缺陷）
 
 - **单连接串行**：每条 TCP 连接 read→do()→write 循环处理（Python ThreadingTCPServer 同构：一条连接一线程）。因此同一连接上的后续请求（含 `stop`/状态探查）会排在该请求完成之后。
-- **首次 chromium 下载**：agent 启动时会后台预取默认 chromium，正常部署下首次 `boce_run` 不再现场下载。若预取还没跑完就来了 `boce_run`，两者共用同一把下载锁（后到者等锁后复用结果），此时该连接仍可能等过客户端超时（`timeout+10`，默认 130s；首次下载真机实测 223s / 536MB）。与 Python 版相比属改进（Python 每次都现场下载）。
+- **首次 chromium 下载**：默认与 Python 一致——第一次用到浏览器模式时才现场下载（真机 223s / 536MB），客户端超时是 `timeout+10`（默认 130s），该连接会被判超时；此时日志会打印手动下载方法。
+  能访问 registry.npmmirror.com 的部署可设 `agent.chromium_prefetch: true`，agent 启动时后台预取，首次 `boce_run` 就不再现场下载（若预取尚未跑完就来了 `boce_run`，两者共用同一把下载锁，该连接仍可能等到超时）。**内网/离线靶机保持默认关闭**：开了会让每次重启都白跑一次完整下载。

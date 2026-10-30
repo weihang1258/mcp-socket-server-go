@@ -51,9 +51,35 @@ func TestStartAgentPrefetchesChromium(t *testing.T) {
 
 	cfg := config.Load("")
 	cfg.Agent.TCPPort = 0
+	cfg.Agent.ChromiumPrefetch = true
 	_, _, stop := startAgent(cfg, false)
 	defer stop()
 	if called.Load() != 1 {
-		t.Fatalf("agent 启动须预取 chromium 1 次，实际 %d", called.Load())
+		t.Fatalf("开关打开时启动须预取 1 次，实际 %d", called.Load())
+	}
+}
+
+// 默认关闭：内网靶机（连不上 npmmirror）每次重启都不该白跑一次 536MB 下载。
+func TestStartAgentNoPrefetchWhenDisabled(t *testing.T) {
+	prev := prefetchChromium
+	var called atomic.Int32
+	prefetchChromium = func() { called.Add(1) }
+	prevSetup := setupEnv
+	setupEnv = func() {}
+	prevHTTP, prevPort := startHTTPFile, readHTTPPort
+	startHTTPFile = func(int) (func(), error) { return func() {}, nil }
+	readHTTPPort = func() int { return 0 }
+	t.Cleanup(func() {
+		prefetchChromium = prev
+		setupEnv = prevSetup
+		startHTTPFile, readHTTPPort = prevHTTP, prevPort
+	})
+
+	cfg := config.Load("") // 默认配置：chromium_prefetch 未开
+	cfg.Agent.TCPPort = 0
+	_, _, stop := startAgent(cfg, false)
+	defer stop()
+	if called.Load() != 0 {
+		t.Fatalf("默认配置不得预取，实际调用 %d 次", called.Load())
 	}
 }

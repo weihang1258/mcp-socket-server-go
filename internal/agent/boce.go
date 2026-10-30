@@ -41,19 +41,34 @@ var ensureChromiumFn func(chromiumPath string) bool
 
 func setEnsureChromium(f func(string) bool) { ensureChromiumFn = f }
 
-// PrefetchChromium 非阻塞后台预取默认 chromium（agent 启动时调用）。
+// PrefetchChromium 非阻塞后台预取 chromium（**默认关闭**，见 config.Agent.ChromiumPrefetch）。
 // 目的是消掉「首次 boce_run 现场下载 223s，把那条连接的超时（timeout+10）撑爆」。
-// 与现场下载共用 chromiumDownloadMu，故两者并发时不会重复下载：
-// 后到者阻塞等锁，等锁期间前者已装好 → double-check 直接返回。
+// 默认关：内网靶机连不上 npmmirror，无条件预取会让每次重启白跑一次 536MB 下载，
+// 而 Python 是「用到才触发」（handlers.py:263）。能上外网的部署才开。
+//
+// 与现场下载共用 chromiumDownloadMu，故两者并发时不会重复下载：后到者阻塞等锁，
+// 等锁期间前者已装好 → double-check 直接返回。
 // 不返回错误：下载失败只记日志，运行时仍走原来那条「现场下载 + 手动提示」路径。
+// prefetchDownload 预取下载实现（注入点，测试用）。
+var prefetchDownload = ensureChromiumDownload
+
 func PrefetchChromium() {
-	path := defaultChromiumPath()
+	// 用 effectiveChromium 而不是 defaultChromiumPath：后者会绕过
+	// SOCKETSTACK_TEST_CHROMIUM 钩子，把 chromium 下到一份没人会用的目录。
+	path := effectiveChromium("")
 	if chromiumUsable(path) {
 		return // 已装好，零开销
 	}
 	go func() {
+		// 长驻 goroutine 强制 recover（§11/§12#2 约定，capture.go 同款）：
+		// goroutine 里 panic 会带走整个 agent 进程。
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("后台预取 chromium panic: %v", r)
+			}
+		}()
 		log.Printf("后台预取 chromium: %s", path)
-		if !ensureChromiumDownload(path) {
+		if !prefetchDownload(path) {
 			log.Printf("后台预取失败，首次 boce 时仍会尝试现场下载")
 		}
 	}()

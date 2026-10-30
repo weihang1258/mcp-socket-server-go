@@ -104,3 +104,21 @@ func TestMissingFileUsesDefaults(t *testing.T) {
 		t.Errorf("missing file should be zero-config, got %+v", cfg.Agent)
 	}
 }
+
+// chromium 预取默认关闭：内网靶机连不上 npmmirror，无条件预取会让每次重启
+// 都白跑一次 536MB 下载（Python 是「用到才触发」，见 handlers.py:263）。
+func TestChromiumPrefetchDefaultsOff(t *testing.T) {
+	cfg := Load("")
+	if cfg.Agent.ChromiumPrefetch {
+		t.Fatal("chromium_prefetch 须默认关闭（内网靶机不能打外网）")
+	}
+}
+
+func TestChromiumPrefetchCanBeEnabled(t *testing.T) {
+	dir := t.TempDir()
+	p := dir + "/c.yaml"
+	os.WriteFile(p, []byte("agent:\n  chromium_prefetch: true\n"), 0o644)
+	if cfg := Load(p); !cfg.Agent.ChromiumPrefetch {
+		t.Fatal("配置写 chromium_prefetch: true 须生效")
+	}
+}

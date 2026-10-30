@@ -694,3 +694,63 @@ func TestPrefetchChromiumNoopWhenInstalled(t *testing.T) {
 		t.Fatalf("已安装时不得发请求，实际 %d 次", hits.Load())
 	}
 }
+
+// 预取须走 effectiveChromium（钩子优先），不能在钩子指向已装好的 chromium 时
+// 仍按 defaultChromiumPath 判定「没装」而白下一份。
+// 钩子本身只能指向已存在的文件——ensureChromiumDownload 的解压产物固定是
+// <installDir>/chrome-linux/chrome，不支持装到任意路径。
+func TestPrefetchChromiumHonorsTestHook(t *testing.T) {
+	root := t.TempDir()
+	restore := overrideChromiumPaths(t, filepath.Join(root, "opt", "socket", "chrome-linux"))
+	defer restore()
+
+	// 钩子指向一个已可用的 chromium（默认路径仍是空的）
+	hookPath := filepath.Join(root, "hook-chrome")
+	os.WriteFile(hookPath, []byte("#!/bin/sh\n"), 0o755)
+	t.Setenv("SOCKETSTACK_TEST_CHROMIUM", hookPath)
+
+	var listed atomic.Int32
+	srv := newNPMMirrorServer(t, func(w http.ResponseWriter, r *http.Request) {
+		listed.Add(1)
+		w.Write([]byte(`[{"name":"123/"}]`))
+	}, func(w http.ResponseWriter, revision string) {
+		writeZip(t, w, map[string]string{"chrome-linux/chrome": "#!/bin/sh\nexit 0\n"})
+	})
+	defer srv.Close()
+	npmmirrorBase = "http://" + srv.Addr
+
+	PrefetchChromium()
+	time.Sleep(400 * time.Millisecond)
+	if listed.Load() != 0 {
+		t.Fatalf("钩子指向可用的 chromium 时不得下载，实际请求 %d 次", listed.Load())
+	}
+	if chromiumUsable(defaultChromiumPath()) {
+		t.Fatal("不得下到默认路径（绕过了钩子）")
+	}
+}
+
+// 预取 goroutine 必须 recover：goroutine 里 panic 会带走整个 agent 进程
+// （§12#2 给长驻 goroutine 定的规矩，capture.go 三处同款）。
+func TestPrefetchChromiumRecoversPanic(t *testing.T) {
+	root := t.TempDir()
+	restore := overrideChromiumPaths(t, filepath.Join(root, "opt", "socket", "chrome-linux"))
+	defer restore()
+	t.Setenv("SOCKETSTACK_TEST_CHROMIUM", filepath.Join(root, "missing-chrome"))
+
+	panicked := make(chan struct{})
+	prev := prefetchDownload
+	prefetchDownload = func(string) bool {
+		defer close(panicked)
+		panic("boom")
+	}
+	t.Cleanup(func() { prefetchDownload = prev })
+
+	PrefetchChromium()
+	select {
+	case <-panicked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("预取未执行")
+	}
+	time.Sleep(100 * time.Millisecond)
+	// 进程还活着（能跑到这里）即证明 recover 生效
+}

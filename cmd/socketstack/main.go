@@ -110,9 +110,13 @@ func startAgent(cfg config.Config, testMode bool) (ln interface{}, addr string, 
 	if !testMode {
 		httpPort := readHTTPPort()
 		startHTTPFile(httpPort) // 失败仅 warn，不影响 :9000
-		// chromium 后台预取：首次 boce_run 现场下载要 223s，会撑爆客户端 timeout+10(130s)。
-		// 放在 TCP 监听之前启动也无妨——它是 goroutine，不会阻塞 Serve。
-		prefetchChromium()
+		// chromium 后台预取：默认关闭（内网靶机连不上 npmmirror，无条件预取会让每次
+		// 重启白跑一次 536MB 下载，而 Python 是「用到才触发」）。能上外网的部署在
+		// config.yaml 里设 agent.chromium_prefetch: true，即可消除「首次 boce 被
+		// timeout+10(130s) 判死」。
+		if cfg.Agent.ChromiumPrefetch {
+			prefetchChromium()
+		}
 	}
 	tcpLn, err := netListen(strconv.Itoa(cfg.Agent.TCPPort))
 	if err != nil {
