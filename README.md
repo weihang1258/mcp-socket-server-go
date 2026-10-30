@@ -13,16 +13,22 @@
 
 ## 一键安装
 
-**agent（靶机）** —— 需要 root：
+**agent（靶机）** —— 需要 root。整段粘贴即可：
 
 ```bash
-curl -fsSL https://github.com/weihang1258/mcp-socket-server-go/releases/latest/download/socket_server \
-  -o /tmp/socket_server && chmod +x /tmp/socket_server \
+# 默认走国内加速；能直连 GitHub 的机器把 MIRROR 置空
+MIRROR=https://gh-proxy.com/
+URL=https://github.com/weihang1258/mcp-socket-server-go/releases/latest/download/socket_server
+
+curl -fsSL "${MIRROR}${URL}" -o /tmp/socket_server \
+  && chmod +x /tmp/socket_server \
   && sudo /tmp/socket_server install \
   && sudo socketstack agent start
 ```
 
 `install` 装单元并设开机自启（与 Python 版语义一致，不自动 start），最后一条命令拉起服务。
+
+> 加速站可用 `https://gh-proxy.com/`（实测 15MB / 6.6s）或 `https://ghfast.top/`（5.6s），均返回与 Release 完全一致的 sha256。
 
 验证：
 
@@ -34,8 +40,11 @@ ss -ltn | grep -E ':9000|:9001'         # 两个端口都在监听
 **mcp（中央节点）** —— 同样需要 root：
 
 ```bash
-curl -fsSL https://github.com/weihang1258/mcp-socket-server-go/releases/latest/download/socket_server \
-  -o /tmp/socket_server && chmod +x /tmp/socket_server \
+MIRROR=https://gh-proxy.com/
+URL=https://github.com/weihang1258/mcp-socket-server-go/releases/latest/download/socket_server
+
+curl -fsSL "${MIRROR}${URL}" -o /tmp/socket_server \
+  && chmod +x /tmp/socket_server \
   && sudo /tmp/socket_server install --with-mcp \
   && sudo socketstack mcp start
 ```
