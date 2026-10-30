@@ -311,3 +311,4 @@ frame(字节层) → config/svc(含 serve 别名+unit 模板)
 | 32 | `no_proxy` 的 IPv4 CIDR 判定：Go 用 `net.ParseCIDR`，requests 用 `is_valid_cidr`（正则，拒绝全零掩码如 `0.0.0.0/0`）| Go 更宽松：`no_proxy=0.0.0.0/0` 在 Go 会绕过全部 IPv4（Python 视为非法条目跳过）。属放宽，不会漏绕过；真实配置不会写 `/0` |
 | 33 | zip 解压**不**复刻 `extractall` 的硬链接条目与 mtime 恢复 | chromium 包内无硬链接条目（实测）；mtime 不影响执行。若将来换包源需复核 `unzipInto` |
 | 34 | 代理值校验**严格程度**与 requests 对齐：`proxy=` 的 host 尾冒号、端口越界（>65535；端口 0 也拒——Python `urlparse("http://h.com:0").port` 返回 0 不抛异常，会拖到连接阶段才失败）、裸 IPv6 缺方括号一律判不可用并报错 | requests 对前者抛 InvalidProxyURL、对越界端口抛 Port out of range；裸 IPv6 双方都坏但坏法不同（Go 会把 `::1:8080` 整个当 host），直接拒绝更可预测 |
+| 35 | agent 启动时后台预取默认 chromium（`agent.PrefetchChromium`，非阻塞 goroutine）：Python 无预取，首次 `ensure_chromium` 在 boce 请求线程里同步下载 536MB/223s | 消除「首次 boce_run 被客户端 timeout+10(130s) 判超时」这一继承缺陷。与现场下载共用 `chromiumDownloadMu`，并发时后到者等锁后 double-check 复用结果，不会重复下载；预取失败只记日志，运行时仍走原「现场下载 + 手动提示」路径 |

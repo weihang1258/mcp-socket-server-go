@@ -104,12 +104,15 @@ func runAgent(args []string) {
 // 返回 listener 与地址；stop 关闭全部。
 func startAgent(cfg config.Config, testMode bool) (ln interface{}, addr string, stop func()) {
 	if !testMode {
-		agent.SetupEnvironment()
+		setupEnv()
 	}
 	// :9001 必须先于阻塞的 TCP 主循环（http_port 读 /opt/socket/config；0=关闭）
 	if !testMode {
-		httpPort := agent.ReadHTTPPort()
-		agent.StartHTTPFileServer(httpPort) // 失败仅 warn，不影响 :9000
+		httpPort := readHTTPPort()
+		startHTTPFile(httpPort) // 失败仅 warn，不影响 :9000
+		// chromium 后台预取：首次 boce_run 现场下载要 223s，会撑爆客户端 timeout+10(130s)。
+		// 放在 TCP 监听之前启动也无妨——它是 goroutine，不会阻塞 Serve。
+		prefetchChromium()
 	}
 	tcpLn, err := netListen(strconv.Itoa(cfg.Agent.TCPPort))
 	if err != nil {

@@ -41,6 +41,24 @@ var ensureChromiumFn func(chromiumPath string) bool
 
 func setEnsureChromium(f func(string) bool) { ensureChromiumFn = f }
 
+// PrefetchChromium 非阻塞后台预取默认 chromium（agent 启动时调用）。
+// 目的是消掉「首次 boce_run 现场下载 223s，把那条连接的超时（timeout+10）撑爆」。
+// 与现场下载共用 chromiumDownloadMu，故两者并发时不会重复下载：
+// 后到者阻塞等锁，等锁期间前者已装好 → double-check 直接返回。
+// 不返回错误：下载失败只记日志，运行时仍走原来那条「现场下载 + 手动提示」路径。
+func PrefetchChromium() {
+	path := defaultChromiumPath()
+	if chromiumUsable(path) {
+		return // 已装好，零开销
+	}
+	go func() {
+		log.Printf("后台预取 chromium: %s", path)
+		if !ensureChromiumDownload(path) {
+			log.Printf("后台预取失败，首次 boce 时仍会尝试现场下载")
+		}
+	}()
+}
+
 // effectiveChromium 测试环境变量优先，其次 payload，再默认。
 // payloadPath 显式空串按 Python data.get 语义保留（isfile("") 假 → 下载失败），不走默认。
 func effectiveChromium(payloadPath string) string {

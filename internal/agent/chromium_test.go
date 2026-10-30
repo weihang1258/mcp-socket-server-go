@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -633,5 +634,63 @@ func writeUnixZip(t *testing.T, w http.ResponseWriter, entries map[string]struct
 	}
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// PrefetchChromium：后台把 chromium 装好，且**不阻塞调用方**。
+// 目的：消掉「首次 boce_run 现场下载 223s 撑爆 timeout+10」这条 README 记录的特性。
+func TestPrefetchChromiumInstallsInBackground(t *testing.T) {
+	root := t.TempDir()
+	restore := overrideChromiumPaths(t, filepath.Join(root, "opt", "socket", "chrome-linux"))
+	defer restore()
+
+	srv := newNPMMirrorServer(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(400 * time.Millisecond) // 拉开"下载耗时"，同步执行才会被检出
+		w.Write([]byte(`[{"name":"123/"}]`))
+	}, func(w http.ResponseWriter, revision string) {
+		writeZip(t, w, map[string]string{"chrome-linux/chrome": "#!/bin/sh\nexit 0\n"})
+	})
+	defer srv.Close()
+	npmmirrorBase = "http://" + srv.Addr
+
+	target := chromeInstallDir + "/chrome"
+
+	start := time.Now()
+	PrefetchChromium() // 必须立即返回
+	if d := time.Since(start); d > 200*time.Millisecond {
+		t.Fatalf("PrefetchChromium 阻塞了 %v，须后台执行", d)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for !chromiumUsable(target) {
+		if time.Now().After(deadline) {
+			t.Fatal("后台预取未在 10s 内装好 chromium")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// 已装好时零开销：不发任何网络请求。
+func TestPrefetchChromiumNoopWhenInstalled(t *testing.T) {
+	root := t.TempDir()
+	restore := overrideChromiumPaths(t, filepath.Join(root, "opt", "socket", "chrome-linux"))
+	defer restore()
+
+	target := chromeInstallDir + "/chrome"
+	os.MkdirAll(filepath.Dir(target), 0o755)
+	os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755)
+
+	var hits atomic.Int32
+	srv := newNPMMirrorServer(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Write([]byte(`[{"name":"123/"}]`))
+	}, func(w http.ResponseWriter, revision string) {})
+	defer srv.Close()
+	npmmirrorBase = "http://" + srv.Addr
+
+	PrefetchChromium()
+	time.Sleep(300 * time.Millisecond)
+	if hits.Load() != 0 {
+		t.Fatalf("已安装时不得发请求，实际 %d 次", hits.Load())
 	}
 }

@@ -50,4 +50,4 @@ go test -race ./...
 ## 已知运行特性（与 Python 版一致，非缺陷）
 
 - **单连接串行**：每条 TCP 连接 read→do()→write 循环处理（Python ThreadingTCPServer 同构：一条连接一线程）。因此同一连接上的后续请求（含 `stop`/状态探查）会排在该请求完成之后。
-- **首次 chromium 下载会占住该连接**：`boce_run` 的客户端超时是 `timeout+10`（默认 130s），而首次自动下载真机实测 223s（536MB）。此时该连接上的请求会先被客户端判超时。与 Python 行为一致；要消除需改为 agent 启动时后台预取（未实现）。
+- **首次 chromium 下载**：agent 启动时会后台预取默认 chromium，正常部署下首次 `boce_run` 不再现场下载。若预取还没跑完就来了 `boce_run`，两者共用同一把下载锁（后到者等锁后复用结果），此时该连接仍可能等过客户端超时（`timeout+10`，默认 130s；首次下载真机实测 223s / 536MB）。与 Python 版相比属改进（Python 每次都现场下载）。

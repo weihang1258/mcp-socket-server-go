@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,5 +30,30 @@ func TestAgentServeOrchestration(t *testing.T) {
 	buf := make([]byte, 64)
 	if n, _ := c.Read(buf); n == 0 {
 		t.Fatal("no dt14 response")
+	}
+}
+
+// 非 testMode 启动时须触发 chromium 后台预取（消掉首次 boce 现场下载撑爆超时）。
+func TestStartAgentPrefetchesChromium(t *testing.T) {
+	prev := prefetchChromium
+	var called atomic.Int32
+	prefetchChromium = func() { called.Add(1) }
+	prevSetup := setupEnv
+	setupEnv = func() {}
+	prevHTTP, prevPort := startHTTPFile, readHTTPPort
+	startHTTPFile = func(int) (func(), error) { return func() {}, nil }
+	readHTTPPort = func() int { return 0 }
+	t.Cleanup(func() {
+		prefetchChromium = prev
+		setupEnv = prevSetup
+		startHTTPFile, readHTTPPort = prevHTTP, prevPort
+	})
+
+	cfg := config.Load("")
+	cfg.Agent.TCPPort = 0
+	_, _, stop := startAgent(cfg, false)
+	defer stop()
+	if called.Load() != 1 {
+		t.Fatalf("agent 启动须预取 chromium 1 次，实际 %d", called.Load())
 	}
 }

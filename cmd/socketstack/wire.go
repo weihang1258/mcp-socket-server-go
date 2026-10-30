@@ -152,6 +152,14 @@ var (
 
 var _ = errors.New
 
+// agent 启动编排的可注入点（测试替换，避免触碰真实 /opt/socket 与环境）。
+var (
+	setupEnv         = agent.SetupEnvironment
+	readHTTPPort     = agent.ReadHTTPPort
+	startHTTPFile    = agent.StartHTTPFileServer
+	prefetchChromium = agent.PrefetchChromium
+)
+
 // agentSetAutoupgrade 写 /opt/socket/config 的 autoupgrade 键（转发 agent 包）。
 func agentSetAutoupgrade(state string) error {
 	return agent.SetAutoupgrade(state)
