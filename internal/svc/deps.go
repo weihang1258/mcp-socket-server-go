@@ -60,6 +60,10 @@ func ChromiumDepPackages() []string {
 }
 
 // installDepsCommand 按包管理器拼安装命令；无包管理器返回空串。
+//
+// apt 额外带 DPkg::Lock::Timeout=0：dpkg 锁被别的进程占着时，apt-get 默认会
+// 一直等锁。真机实测 install 就这么白等一整轮，最后只留一句警告而退出码仍是 0，
+// 自动化看不出依赖到底装没装。设 0 让它立刻失败，至少能马上告警。
 func InstallDepsCommand(pm string, pkgs []string) string {
 	if pm == "" || len(pkgs) == 0 {
 		return ""
@@ -67,7 +71,11 @@ func InstallDepsCommand(pm string, pkgs []string) string {
 	base := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSuffix(pm, "/"),
 		"/usr/bin/"), "/bin/"), "/usr/sbin/")
 	verb := "install"
-	return base + " " + verb + " -y " + strings.Join(pkgs, " ")
+	extra := ""
+	if base == "apt-get" {
+		extra = " -o DPkg::Lock::Timeout=0"
+	}
+	return base + " " + verb + " -y" + extra + " " + strings.Join(pkgs, " ")
 }
 
 // missingLibsFromLdd 从 ldd 输出提炼未找到的 .so 名。

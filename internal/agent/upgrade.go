@@ -177,15 +177,24 @@ func switchTo(version string) bool {
 		os.Remove(tmp)
 		return false
 	}
-	// 日志打在 restart 前：restart 会杀死本进程（Python 注释同源）
-	log.Printf("升级完成：v%s → v%s，重启服务生效...", Version, version)
-	if err := restartServiceFn(); err != nil {
-		log.Printf("service restart 失败: %v", err)
+	// 版本目录只增不减（真机 25 个版本 389MB）。切换成功后再清理，当前版本
+	// 一定保得住；清理失败只记日志，绝不能影响升级。
+	if err := pruneOldVersions(version, keepVersions); err != nil {
+		log.Printf("清理旧版本失败（不影响升级）: %v", err)
 	}
+	// 同机部署时 mcp 也走 current/socket_server。**必须在 agent restart 之前**
+	// 重启它：restartServiceFn 是 `systemctl restart <自己>`，会把本进程杀掉，
+	// 排在它后面的代码永远执行不到（v1.9.5 就栽在这——回函说会重启 mcp，
+	// 真机验收 mcp PID 纹丝不动）。
 	if mcpActiveFn() {
 		if err := mcpRestartFn(); err != nil {
 			log.Printf("mcp 单元重启失败（同机部署时它仍在跑旧二进制）: %v", err)
 		}
+	}
+	// 日志打在 restart 前：restart 会杀死本进程（Python 注释同源）
+	log.Printf("升级完成：v%s → v%s，重启服务生效...", Version, version)
+	if err := restartServiceFn(); err != nil {
+		log.Printf("service restart 失败: %v", err)
 	}
 	return true
 }

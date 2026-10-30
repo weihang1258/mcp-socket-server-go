@@ -113,3 +113,18 @@ func TestRunWithTimeoutNormalExit(t *testing.T) {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
 }
+
+// 验收实测：dpkg 锁被别的 apt 进程占着时，apt-get 会一直等锁，install
+// 白等一轮后以「警告 + 退出码 0」收场——自动化无法判断依赖到底装没装。
+// apt 走 DPkg::Lock::Timeout=0：拿不到锁立刻失败，fail-fast。
+func TestInstallDepsCommandAptFailsFastOnLock(t *testing.T) {
+	apt := InstallDepsCommand("/usr/bin/apt-get", []string{"ethtool"})
+	if !strings.Contains(apt, "DPkg::Lock::Timeout=0") {
+		t.Fatalf("apt 必须设置 DPkg::Lock::Timeout=0 立即失败而非无限等锁: %q", apt)
+	}
+	// yum/dnf 没有等锁问题，不该被塞 apt 专有参数
+	yum := InstallDepsCommand("/usr/bin/yum", []string{"ethtool"})
+	if strings.Contains(yum, "DPkg::Lock::Timeout") {
+		t.Fatalf("yum 命令不该带 apt 专有参数: %q", yum)
+	}
+}

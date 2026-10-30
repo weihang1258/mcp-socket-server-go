@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,5 +177,29 @@ func TestSourceIPReachesAuditThroughRealSDK(t *testing.T) {
 	// 这正说明来源是从 HTTP 层带下来的，而不是 fallback。
 	if got.SourceIP != "127.0.0.1" {
 		t.Fatalf("审计来源应为 127.0.0.1，实际 %q", got.SourceIP)
+	}
+}
+
+// upgrade_run 自己拼 outcomes 时漏了 error 字段，导致审计只记 ok:false，
+// 失败原因彻底丢失——真机反馈「upgrade_run 返回 unexpected end of JSON input」
+// 时只能靠猜。任何审计行都必须带 error，与 writeAudit 的格式一致。
+func TestUpgradeRunAuditCarriesFailureReason(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "audit3.db")
+	a, err := OpenAudit(db, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	a.Write("upgrade_run", map[string]any{"version": "1.9.5"},
+		[]map[string]any{{"target": "10.0.0.1", "ok": false, "error": "推包失败: connection reset"}},
+		0, 1, 47, "10.12.131.35")
+
+	var outcomes string
+	if err := a.conn.QueryRow("SELECT outcomes FROM audit_log ORDER BY id DESC LIMIT 1").Scan(&outcomes); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(outcomes, "connection reset") {
+		t.Fatalf("审计 outcomes 丢了失败原因: %s", outcomes)
 	}
 }

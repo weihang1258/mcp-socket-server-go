@@ -859,13 +859,15 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 						"reason": "推送已受理但 180 秒内未确认到新版本（端口未释放/重启异常），请查靶机日志 /var/log/socket_server.log"})
 				}
 			}
+			// 必须带 error：只记 ok:false 的话，失败原因（推包失败 / 建连失败 /
+			// 180s 未确认……）在审计里彻底消失，事后只能靠猜。
 			outcomes := []map[string]any{}
 			for _, r := range results {
-				outcomes = append(outcomes, map[string]any{"target": r["target"], "ok": true})
+				outcomes = append(outcomes, map[string]any{"target": r["target"], "ok": true, "error": ""})
 			}
 			for _, f := range failed {
 				if f["target"] != "*" {
-					outcomes = append(outcomes, map[string]any{"target": f["target"], "ok": false})
+					outcomes = append(outcomes, map[string]any{"target": f["target"], "ok": false, "error": fmt.Sprint(f["reason"])})
 				}
 			}
 			b.Audit.Write("upgrade_run", map[string]any{"version": ver, "force": a.Force},
