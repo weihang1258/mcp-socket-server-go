@@ -41,9 +41,27 @@ func SetupLogging(explicit string) {
 	log.SetFlags(log.LstdFlags)
 }
 
+// setupFileLogging 把日志接到文件（对齐 Python setup_environment() 的
+// 第一步 setup_logging()）。运维排障看的是 /var/log/socket_server.log；
+// 不接这一步，Go 版日志只进 journald，文件停在上一任进程的最后一行。
+// 独立成函数便于单测——SetupEnvironment 其余步骤有系统副作用。
+func setupFileLogging() { setupLoggingFn("") }
+
+// setupLoggingFn 注入点：测试用它确认 SetupEnvironment 真的接了文件日志。
+var setupLoggingFn = SetupLogging
+
 // SetupEnvironment 完整环境初始化（testMode 跳过系统副作用）。
 func SetupEnvironment() {
+	setupFileLogging()
 	log.Printf("version:%s", Version)
+	setupMachineEffects()
+}
+
+// setupMachineEffects 注入点（测试隔离真实系统副作用）。
+var setupMachineEffects = func() { setupMachineEffectsImpl() }
+
+// setupMachineEffectsImpl sysctl/java/防火墙等系统副作用。
+func setupMachineEffectsImpl() {
 	// net.core rmem/wmem_max ≥ 32MB（root 即时生效；失败仅 warn）
 	for _, name := range []string{"/proc/sys/net/core/rmem_max", "/proc/sys/net/core/wmem_max"} {
 		cur, err := os.ReadFile(name)

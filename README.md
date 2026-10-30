@@ -137,15 +137,51 @@ sudo socketstack agent autoupgrade off
 
 ---
 
-## 部署布局
+## 安装路径与日志
 
-| 路径 | 用途 |
+### 程序在哪
+
+| 路径 | 内容 |
 |---|---|
-| `/usr/local/bin/socketstack` | 二进制 |
-| `/opt/socket/versions/<v>/socket_server` + `current` 软链 | 版本（dt20 升级切换点） |
-| `/opt/socket/config` | 旧键配置（autoupgrade/http_port/proxy） |
-| `/etc/socketstack/config.yaml` | 新配置（全部可选） |
-| `/var/lib/socketstack/` | mcp 数据库与下载目录 |
+| `/usr/local/bin/socketstack` | **主二进制**（`install` 复制自身到此，供 CLI 与 systemd 调用） |
+| `/opt/socket/versions/1.9.0/socket_server` | **实际被 systemd 执行的二进制**（版本目录） |
+| `/opt/socket/versions/current` | 指向当前版本目录的软链 → 升级/回滚只切这个链接 |
+
+```bash
+# 确认正在跑的到底是哪个版本
+readlink -f /opt/socket/versions/current
+/usr/local/bin/socketstack version
+```
+
+### 日志在哪
+
+| 服务 | 日志位置 |
+|---|---|
+| **agent**（`socket_server.service`） | 文件 **`/var/log/socket_server.log`**（与 Python 版同一路径，追加写）；同时进 journald |
+| **mcp**（`socketstack-mcp.service`） | **仅 journald**（`journalctl -u socketstack-mcp`），不写文件 |
+
+```bash
+sudo tail -f /var/log/socket_server.log        # agent 主日志
+sudo journalctl -u socket_server -f            # agent（systemd 侧）
+sudo journalctl -u socketstack-mcp -f          # mcp 全部日志
+```
+
+日志路径可用环境变量 `SOCKET_SERVER_LOG` 覆盖（写进 unit 的 `Environment=` 才生效）。
+
+### 配置与数据
+
+| 路径 | 内容 |
+|---|---|
+| `/opt/socket/config` | 旧键配置：`autoupgrade=` / `http_port=` / `proxy=`（**优先级高于新配置**） |
+| `/etc/socketstack/config.yaml` | 新配置（全部可选，不存在也能跑） |
+| `/var/lib/socketstack/` | mcp 数据库 `mcp.db`（+ `-wal`/`-shm`）与下载目录 |
+
+### systemd 单元
+
+| 单元 | 文件 | ExecStart |
+|---|---|---|
+| `socket_server.service` | `/etc/systemd/system/socket_server.service` | `/opt/socket/versions/current/socket_server serve` |
+| `socketstack-mcp.service` | `/etc/systemd/system/socketstack-mcp.service` | `/usr/local/bin/socketstack mcp serve` |
 
 ---
 
