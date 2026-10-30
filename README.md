@@ -13,7 +13,7 @@
 
 ## 一键安装
 
-**agent（靶机）** —— 需要 root。整段粘贴即可：
+**agent（靶机）** —— 需要 root。一个二进制，一条命令装完即启动：
 
 ```bash
 # 默认走国内加速；能直连 GitHub 的机器把 MIRROR 置空
@@ -21,38 +21,45 @@ MIRROR=https://gh-proxy.com/
 URL=https://github.com/weihang1258/mcp-socket-server-go/releases/latest/download/socket_server
 
 curl -fsSL "${MIRROR}${URL}" -o /tmp/socket_server \
-  && chmod +x /tmp/socket_server \
-  && sudo /tmp/socket_server install \
-  && sudo socketstack agent start
+  && sudo install -m 0755 /tmp/socket_server /usr/local/bin/socketstack \
+  && sudo socketstack install
 ```
 
-`install` 装单元并设开机自启（与 Python 版语义一致，不自动 start），最后一条命令拉起服务。
+`install` 会把二进制落进版本目录、建好软链、注册 systemd、**启动服务**。装完直接可用。
 
-> 加速站可用 `https://gh-proxy.com/`（实测 15MB / 6.6s）或 `https://ghfast.top/`（5.6s），均返回与 Release 完全一致的 sha256。
+> 加速站可用 `https://gh-proxy.com/`（实测 15MB / ~4s）或 `https://ghfast.top/`，均返回与 Release 一致的 sha256。
 
-验证：
+验证（一条命令看全部）：
 
 ```bash
-systemctl status socket_server          # active (running)
-ss -ltn | grep -E ':9000|:9001'         # 两个端口都在监听
+socketstack status
+```
+
+```
+版本      : v1.9.2
+agent 服务: active (socket_server.service)
+mcp 服务  : active (socketstack-mcp.service)
+
+路径
+  入口 (CLI)   /usr/local/bin/socketstack -> /opt/socket/versions/current/socket_server
+  当前版本目录 /opt/socket/versions/current/socket_server
+  ...
+日志
+  agent  tail -f /var/log/socket_server.log
+  mcp    journalctl -u socketstack-mcp -f
 ```
 
 **mcp（中央节点）** —— 同样需要 root：
 
 ```bash
-MIRROR=https://gh-proxy.com/
-URL=https://github.com/weihang1258/mcp-socket-server-go/releases/latest/download/socket_server
-
-curl -fsSL "${MIRROR}${URL}" -o /tmp/socket_server \
-  && chmod +x /tmp/socket_server \
-  && sudo /tmp/socket_server install --with-mcp \
-  && sudo socketstack mcp start
+sudo install -m 0755 /tmp/socket_server /usr/local/bin/socketstack
+sudo socketstack install --with-mcp
 ```
 
-`install --with-mcp` 先把 agent 装好（靶机侧），再装 mcp 单元并设自启；最后一条 `mcp start` 才真正拉起服务。
+`install --with-mcp` 同一份二进制先装 agent 单元、再装 mcp 单元，**两个都启动**。
 
 > 标准部署是**分机安装**：靶机只装 agent，中央只装 mcp。`--with-mcp` 是同机调试用。
-> 从 Python 版原地升级：直接执行上面的 install，旧单元与路径会被复用（见「升级」）。
+> 从 Python 版原地升级：执行同样的 `install`，旧单元与路径会被复用（见「升级」）。
 
 **卸载**（保留版本目录、配置与 MCP 数据库）：
 
@@ -69,7 +76,8 @@ sudo socketstack uninstall
 装好即用，客户端用 Python 版 `socket_client` 或 MCP 桥连接 `:9000` 即可，协议不变。
 
 ```bash
-sudo socketstack agent start|stop|status|disable
+socketstack status                            # 版本 / 服务状态 / 路径 / 日志命令
+sudo socketstack agent start|stop|restart|disable
 sudo socketstack agent autoupgrade on|off     # 自动升级开关（写 /opt/socket/config）
 ```
 
@@ -118,22 +126,30 @@ mcp:
 
 ## 升级
 
-自动升级（默认开）由 agent 自己完成：中央节点推送 → dt20 落地 → 切换 `current` 软链。
+**自动升级（默认开）**：中央节点推送 → dt20 落地 → 原子切换 `current` 软链 → 重启。靶机零外呼，不受本机网络影响。
 
-手动升级三选一：
+**手动升级 / 覆盖修复**：下载新二进制后执行同样的安装命令即可，配置、数据、单元全部保留：
 
 ```bash
-# 1. 覆盖安装（最简单，保留配置与数据）
-sudo /tmp/socket_server install
+MIRROR=https://gh-proxy.com/
+URL=https://github.com/weihang1258/mcp-socket-server-go/releases/latest/download/socket_server
 
-# 2. 单元操作
-sudo socketstack agent stop && sudo /tmp/socket_server install
-
-# 3. 关掉自动升级
-sudo socketstack agent autoupgrade off
+curl -fsSL "${MIRROR}${URL}" -o /tmp/socket_server \
+  && sudo install -m 0755 /tmp/socket_server /usr/local/bin/socketstack \
+  && sudo socketstack install
 ```
 
-升级在版本目录 `current` 软链层面切换，失败可回滚到 `versions/<旧版本>/`。
+同版本重跑也覆盖（二进制损坏时用它修复）。
+
+**回滚**：`versions/<旧版本>/` 都还在，改 `current` 指回去再重启即可：
+
+```bash
+sudo ln -sfn /opt/socket/versions/1.9.1 /opt/socket/versions/current
+sudo socketstack agent start   # 单元 active 时用 systemctl restart socket_server
+```
+
+**关掉自动升级**：`sudo socketstack agent autoupgrade off`（写 `/opt/socket/config`）。
+注意它只是**闸门**：agent 不会自己轮询找新版本，只决定中央推过来时接不接受。
 
 ---
 
@@ -141,16 +157,23 @@ sudo socketstack agent autoupgrade off
 
 ### 程序在哪
 
+**全机只有一份二进制**，另外两个是指向它的软链：
+
+```
+/usr/local/bin/socketstack  ──┐   ← 敲命令用的入口（软链）
+                              ↓
+/opt/socket/versions/current  ──→ versions/1.9.2/socket_server   ← 真身，systemd 执行它
+```
+
 | 路径 | 内容 |
 |---|---|
-| `/usr/local/bin/socketstack` | **主二进制**（`install` 复制自身到此，供 CLI 与 systemd 调用） |
-| `/opt/socket/versions/1.9.0/socket_server` | **实际被 systemd 执行的二进制**（版本目录） |
-| `/opt/socket/versions/current` | 指向当前版本目录的软链 → 升级/回滚只切这个链接 |
+| `/opt/socket/versions/1.9.2/socket_server` | **唯一的二进制真身**（版本目录） |
+| `/opt/socket/versions/current` | 指向当前版本目录的软链 —— 升级/回滚只切这个链接 |
+| `/usr/local/bin/socketstack` | 指向 `current/socket_server` 的软链（PATH 入口，不在 PATH 加第二个文件） |
 
 ```bash
-# 确认正在跑的到底是哪个版本
-readlink -f /opt/socket/versions/current
-/usr/local/bin/socketstack version
+socketstack status                                  # 版本 + 服务状态 + 全部路径 + 日志命令
+readlink -f /opt/socket/versions/current            # 当前版本目录
 ```
 
 ### 日志在哪

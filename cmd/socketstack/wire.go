@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/weihang1258/mcp-socket-server-go/internal/agent"
 	"github.com/weihang1258/mcp-socket-server-go/internal/config"
@@ -56,59 +56,88 @@ func runMCPStdio() {
 	}
 }
 
-// installSelf 复制自身到 /usr/local/bin/socketstack + 装 agent 单元（+ 可选 mcp 单元）。
-// 首次部署：自身落盘 versions/<版本>/socket_server + current 软链（§8 布局）。
+// installSelf 部署二进制 + 装并启动单元（agent；--with-mcp 额外装 mcp）。
+//
+// 全机只落**一份**二进制：versions/<版本>/socket_server 是真身，current 软链
+// 指向它，/usr/local/bin/socketstack 再软链到 current/socket_server。
+// 以前 /usr/local/bin 存的是第二份独立拷贝，升级后两处会漂移，
+// 每次发版也得手工装两遍。
 func installSelf(withMCP bool) error {
-	if err := copySelf(); err != nil {
-		return err
-	}
 	if err := svcEnsureDirs(); err != nil {
 		return err
 	}
 	if err := seedInitialVersion(); err != nil {
 		return err
 	}
+	if err := linkCLI(); err != nil {
+		return err
+	}
 	if err := svcAgentEnable(); err != nil {
 		return err
 	}
-	fmt.Println("agent 单元已启用")
+	// 装完即能用，且新二进制必须真的生效。只用 start 不够：单元本来就 active
+	// 时 start 是空操作，进程继续跑被 rename 替换掉的旧 inode——真机实测
+	// /proc/<pid>/exe 指向 "(deleted)"，日志停在装之前那个时刻。
+	if err := svcAgentRestartFn(); err != nil {
+		return err
+	}
+	fmt.Println("agent 单元已启用并启动")
 	if withMCP {
 		if err := svcMCPInstall(); err != nil {
 			return err
 		}
-		fmt.Println("mcp 单元已启用（同机调试；标准部署请分机安装）")
+		if err := svcMCPRestartFn(); err != nil {
+			return err
+		}
+		fmt.Println("mcp 单元已启用并启动（同机调试；标准部署请分机安装）")
 	}
 	return nil
 }
 
-func copySelf() error {
-	src, err := os.Open("/proc/self/exe")
-	if err != nil {
+// currentVersion 当前安装版本号（安装路径与 softlink 目标的一环）。
+func currentVersion() string { return agent.Version }
+
+// linkCLI 把 /usr/local/bin/socketstack 做成指向 current/socket_server 的软链。
+// 旧布局留下的真文件（第二份拷贝）先删掉再建链。
+func linkCLI() error {
+	if err := os.MkdirAll(filepath.Dir(svcBinPath), 0o755); err != nil {
 		return err
 	}
-	defer src.Close()
-	dst, err := os.OpenFile(svcBinPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-	if err != nil {
-		return fmt.Errorf("写 %s 需要 root: %w", svcBinPath, err)
+	if err := os.Remove(svcBinPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("移除旧入口 %s 失败: %w", svcBinPath, err)
 	}
-	defer dst.Close()
-	_, err = io.Copy(dst, src)
-	return err
+	return os.Symlink(filepath.Join(svcVersionsDir, "current", "socket_server"), svcBinPath)
 }
 
-// seedInitialVersion 无既有部署时把 /usr/local/bin 二进制作为当前版本落盘。
+// seedInitialVersion 把**当前运行的二进制自身**落盘为该版本的真身，并原子切
+// current 指向它。
+//
+// 覆盖语义：已有目录/current 也照样覆盖——`install` 是「装或覆盖修复」的唯
+// 一入口（Python 版 install.sh 同样行为），早退会让新二进制悄悄丢掉。
+// 必须落自身（os.Executable）：/usr/local/bin 是指向 current 的软链，首次
+// 安装时悬空，读它只会得到 ENOENT。
+//
+// 版本切换的**另一条路**是 dt20 中央推送（finalizePushedVersion + switchTo），
+// 那条路写的是别的版本目录，二者互不干扰。
 func seedInitialVersion() error {
-	cur := filepath.Join(svcVersionsDir, "current")
-	if fi, err := os.Stat(filepath.Join(cur, "socket_server")); err == nil && !fi.IsDir() {
-		return nil
+	self, err := exePathFn()
+	if err != nil {
+		return err
 	}
 	vdir := filepath.Join(svcVersionsDir, agent.Version)
 	if err := os.MkdirAll(vdir, 0o755); err != nil {
 		return err
 	}
-	if err := copyFileTo(svcBinPath, filepath.Join(vdir, "socket_server")); err != nil {
+	// 先写临时文件再 rename：install 时进程可能正从旧 inode 运行，
+	// 直接截断写入会让正在跑的进程拿到半截文件。
+	tmpBin := filepath.Join(vdir, ".socket_server.tmp")
+	if err := copyFileTo(self, tmpBin); err != nil {
 		return err
 	}
+	if err := os.Rename(tmpBin, filepath.Join(vdir, "socket_server")); err != nil {
+		return err
+	}
+	cur := filepath.Join(svcVersionsDir, "current")
 	tmp := cur + ".tmp"
 	os.Remove(tmp)
 	if err := os.Symlink(vdir, tmp); err != nil {
@@ -136,21 +165,57 @@ func uninstallSelf() error {
 	svcMCPDisable()
 	svcAgentDisable()
 	os.Remove(filepath.Join(svcVersionsDir, "current")) // 数据式卸载：保留 versions/配置/DB
+	// PATH 入口是指向 current 的软链，current 一删就悬空——留着只会让
+	// 用户敲 socketstack 得到 "No such file or directory"。
+	if err := os.Remove(svcBinPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("移除入口 %s 失败: %w", svcBinPath, err)
+	}
 	return nil
+}
+
+// statusReport 一屏给出「程序在哪、日志在哪、跑没跑」。
+func statusReport() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "版本      : v%s\n", agent.Version)
+	fmt.Fprintf(&b, "agent 服务: %s (%s.service)\n", activeText(svcAgentActive()), svc.ServiceName)
+	fmt.Fprintf(&b, "mcp 服务  : %s (%s.service)\n", activeText(svcMCPActive()), svc.MCPService)
+	b.WriteString("\n路径\n")
+	fmt.Fprintf(&b, "  入口 (CLI)   %s -> %s/current/socket_server\n", svcBinPath, svcVersionsDir)
+	fmt.Fprintf(&b, "  当前版本目录 %s/current/socket_server\n", svcVersionsDir)
+	fmt.Fprintf(&b, "  旧键配置     %s\n", svc.ConfigPath)
+	fmt.Fprintf(&b, "  新配置       %s\n", configPath)
+	fmt.Fprintf(&b, "  数据/数据库  /var/lib/socketstack\n")
+	b.WriteString("\n日志\n")
+	b.WriteString("  agent  tail -f /var/log/socket_server.log\n")
+	b.WriteString("  mcp    journalctl -u socketstack-mcp -f\n")
+	return b.String()
+}
+
+func activeText(ok bool) string {
+	if ok {
+		return "active"
+	}
+	return "inactive"
 }
 
 // svc 薄转发（便于测试注入）。
 var (
-	svcBinPath      = "/usr/local/bin/socketstack"
-	svcVersionsDir  = "/opt/socket/versions"
-	svcEnsureDirs   = svc.EnsureDirs
-	svcAgentEnable  = svc.AgentEnable
-	svcAgentDisable = svc.AgentDisable
-	svcMCPInstall   = svc.MCPInstall
-	svcMCPDisable   = svc.MCPDisable
+	svcBinPath        = "/usr/local/bin/socketstack"
+	svcVersionsDir    = "/opt/socket/versions"
+	svcEnsureDirs     = svc.EnsureDirs
+	svcAgentEnable    = svc.AgentEnable
+	svcAgentStart     = svc.AgentStart
+	svcAgentRestartFn = svc.AgentRestart
+	svcAgentDisable   = svc.AgentDisable
+	svcAgentActive    = svc.AgentActive
+	svcMCPInstall     = svc.MCPInstall
+	svcMCPStart       = svc.MCPStart
+	svcMCPRestartFn   = svc.MCPRestart
+	svcMCPDisable     = svc.MCPDisable
+	svcMCPActive      = svc.MCPActive
+	// exePathFn 取自身可执行文件路径（测试替换，避免依赖真实的 /proc/self/exe）。
+	exePathFn = func() (string, error) { return os.Executable() }
 )
-
-var _ = errors.New
 
 // CLI 分派可注入点（测试用）。
 var (

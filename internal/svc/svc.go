@@ -159,6 +159,7 @@ func MCPInstall() error {
 }
 
 func MCPStart() error   { return systemctl("start", MCPService) }
+func MCPRestart() error { return systemctl("restart", MCPService) }
 func MCPStop() error    { return systemctl("stop", MCPService) }
 func MCPDisable() error { return systemctl("disable", MCPService) }
 func MCPActive() bool   { return systemctlOk("is-active", MCPService) }

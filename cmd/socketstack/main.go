@@ -29,6 +29,7 @@ const agentUsage = `socketstack — socket_server(agent) + mcp_socket_server(mcp
   socketstack serve               agent 模式别名（旧 unit 兼容入口）
   socketstack install [--with-mcp]
   socketstack uninstall
+  socketstack status              一屏看版本/服务状态/路径/日志
   socketstack agent|mcp start|stop|status|enable|disable
   socketstack agent autoupgrade on|off
   socketstack version`
@@ -45,7 +46,7 @@ func main() {
 	case "agent":
 		if len(args) > 1 {
 			switch args[1] {
-			case "start", "stop", "status", "enable", "disable":
+			case "start", "stop", "restart", "status", "enable", "disable":
 				svcDispatch("agent", args[1])
 				return
 			case "autoupgrade":
@@ -68,6 +69,8 @@ func main() {
 		runInstall(args[1:])
 	case "uninstall":
 		runUninstall()
+	case "status":
+		fmt.Print(statusReport())
 	case "version", "-v", "--version":
 		fmt.Printf("socketstack v%s\n", agent.Version)
 	case "-h", "--help", "help":
@@ -170,6 +173,8 @@ func svcDispatch(target, action string) {
 		err = svc.AgentStart()
 	case target == "agent" && action == "stop":
 		err = svc.AgentStop()
+	case target == "agent" && action == "restart":
+		err = svcAgentRestartFn()
 	case target == "agent" && action == "enable":
 		err = svc.AgentEnable()
 	case target == "agent" && action == "disable":
