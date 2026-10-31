@@ -107,6 +107,27 @@ func TestEnsureReleaseBinary(t *testing.T) {
 	}
 }
 
+// 下载失败不留空壳目录（v1.9.9）：真机中央缓存 8 个版本目录里 4 个是下载失败
+// 留下的空目录，`ls` 核对缓存完整性会被目录存在误导（二轮验收发现）。失败即清，
+// 缓存目录内存在 = 完整包。os.Remove 只删空目录，非空（理论不可能）不动。
+func TestEnsureReleaseBinaryCleanupEmptyDirOnFailure(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1.9.3/socket_server", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	setFetchBase(t, srv.URL, srv.URL)
+
+	dir := t.TempDir()
+	if _, _, err := EnsureReleaseBinary("1.9.3", dir, ""); err == nil {
+		t.Fatal("404 must fail")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "socket_server", "v1.9.3")); !os.IsNotExist(err) {
+		t.Fatal("失败后不应留下空壳目录")
+	}
+}
+
 // push_binary：POST multipart 到 :9001，path=staging；IPv6 加方括号
 func TestPushBinary(t *testing.T) {
 	var gotPath, gotFile string

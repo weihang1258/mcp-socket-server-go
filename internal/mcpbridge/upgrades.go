@@ -244,7 +244,6 @@ func EnsureReleaseBinary(version, downloadDir, proxy string) (string, string, er
 		return binary, sha, err
 	}
 	base := withMirror(fmt.Sprintf("%s/v%s", releaseBaseFor(upgradeRepo), version))
-	os.MkdirAll(vdir, 0o755)
 	binURL := base + "/socket_server"
 	content, status, err := httpGetStatus(binURL, proxy, 300)
 	if err != nil {
@@ -270,6 +269,12 @@ func EnsureReleaseBinary(version, downloadDir, proxy string) (string, string, er
 		if actualHex != expected {
 			return "", "", fmt.Errorf("下载校验失败: 期望 %s, 实际 %s（%s）", expected, actualHex, binURL)
 		}
+	}
+	// 建目录放在下载+校验全成之后：失败路径不建目录，不留空壳——真机中央缓存
+	// 曾 8 个目录 4 个空壳，「目录在」被误当「包在」（二轮验收发现）。现在缓存
+	// 目录内存在即完整包，ls 即完整性检查。
+	if err := os.MkdirAll(vdir, 0o755); err != nil {
+		return "", "", err
 	}
 	tmp := binary + ".tmp"
 	if err := os.WriteFile(tmp, content, 0o755); err != nil {

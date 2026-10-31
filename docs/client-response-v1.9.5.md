@@ -1,7 +1,7 @@
 # 客户端安全与质量反馈 —— 处理回函
 
-**版本**：socketstack v1.9.5 / v1.9.6 / v1.9.7 / v1.9.8
-**日期**：2026-10-30 初版，2026-10-31 修订（含 v1.9.7、v1.9.8）
+**版本**：socketstack v1.9.5 / v1.9.6 / v1.9.7 / v1.9.8 / v1.9.9
+**日期**：2026-10-30 初版，2026-10-31 修订（含 v1.9.7 ~ v1.9.9）
 
 ---
 
@@ -294,7 +294,15 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 
 **修复**：清理增加启动路径——agent 每次起来后异步执行一次清理（非 root 测试模式除外）。升级触发的自动重启即完成清理，**一次 upgrade_run 就干净**，不再需要「补推一次」或「执行 install」。switchTo 里的清理保留（双保险，语义不变：清理失败只记日志，绝不影响升级/启动）。
 
-版本目录里非版本号命名的目录（如 `bak-preGo`）不在清理范围——清理只认 `X.Y.Z` 形态的目录名。验收提到 35 号的 `bak-preGo` 消失：它不是本次清理删的（不匹配清理条件），应随早期手动清理或 install 更替消失，特此说明以免误判清理范围。
+版本目录里非版本号命名的目录（如 `bak-preGo`）不在清理范围——清理只认 `X.Y.Z` 形态的目录名。
+
+> **更正（三轮验收指出，我方原解释有误）**：`bak-preGo` 实际位于 82 号
+> `/opt/socket/versions/1.8.3/socket_server.bak-preGo`，是 **1.8.3 目录内部的
+> 文件**。清理的单位是整个版本目录（递归删除），删 1.8.3 时连带删掉了目录内的
+> 一切文件——「目录名不匹配」的说法不适用，上段作废。它确实是版本目录清理的
+> 连带结果。**教训：不要把回滚物料放在 `/opt/socket/versions/` 里面**——清理
+> 会带走版本目录内的任何自定义文件；请放独立路径（如 `/opt/socket/rollback/`，
+> 清理逻辑不触碰 versions/ 之外的任何目录）。
 
 ### 2. `deps install-browser --help` 退出码统一（验收小瑕疵）
 
@@ -302,24 +310,31 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 
 ### 3. 回滚预案变更（验收四）
 
-验收判断正确，回滚方式确实变了，明确如下：
+验收判断正确，回滚方式确实变了。三轮验收又核出两点，一并向你们交底：
 
-- 两台机器的 1.8.3 版本目录已被清理（本地只保留最近 3 个版本），`ln -sfn .../1.8.3 .../current` 式本地回滚**已不可用**
-- **今后回滚唯一路径：中央下发指定版本** `upgrade_run(targets=[...], version="1.8.3")`
-- 中央缓存 `/var/lib/socketstack/downloads/socket_server/` 里的历史版本是回滚的唯一来源，**请勿随手清理**；如需腾空间，建议先做离线归档（拷走再删）
-- 该约束已写入升级前检查项（见§十一）
+**回滚可用版本的真实范围**：本 Go 仓库的 release 最早是 v1.9.0。据此：
+
+- `upgrade_run(version="1.8.3")` 报 HTTP 404 是**预期行为**——1.8.3 是 Python 版本，Go 仓库没有也不会有它的 release，**Go 中央无法经 upgrade_run 回滚到 Python 版**。如确需回 Python 1.8.3，须单独下发该二进制（经 :9001 push_binary + sha256 手工推送，dt20 链路本身支持任意二进制）。
+- v1.9.3 的 release **资产存在**，当次回滚超时属网络间歇（同路径 1.9.4/1.9.8 均 4.6s 成功佐证），重试即可。
+- 当前中央缓存实际可用：`v1.9.4 / v1.9.5 / v1.9.7 / v1.9.8`；**可回滚最早 1.9.4**。
+
+**缓存空壳目录已修（v1.9.9）**：验收发现缓存 8 个版本目录里 3 个（v1.8.3/1.9.3/1.9.6）是下载失败留下的空目录——原先「先建目录、后下载」，失败后目录留存，`ls` 核对时「目录在」被误当「包在」。现在改为下载+校验全部成功后才建目录，**失败不留痕**：缓存目录内只要目录存在就是完整包，`ls` 即完整性检查，无需逐个看文件。中央现存三个空壳已手动清除；v1.9.6 需要时重试下载即可自动补上。
+
+**回滚后版本目录会变成 4 个**：验收实测确认——回滚到旧版本时 current 指向的版本被「永不删」保护、跳出「最近 3 个」，目录数 3 → 4，再升回后恢复 3。这是设计使然（current 删了服务就起不来），**监控告警请按「≤4 个」而非「恒 3 个」**。
+
+今后回滚唯一路径：中央下发指定版本 `upgrade_run(targets=[...], version="x.y.z")`；中央缓存目录请勿随手清理（如需腾空间先离线归档）。
 
 ---
 
 ## 十一、升级方式
 
 发布页：
-`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.8`
+`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.9`
 资产：`socket_server`（单个自包含二进制，无外部依赖）
 
 国内下载（GitHub 直链不可达时）：
-`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.8/socket_server`
-`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.8/socket_server`
+`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.9/socket_server`
+`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.9/socket_server`
 
 安装：
 `sudo ./socket_server install`（仅 agent）
@@ -330,4 +345,4 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 1. 自动化脚本中是否使用了 install 的额外参数（P1-1 行为变更）
 2. 如果脚本此前依赖「install 退出码 0 = 依赖装好了」，从 v1.9.7 起 install 不再装任何系统包；需要浏览器库的机器要补执行 `deps install-browser`
 3. 版本目录只保留最近 3 个，**本地无更旧版本**；回滚必须由中央下发指定版本（`upgrade_run(targets=[...], version="x.y.z")`），中央缓存目录请勿清理
-4. 已在 v1.9.7 的机器升到 v1.9.8 后首次重启即自动清理旧版本目录，无需补推
+4. 已在 v1.9.7 的机器升级后首次重启即自动清理旧版本目录，无需补推
