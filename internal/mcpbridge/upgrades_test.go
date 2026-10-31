@@ -120,8 +120,17 @@ func TestEnsureReleaseBinaryCleanupEmptyDirOnFailure(t *testing.T) {
 	setFetchBase(t, srv.URL, srv.URL)
 
 	dir := t.TempDir()
-	if _, _, err := EnsureReleaseBinary("1.9.3", dir, ""); err == nil {
+	_, _, err := EnsureReleaseBinary("1.9.3", dir, "")
+	if err == nil {
 		t.Fatal("404 must fail")
+	}
+	// 错误必须带下载源上下文：五轮验收发现 mirror 未生效时错误里看不出来
+	// （请求地址无前缀这一铁证四轮没人看）。显式打 mirror=/proxy= 当场分清
+	// 「没拼前缀」还是「拼了打不通」。
+	for _, want := range []string{"mirror=", "proxy="} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("错误信息应含 %q（实际: %v）", want, err)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(dir, "socket_server", "v1.9.3")); !os.IsNotExist(err) {
 		t.Fatal("失败后不应留下空壳目录")

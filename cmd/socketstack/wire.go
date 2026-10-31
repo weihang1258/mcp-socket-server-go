@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -31,6 +32,7 @@ func netListen(port string) (net.Listener, error) {
 
 // runMCPServe Streamable HTTP（mcp 单元 ExecStart 唯一入口）。
 func runMCPServe(cfg config.Config) {
+	warnMisplacedCfg()
 	b := mcpbridge.Init(mcpbridge.BridgeConfig{
 		DBPath: cfg.MCP.DBPath, DownloadDir: cfg.MCP.DownloadDir, Proxy: cfg.MCP.Proxy,
 		UpgradeRepo: cfg.MCP.UpgradeRepo, UpgradeMirror: cfg.MCP.UpgradeMirror,
@@ -47,6 +49,7 @@ func runMCPServe(cfg config.Config) {
 // runMCPStdio 本地 stdio（阻塞）。
 func runMCPStdio() {
 	cfg := loadCfg()
+	warnMisplacedCfg()
 	b := mcpbridge.Init(mcpbridge.BridgeConfig{
 		DBPath: cfg.MCP.DBPath, DownloadDir: cfg.MCP.DownloadDir, Proxy: cfg.MCP.Proxy,
 		UpgradeRepo: cfg.MCP.UpgradeRepo, UpgradeMirror: cfg.MCP.UpgradeMirror,
@@ -56,6 +59,19 @@ func runMCPStdio() {
 	if err := mcpbridge.RunStdio(context.Background(), b); err != nil {
 		fmt.Fprintln(os.Stderr, "mcp 失败:", err)
 		os.Exit(1)
+	}
+}
+
+// warnMisplacedCfg 检出「mcp 子键写在顶层」的配置错误（YAML 静默丢弃、不报错）。
+// 真机中央曾因此 upgrade_mirror/proxy 全未生效、下载裸连 GitHub 失败，
+// 配置文件看着配好了（五轮验收定位）。警告打到 stderr/journal，不阻断启动。
+func warnMisplacedCfg() {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return
+	}
+	for _, w := range config.MisplacedKeys(data) {
+		log.Printf("配置警告: %s", w)
 	}
 }
 

@@ -122,3 +122,32 @@ func TestChromiumPrefetchCanBeEnabled(t *testing.T) {
 		t.Fatal("配置写 chromium_prefetch: true 须生效")
 	}
 }
+
+// mcp 子键写在顶层会被 YAML 静默丢弃（未知顶层键不报错）——真机中央的
+// config.yaml 就这么错过：upgrade_mirror/proxy/upgrade_repo 全在顶层，
+// 文件看着配好了、程序一条没读到，下载裸连 GitHub 失败（五轮验收定位）。
+// 解析侧必须能检出并告警。
+func TestMisplacedKeys(t *testing.T) {
+	flat := `# 顶层写法（错误）
+upgrade_repo: weihang1258/mcp-socket-server-go
+upgrade_mirror: https://gh-proxy.com/
+proxy: http://10.12.186.204:7897
+`
+	got := MisplacedKeys([]byte(flat))
+	if len(got) != 3 {
+		t.Fatalf("顶层 3 个 mcp 子键应全部检出，实际 %d: %v", len(got), got)
+	}
+
+	nested := `mcp:
+  upgrade_mirror: https://gh-proxy.com/
+  proxy: http://10.12.186.204:7897
+`
+	if got := MisplacedKeys([]byte(nested)); len(got) != 0 {
+		t.Fatalf("嵌套写法不应告警，实际 %v", got)
+	}
+
+	// 畸形 YAML：不炸，返回空（Load 本身也不报这种）
+	if got := MisplacedKeys([]byte(":\n\t- ]")); got != nil {
+		t.Fatalf("畸形 YAML 应静默返回空，实际 %v", got)
+	}
+}

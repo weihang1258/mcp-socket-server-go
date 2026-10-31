@@ -47,6 +47,9 @@ type BridgeConfig struct {
 func Init(cfg BridgeConfig) *Bridge {
 	ConfigureUpgradeSource(cfg.UpgradeRepo, cfg.UpgradeMirror)
 	proxy := ResolveProxy(cfg.Proxy)
+	// 生效值一行可见：真机曾因配置层级错误 mirror 未生效，启动时毫无迹象，
+	// 直到下载失败才发现（五轮验收）。repo/mirror/proxy 必须在这里就能对上。
+	log.Printf("升级源配置: repo=%q mirror=%q proxy=%q", cfg.UpgradeRepo, cfg.UpgradeMirror, proxy)
 	b := &Bridge{
 		Registry:      mustRegistry(cfg.DBPath),
 		Locks:         NewLockManager(),

@@ -245,12 +245,16 @@ func EnsureReleaseBinary(version, downloadDir, proxy string) (string, string, er
 	}
 	base := withMirror(fmt.Sprintf("%s/v%s", releaseBaseFor(upgradeRepo), version))
 	binURL := base + "/socket_server"
+	// 失败必须带下载源上下文：真机曾因配置层级错误 mirror 未生效、裸连 GitHub
+	// 失败，错误里看不出来（五轮验收）。显式打生效值，当场分清「没拼前缀」
+	// 还是「拼了打不通」。proxy 空串=直连，也照打。
+	src := fmt.Sprintf("（mirror=%q proxy=%q）", upgradeMirror, proxy)
 	content, status, err := httpGetStatus(binURL, proxy, 300)
 	if err != nil {
-		return "", "", fmt.Errorf("下载 v%s 失败: %v（请求地址 %s）", version, err, binURL)
+		return "", "", fmt.Errorf("下载 v%s 失败: %v%s（请求地址 %s）", version, err, src, binURL)
 	}
 	if status != 200 {
-		return "", "", fmt.Errorf("下载 v%s 失败: HTTP %d（请求地址 %s）", version, status, binURL)
+		return "", "", fmt.Errorf("下载 v%s 失败: HTTP %d%s（请求地址 %s）", version, status, src, binURL)
 	}
 	actual := sha256.Sum256(content)
 	actualHex := hex.EncodeToString(actual[:])
