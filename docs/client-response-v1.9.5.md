@@ -1,7 +1,7 @@
 # 客户端安全与质量反馈 —— 处理回函
 
-**版本**：socketstack v1.9.5 / v1.9.6
-**日期**：2026-10-30 初版，2026-10-31 修订
+**版本**：socketstack v1.9.5 / v1.9.6 / v1.9.7
+**日期**：2026-10-30 初版，2026-10-31 修订（含 v1.9.7）
 
 ---
 
@@ -180,7 +180,7 @@ sudo truncate -s 0 /var/log/socket_server.log
 
 | 项 | 说明 |
 |---|---|
-| 历史日志清理 | 364MB 是历史数据，需你确认后再删；轮转配置已就位，新日志不会无限增长 |
+| 历史日志清理 | ~~需你确认后再删~~ **已处理**（v1.9.7）：364MB 历史日志已按 7 天保留原则清理，轮转配置就位 |
 
 ---
 
@@ -222,7 +222,9 @@ sudo truncate -s 0 /var/log/socket_server.log
 
 **修复**：apt 分支加 `-o DPkg::Lock::Timeout=0`，拿不到锁立刻失败。yum/dnf 不加（无此问题）。
 
-**需要说明的边界**：退出码仍是 0。这是 Python `install.sh` 的既有契约（依赖装不上不阻断安装），我们保持了它。依赖是否装好要看 stderr 的告警文本。若要改成非 0，会影响「内网无源也允许 install」的既有用法，需要你们确认后再说。
+**需要说明的边界**：退出码仍是 0。这是 Python `install.sh` 的既有契约（依赖装不上不阻断安装），我们保持了它。依赖是否装好要看 stderr 的告警文本。
+
+> **v1.9.7 已彻底解决**：`install` 不再调用包管理器（见§九），此边界不复存在；显式安装浏览器依赖的 `deps install-browser` 失败即非 0 退出。
 
 ### 4. 版本目录只增不减
 
@@ -267,7 +269,9 @@ sudo truncate -s 0 /var/log/socket_server.log
 
 ### 3. 日志保留 7 天
 
-logrotate 配置改为：`daily + size 60M + maxage 7 + rotate 7 + copytruncate + compress`。超过 7 天的归档由 logrotate 自动删除，不再永久累积。
+logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytruncate + compress`。每天轮转、单日超 60M 提前轮转，超过 7 天的归档由 logrotate 自动删除，不再永久累积。
+
+（说明：最初写的是 `size 60M`，上线前干跑发现 size 是绝对条件、会覆盖 daily——日志不涨满 60M 就永不轮转，7 天保留失效。已改用 `maxsize`：到期照轮、超限提前。）
 
 历史处置：清空日志时保留在 /tmp 的 364MB 归档已按「只留 7 天」原则删除（其中 99% 是 3 月～10 月的 Python 时代日志）。当前 /var/log 下只有 7 天内的两份小文件。
 
