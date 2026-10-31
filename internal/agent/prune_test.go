@@ -57,3 +57,36 @@ func TestPruneOldVersionsNeverDeletesCurrent(t *testing.T) {
 		t.Fatalf("current 版本绝不能被删: %v", err)
 	}
 }
+
+// 启动时也要清理（v1.9.8）：验收发现首次 upgrade_run 不清理——执行 switchTo
+// 的是升级前的旧进程（旧代码无 prune），切链+重启后没人再清。挂在启动路径后，
+// 升级触发的自动重启就会带上这一步，一次 upgrade_run 即干净。
+func TestPruneAtStartup(t *testing.T) {
+	dir := t.TempDir()
+	prevRoot, prevVer := upgradeRoot, Version
+	defer func() { upgradeRoot, Version = prevRoot, prevVer }()
+	upgradeRoot, Version = dir, "1.9.8"
+
+	for _, v := range []string{"1.0.0", "1.5.0", "1.9.0", "1.9.7", "1.9.8"} {
+		d := filepath.Join(dir, "versions", v)
+		os.MkdirAll(d, 0o755)
+		os.WriteFile(filepath.Join(d, "socket_server"), []byte("BIN"), 0o755)
+	}
+
+	PruneAtStartup()
+
+	left, _ := os.ReadDir(filepath.Join(dir, "versions"))
+	var names []string
+	for _, e := range left {
+		if e.Name() != "current" {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) != keepVersions {
+		t.Fatalf("启动清理后应剩 %d 个版本，实际 %d: %v", keepVersions, len(names), names)
+	}
+	// 当前版本必须在
+	if _, err := os.Stat(filepath.Join(dir, "versions", "1.9.8")); err != nil {
+		t.Fatalf("当前版本必须保留: %v", err)
+	}
+}

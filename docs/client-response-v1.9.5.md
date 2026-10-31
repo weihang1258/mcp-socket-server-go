@@ -1,7 +1,7 @@
 # 客户端安全与质量反馈 —— 处理回函
 
-**版本**：socketstack v1.9.5 / v1.9.6 / v1.9.7
-**日期**：2026-10-30 初版，2026-10-31 修订（含 v1.9.7）
+**版本**：socketstack v1.9.5 / v1.9.6 / v1.9.7 / v1.9.8
+**日期**：2026-10-30 初版，2026-10-31 修订（含 v1.9.7、v1.9.8）
 
 ---
 
@@ -279,3 +279,55 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 
 - **tcpdump**：agent 只用它把用户填写的过滤表达式编译成内核 BPF 指令（`tcpdump -ddd`），并不用 tcpdump 抓包。自行手写 BPF 编译器一旦语义有偏差，会「静默抓错包」，比保留这个依赖危险得多。系统普遍自带 tcpdump，不进安装清单。
 - **chromium 本体**：普通 HTTP 客户端不能执行页面 JS、不能模拟浏览器重定向/弹窗，用它冒充拨测会让「拨测成功」失去意义。需要无库部署时，方向是把带完整运行环境的浏览器做成独立组件包，单独评估。
+
+---
+
+## 十、v1.9.8 —— 第二轮验收反馈修复
+
+验收结论「v1.9.7 可用于铺开」收到，感谢逐项真机复现。三个跟进项处理如下。
+
+### 1. 版本目录清理的触发时机（验收三：首次 upgrade_run 不清理）
+
+验收实测准确，成因已定位：
+
+**执行切链的永远是升级前的旧进程。** upgrade_apply 的流程是：旧进程收到指令 → 落盘新版本 → 改 current 软链 → 重启自己 → 新进程起来。v1.9.7 的清理挂在「改软链」这一步，而这一步由旧进程执行——旧进程的身体里没有 v1.9.7 的清理代码，所以第一次升级永远清不了。等第二次 upgrade_run 时，机器上跑的已是 v1.9.7，清理才第一次有机会执行。82 号「第一次 22 个不动、第二次清到 3 个」正是这个时序；35 号一次就干净，是因为它在验收前已经历过多次升级/重启。
+
+**修复**：清理增加启动路径——agent 每次起来后异步执行一次清理（非 root 测试模式除外）。升级触发的自动重启即完成清理，**一次 upgrade_run 就干净**，不再需要「补推一次」或「执行 install」。switchTo 里的清理保留（双保险，语义不变：清理失败只记日志，绝不影响升级/启动）。
+
+版本目录里非版本号命名的目录（如 `bak-preGo`）不在清理范围——清理只认 `X.Y.Z` 形态的目录名。验收提到 35 号的 `bak-preGo` 消失：它不是本次清理删的（不匹配清理条件），应随早期手动清理或 install 更替消失，特此说明以免误判清理范围。
+
+### 2. `deps install-browser --help` 退出码统一（验收小瑕疵）
+
+属实：v1.9.7 的参数解析只认「仅一个 help 参数」的形态，`install-browser --help` 两个参数落入未知参数分支退 2。已改为 **help 标志在任何位置都生效且优先**（`deps --help`、`deps install-browser --help` 均退 0 并打印用法），与 install/uninstall 约定一致；未知参数仍退 2、空参数仍退 2。
+
+### 3. 回滚预案变更（验收四）
+
+验收判断正确，回滚方式确实变了，明确如下：
+
+- 两台机器的 1.8.3 版本目录已被清理（本地只保留最近 3 个版本），`ln -sfn .../1.8.3 .../current` 式本地回滚**已不可用**
+- **今后回滚唯一路径：中央下发指定版本** `upgrade_run(targets=[...], version="1.8.3")`
+- 中央缓存 `/var/lib/socketstack/downloads/socket_server/` 里的历史版本是回滚的唯一来源，**请勿随手清理**；如需腾空间，建议先做离线归档（拷走再删）
+- 该约束已写入升级前检查项（见§十一）
+
+---
+
+## 十一、升级方式
+
+发布页：
+`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.8`
+资产：`socket_server`（单个自包含二进制，无外部依赖）
+
+国内下载（GitHub 直链不可达时）：
+`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.8/socket_server`
+`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.8/socket_server`
+
+安装：
+`sudo ./socket_server install`（仅 agent）
+`sudo ./socket_server install --with-mcp`（同机连 mcp 一起）
+`sudo ./socket_server deps install-browser`（需要浏览器拨测的机器）
+
+升级前检查项：
+1. 自动化脚本中是否使用了 install 的额外参数（P1-1 行为变更）
+2. 如果脚本此前依赖「install 退出码 0 = 依赖装好了」，从 v1.9.7 起 install 不再装任何系统包；需要浏览器库的机器要补执行 `deps install-browser`
+3. 版本目录只保留最近 3 个，**本地无更旧版本**；回滚必须由中央下发指定版本（`upgrade_run(targets=[...], version="x.y.z")`），中央缓存目录请勿清理
+4. 已在 v1.9.7 的机器升到 v1.9.8 后首次重启即自动清理旧版本目录，无需补推

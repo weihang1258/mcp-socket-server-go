@@ -54,6 +54,18 @@ func pruneOldVersions(current string, keep int) error {
 	return nil
 }
 
+// PruneAtStartup 启动时清理一次（main 在 agent 起来后异步调用）。
+//
+// 为什么只挂 switchTo 不够：dt20 自升级执行切链的是**升级前的旧进程**——
+// 旧代码里没有 prune，切完链重启就退场了，清理永远轮不到新代码执行
+// （真机验收：首次 upgrade_run 后 22 个版本纹丝不动，第二次才清到 3 个）。
+// 挂在启动路径后，升级触发的自动重启即完成清理，一次 upgrade_run 就干净。
+func PruneAtStartup() {
+	if err := pruneOldVersions(Version, keepVersions); err != nil {
+		log.Printf("启动清理旧版本失败（不影响运行）: %v", err)
+	}
+}
+
 // versionLess 版本号逐段数字比较。
 func versionLess(a, b string) bool {
 	as := strings.Split(a, ".")

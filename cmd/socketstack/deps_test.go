@@ -45,8 +45,19 @@ func TestRunDeps(t *testing.T) {
 			}
 		}
 	})
+	t.Run("动作后跟help仍退出0不执行", func(t *testing.T) {
+		// 验收实测：`deps install-browser --help` 退出码 2，与 install/uninstall
+		// 的 help→0 约定不一致。help 在任何位置都应生效（先于动作判定）。
+		for _, a := range [][]string{{"install-browser", "--help"}, {"install-browser", "help"}, {"install-browser", "-h"}} {
+			called, lastErr, exits = 0, nil, nil
+			runDeps(a)
+			if len(exits) != 0 || called != 0 {
+				t.Fatalf("%v: exits=%v called=%d", a, exits, called)
+			}
+		}
+	})
 	t.Run("未知参数退出2不执行", func(t *testing.T) {
-		for _, a := range [][]string{{"install"}, {}, {"install-browser", "extra"}, {"status"}} {
+		for _, a := range [][]string{{"install"}, {}, {"install-browser", "extra"}, {"status"}, {"--help", "install-browser", "x"}} {
 			called, lastErr, exits = 0, nil, nil
 			runDeps(a)
 			if len(exits) != 1 || exits[0] != 2 || called != 0 {

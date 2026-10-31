@@ -104,6 +104,9 @@ func runAgent(args []string) {
 		os.Exit(1)
 	}
 	defer stop()
+	if !testMode {
+		go agent.PruneAtStartup() // 异步：慢盘不拖监听建立；升级后的自动重启即触发
+	}
 	fmt.Printf("socketstack agent listening %s (dt14 v%s)\n", addr, agent.Version)
 	select {} // 前台阻塞运行（systemd/信号管理生命周期）
 }
@@ -202,23 +205,28 @@ const depsUsage = `用法: socketstack deps install-browser
 
 // runDeps deps 子命令：目前唯一动作 install-browser。严格解析，
 // 与 install/uninstall 同约定（help 退 0、未知参数退 2、均不执行）。
+// help 在任何位置都生效（验收实测 `deps install-browser --help` 曾退 2）。
 func runDeps(args []string) {
-	act := "unknown"
-	switch len(args) {
-	case 1:
-		switch args[0] {
-		case "install-browser":
-			act = "run"
+	sawHelp, sawRun := false, false
+	for _, a := range args {
+		switch a {
 		case "-h", "--help", "help":
-			act = "help"
+			sawHelp = true
+		case "install-browser":
+			sawRun = true
+		default:
+			fmt.Fprintln(os.Stderr, "deps: 未知参数 "+a+"\n"+depsUsage)
+			exitFn(2)
+			return
 		}
 	}
-	switch act {
-	case "help":
+	switch {
+	case sawHelp:
 		fmt.Println(depsUsage)
 		return
-	case "unknown":
-		fmt.Fprintln(os.Stderr, "deps: 未知参数\n"+depsUsage)
+	case sawRun:
+	default: // 空参数
+		fmt.Fprintln(os.Stderr, "deps: 未指定动作\n"+depsUsage)
 		exitFn(2)
 		return
 	}
