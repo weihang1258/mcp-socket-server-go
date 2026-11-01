@@ -514,6 +514,9 @@ func TestToolConnLostTierMapping(t *testing.T) {
 			t.Fatalf("%s(建连失败): 应恰 1 条失败: %v", tc.tool, out)
 		}
 		reason := fmt.Sprint(failed[0].(map[string]any)["reason"])
+		if strings.Contains(reason, "pool:") { // 十轮验收 P2：前缀统一（两通道两出口都无人工前缀）
+			t.Errorf("%s(建连失败): 不得带 \"pool: \" 前缀（档位由尾注承载）: %v", tc.tool, reason)
+		}
 		if tc.wantRetry && !strings.Contains(reason, "请稍后重试") {
 			t.Errorf("%s(建连失败): 应为可重试档，实际: %v", tc.tool, reason)
 		}

@@ -753,15 +753,22 @@ func isConnLost(err error) bool {
 	return msg == io.EOF.Error() || strings.Contains(msg, "connection reset")
 }
 
-// dialErrText 建连失败（出口 A：请求未发出）的分档（九轮验收 P2）。与
-// connErrText（出口 B：请求已发出、在途断连）的可重试性相反——此处命令必然
-// 未执行、重试安全，文案必须让调用方能一眼区分两种情形；非幂等工具用
-// 「未发送执行+可稍后重试」明示安全侧，且不得混入「请稍后重试」保留字。
+// dialErrText 出口 A（请求未发出）的分档（九/十轮验收）。两类错误语义不同、
+// 处置相反，文案不得混排：建连失败=靶机不可达（等恢复）；池满=靶机健康、
+// 并发占满（调并发/等释放），后者不套「连接未建立」话术。非幂等档不得混入
+// 「请稍后重试」保留字（v1.9.15 起）。
 func dialErrText(err error, retrySafe bool) string {
-	if retrySafe {
-		return err.Error() + "（请稍后重试）"
+	msg := err.Error()
+	if strings.Contains(msg, "连接池满") { // 与 isConnLost 同为错误文本判定（wire 错误无类型）
+		if retrySafe {
+			return msg + "（请稍后重试）"
+		}
+		return msg + "（请求未发送执行，未产生副作用；可稍后重试）"
 	}
-	return err.Error() + "（连接未建立，请求未发送执行，未产生副作用；可稍后重试）"
+	if retrySafe {
+		return msg + "（请稍后重试）"
+	}
+	return msg + "（连接未建立，请求未发送执行，未产生副作用；可稍后重试）"
 }
 
 // Batch 并发执行（全局 50 并发上限）。retrySafe 语义同 runBatch——调用点必须

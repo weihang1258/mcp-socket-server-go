@@ -149,8 +149,10 @@ func (b *Bridge) runOne(r *TargetResult, hp string, port int, class Lk, lockKey 
 		if class != LkNone {
 			b.Locks.Release(hp, class, lockKey)
 		}
-		// 出口 A：请求未发出（建连失败/池不可用），按工具幂等性分档（dialErrText）
-		*r = TargetResult{Target: hp, Ok: false, Err: "pool: " + dialErrText(err, retrySafe)}
+		// 出口 A：请求未发出（建连失败/池满），按工具幂等性分档（dialErrText）。
+		// 不加前缀——"pool: " 曾只出现在本处（十轮验收 P2：两通道/两出口前缀不一），
+		// 档位信息已由 dialErrText 尾注承载
+		*r = TargetResult{Target: hp, Ok: false, Err: dialErrText(err, retrySafe)}
 		return
 	}
 	// 3. 执行

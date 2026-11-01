@@ -533,3 +533,36 @@ func TestRunBatchConnLostNonIdempotentText(t *testing.T) {
 		}
 	}
 }
+
+// dialErrText 分型（十轮验收 P1）：出口 A 的两类错误语义不同——
+// 建连失败（靶机不可达）与池满（靶机健康、并发占满）处置相反，
+// 池满不得套「连接未建立」话术；两类都不得混入「请稍后重试」保留字（非幂等档）。
+func TestDialErrTextKinds(t *testing.T) {
+	connErr := fmt.Errorf("连接 10.0.0.1:9000 失败（已重试 3 次，靶机可能正在重启）: dial tcp: connect: connection refused")
+	poolFull := fmt.Errorf("靶机 10.0.0.1 连接池满,等待超时")
+	cases := []struct {
+		name      string
+		err       error
+		retrySafe bool
+		want      []string // 必含
+		notWant   []string // 必不含
+	}{
+		{"建连失败+非幂等", connErr, false, []string{"连接未建立", "未发送执行", "可稍后重试"}, []string{"请稍后重试"}},
+		{"建连失败+只读", connErr, true, []string{"请稍后重试"}, []string{"连接未建立"}},
+		{"池满+非幂等", poolFull, false, []string{"连接池满", "未发送执行", "可稍后重试"}, []string{"请稍后重试", "连接未建立"}},
+		{"池满+只读", poolFull, true, []string{"连接池满", "请稍后重试"}, []string{"连接未建立"}},
+	}
+	for _, tc := range cases {
+		got := dialErrText(tc.err, tc.retrySafe)
+		for _, w := range tc.want {
+			if !strings.Contains(got, w) {
+				t.Errorf("%s: 应含 %q，实际: %v", tc.name, w, got)
+			}
+		}
+		for _, w := range tc.notWant {
+			if strings.Contains(got, w) {
+				t.Errorf("%s: 不应含 %q，实际: %v", tc.name, w, got)
+			}
+		}
+	}
+}
