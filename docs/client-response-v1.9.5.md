@@ -1,7 +1,7 @@
 # 客户端安全与质量反馈 —— 处理回函
 
-**版本**：socketstack v1.9.5 ~ v1.9.17
-**日期**：2026-10-30 初版，2026-11-01 修订（含 v1.9.7 ~ v1.9.17）
+**版本**：socketstack v1.9.5 ~ v1.9.18
+**日期**：2026-10-30 初版，2026-11-01 修订（含 v1.9.7 ~ v1.9.18）
 
 ---
 
@@ -333,13 +333,13 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 ## 十一、升级方式
 
 发布页：
-`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.17`
+`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.18`
 资产：`socket_server`（单个自包含二进制，无外部依赖，静态链接）
-sha256：`861a9911f4328fcd64db7d2b3304258a821caf4f4f50556e85231e14f03e2e44`
+sha256：`0bcba9152b73785ec8ee44a25d7a5a97e03634fcd76956bbcb5731e4bd42ca4c`
 
 国内下载（GitHub 直链不可达时）：
-`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.17/socket_server`
-`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.17/socket_server`
+`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.18/socket_server`
+`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.18/socket_server`
 
 安装：
 `sudo ./socket_server install`（仅 agent）
@@ -754,3 +754,57 @@ connectWithRetry 三次退避（500ms+1s）必然把耗时拉到 ≥1.5s（验�
 
 v1.9.17 已发版（sha `861a9911…`，静态链接，镜像回源核对一致），35/82 双机
 upgrade_run 升级闭环。单测 `-race` 全绿。
+
+---
+
+## 十九、v1.9.17 全量功能回归（真 MCP，15 工具）与 v1.9.18 自查修复（2026-11-01）
+
+应用收方要求，对全部 15 个 MCP 工具在 v1.9.17 上做真机功能回归（客户端走
+真 MCP `:9010`，靶机 82 / 中央 35），结果 **14 过、1 缺陷**，缺陷已修
+（v1.9.18）。逐项记录：
+
+| # | 工具 | 验证内容 | 结果 |
+|---|---|---|---|
+| 1 | version | 双机查询；停服窗口失败档（§十八） | ✅ |
+| 2 | isfile | 存在/不存在两态（不存在按 B23 契约记 failed） | ✅ |
+| 3 | isdir | 同上两态 | ✅ |
+| 4 | list_targets | 注册表读取 | ✅ |
+| 5 | cmd_exec | wait=true 回显；wait=false 异步（见下，缺陷）；白名单路径由单测覆盖 | ✅（1 缺陷） |
+| 6 | file_transfer | 上传/下载指引命令生成（零网络） | ✅ |
+| 7 | capture_start | 启动抓包（独立 path） | ✅ |
+| — | 锁互斥 | 抓包期间 cmd_exec 被拒「锁类 shell 冲突」——locks.py 原样语义（CAPTURE 持锁时拒一切独占类），**设计行为非缺陷** | ✅ |
+| 8 | capture_stop | 四态 `{stopped:true, legacy:true}` 契约（§二 dt6 不改） | ✅ |
+| 9 | socket_listen | start(pid)/fetch(空)/stop；clean-after-stop 裸 `error` 为 handlers.py 逐字契约（未启动→b"error"） | ✅ |
+| 10 | boce_run | dt131 结构（total/success/fail/ratio/time） | ✅ |
+| 11 | replay_run | 真实 pcap 回放 7266 包/1.05MB/143Mbps；单臂 downlink=0 属文档载明正常 | ✅ |
+| 12 | pcap_flow_extract | 真实 pcap 目录 121 流，五元组+按文件归属正确 | ✅ |
+| 13 | add_target / remove_target | force 注册离线靶机 → 入册 → 移除（测后无残留） | ✅ |
+| 14 | upgrade_run | 本日 8 次（两机×4 版本），含镜像下载失败重试、apply 竞态轮询闭环 | ✅ |
+
+### 缺陷与修复（v1.9.18）：cmd_exec wait=false 丢失 B18 note
+
+**现象**：wait=false 回执 `results` 只有 target，无 note。Python 版此处回执带
+`wait=false 为异步执行不返回回显…` 提示。
+
+**根因**：Go 的 typed-nil——`fn` 直接 `return c.CmdExec(...)`，客户端返回的
+nil map 装进 `any` 后是 typed nil，`runOne` 的 `case nil` 不匹配、落入
+`case map[string]any` 后 `v==nil` 落空（range 空 map 无键），B18 note 成为
+死代码。v1.9.15~17 的分档/映射测试均未覆盖此路径——正常路径回归此前只测过
+wait=true。
+
+**修复**：typed nil map 与裸 nil 同义处理；回归测试
+`TestRunBatchTypedNilGetsNote`（typed nil → note 必现）。v1.9.18 双机部署后
+真机复验：wait=false 回执带 note ✅。
+
+### 回归中的两个「看似异常、实为契约」项（免复查）
+
+1. isfile/isdir 对不存在路径记 `failed: agent 返回 False（业务失败）`——
+   dt7/dt8 裸布尔契约（false=业务失败），与 Python 一致。
+2. socket_listen 在 stop 后 clean 返回错误——agent 侧 `listenClean` 未启动
+   即裸 `b"error"`（handlers.py 逐字复刻）；正确时序见工具描述
+   （start→…→save/fetch 须在 stop 之前）。
+
+### 发布
+
+v1.9.18（sha `0bcba915…`，静态链接；release.sh 镜像闸对新资产误报 FATAL 一次，
+手动镜像 sha 核对一致后放行），双机 upgrade_run 闭环。
