@@ -333,13 +333,13 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 ## 十一、升级方式
 
 发布页：
-`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.14`
+`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.15`
 资产：`socket_server`（单个自包含二进制，无外部依赖，静态链接）
-sha256：`ba4b4ca0595497597bbe6cf363c6fe5da37a70112dd9a14879075d6fe71d8cbb`
+sha256：`55c10152247522fe69c70f9e1f3bfca2cda30d816edd91dfabe79c6ec208e1b6`
 
 国内下载（GitHub 直链不可达时）：
-`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.14/socket_server`
-`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.14/socket_server`
+`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.15/socket_server`
+`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.15/socket_server`
 
 安装：
 `sudo ./socket_server install`（仅 agent）
