@@ -12,6 +12,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -97,6 +98,8 @@ func runAgent(args []string) {
 	testMode := os.Getenv("SOCKETSTACK_TEST_MODE") == "1"
 	if !testMode {
 		svc.EnsureUnitCorrect() // 自愈（失败仅 warn 不阻断）
+		warnMisplacedCfg()      // 六轮验收 P2-2：agent 段键写顶层也静默，启动时检出告警
+		log.Printf("agent 配置: port=%d log=%q mirror=%q", cfg.Agent.TCPPort, cfg.Agent.LogFile, cfg.MCP.UpgradeMirror)
 	}
 	ln, addr, stop := startAgent(cfg, testMode)
 	if ln == nil {

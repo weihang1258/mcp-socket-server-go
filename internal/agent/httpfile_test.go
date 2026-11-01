@@ -17,6 +17,7 @@ import (
 // http_port 读取：/opt/socket/config 的 http_port= 行；缺省 9001；0=关闭
 func TestHTTPPortConfig(t *testing.T) {
 	dir := t.TempDir()
+	setAllowlistForTest(t, []string{dir + "/"})
 	if got := readHTTPPortFrom(filepath.Join(dir, "nope")); got != 9001 {
 		t.Fatalf("missing file want 9001, got %d", got)
 	}
@@ -38,6 +39,7 @@ func TestHTTPPortConfig(t *testing.T) {
 // realpath 归一化：.. 词法消除
 func TestHTTPNormalize(t *testing.T) {
 	dir := t.TempDir()
+	setAllowlistForTest(t, []string{dir + "/"})
 	deep := filepath.Join(dir, "a", "..", "b")
 	if got := httpNormalize(deep); got != filepath.Join(dir, "b") {
 		t.Fatalf("lexical clean failed: %q", got)
@@ -46,6 +48,79 @@ func TestHTTPNormalize(t *testing.T) {
 	if !filepath.IsAbs(httpNormalize("x/y")) {
 		t.Fatal("must be absolute")
 	}
+}
+
+// 9001 路径白名单（P3-2，六轮验收）：不做鉴权（P0-1 设计认定不变），但收窄
+// 可读写目录防误操作——一次手滑 path= 就能覆盖 current/socket_server 或 unit
+// 文件。允许：/home/tmp/ 前缀 + 升级 staging（versions/*/.staging/，dt20 链路
+// PushBinary 必经）。测试注入 TempDir 顶替 /home/tmp。
+func TestFileServerPathAllowlist(t *testing.T) {
+	dir := t.TempDir()
+	setAllowlistForTest(t, []string{dir + "/"})
+
+	h := FileServerHandler()
+
+	// GET 白名单内 → 200
+	ok := filepath.Join(dir, "cap.pcap")
+	os.WriteFile(ok, []byte("PCAP"), 0o644)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/files?path="+ok, nil))
+	if w.Code != 200 {
+		t.Fatalf("白名单内 GET 应 200，got %d: %s", w.Code, w.Body.String())
+	}
+
+	// GET 白名单外 → 403（含允许范围说明）
+	for _, p := range []string{"/etc/shadow", "/opt/socket/versions/current/socket_server"} {
+		w = httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", "/files?path="+p, nil))
+		if w.Code != 403 {
+			t.Fatalf("%s 应 403，got %d: %s", p, w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "允许范围") {
+			t.Fatalf("403 应说明允许范围: %s", w.Body.String())
+		}
+	}
+
+	// GET 穿越逃逸 → 403（normalize 后 /etc/passwd 出白名单）
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/files?path="+filepath.Join(dir, "..", "escape"), nil))
+	if w.Code != 403 {
+		t.Fatalf("穿越应 403，got %d: %s", w.Code, w.Body.String())
+	}
+
+	// GET 升级 staging → 200（dt20 链路）
+	staging := "/opt/socket/versions/1.9.11/.staging/socket_server"
+	// 真实 staging 文件在测试机上不存在 → 404（而非 403），证明白名单放行了
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/files?path="+staging, nil))
+	if w.Code != 404 {
+		t.Fatalf("staging 应进白名单（404=文件不存在而非 403=拒绝），got %d: %s", w.Code, w.Body.String())
+	}
+
+	// POST 白名单内 → 200；白名单外 → 403
+	post := func(path string) *httptest.ResponseRecorder {
+		body := "--B\r\nContent-Disposition: form-data; name=\"path\"\r\n\r\n" + path +
+			"\r\n--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"f\"\r\n\r\nDATA\r\n--B--\r\n"
+		return httpPost(t, h, strings.NewReader(body), "multipart/form-data; boundary=B")
+	}
+	if w := post(filepath.Join(dir, "up.bin")); w.Code != 200 {
+		t.Fatalf("白名单内 POST 应 200，got %d: %s", w.Code, w.Body.String())
+	}
+	if w := post("/etc/evil"); w.Code != 403 {
+		t.Fatalf("白名单外 POST 应 403，got %d: %s", w.Code, w.Body.String())
+	}
+	// POST 升级 staging → 放行（PushBinary 路径；实际写入被测试环境 /opt 权限挡 → 非 403 即可）
+	if w := post(staging); w.Code == 403 {
+		t.Fatalf("staging POST 不应 403: %s", w.Body.String())
+	}
+}
+
+// setAllowlistForTest 白名单收窄后，既有各测试的 TempDir 需要放行。
+func setAllowlistForTest(t *testing.T, prefixes []string) {
+	t.Helper()
+	prev := fileAllowlistPrefixes
+	t.Cleanup(func() { fileAllowlistPrefixes = prev })
+	fileAllowlistPrefixes = prefixes
 }
 
 func httpPost(t *testing.T, h http.Handler, body io.Reader, contentType string) *httptest.ResponseRecorder {
@@ -59,6 +134,7 @@ func httpPost(t *testing.T, h http.Handler, body io.Reader, contentType string) 
 // GET：200 流式 + 响应头契约 + 404 JSON + 400 缺参
 func TestHTTPGET(t *testing.T) {
 	dir := t.TempDir()
+	setAllowlistForTest(t, []string{dir + "/"})
 	src := filepath.Join(dir, "dl.bin")
 	os.WriteFile(src, bytes.Repeat([]byte("x"), 2<<20), 0o644) // 2MB，超 1MB 分块
 
@@ -104,6 +180,7 @@ func TestHTTPGET(t *testing.T) {
 // POST 标准上传：path 先到 → .part 直写 + 原子 rename；父目录自动创建
 func TestHTTPPOSTStandard(t *testing.T) {
 	dir := t.TempDir()
+	setAllowlistForTest(t, []string{dir + "/"})
 	h := FileServerHandler()
 
 	var buf bytes.Buffer
@@ -139,6 +216,7 @@ func TestHTTPPOSTStandard(t *testing.T) {
 // file 字段先到 → 落临时文件后搬运
 func TestHTTPPOSTFileFirst(t *testing.T) {
 	dir := t.TempDir()
+	setAllowlistForTest(t, []string{dir + "/"})
 	h := FileServerHandler()
 
 	var buf bytes.Buffer
@@ -161,6 +239,7 @@ func TestHTTPPOSTFileFirst(t *testing.T) {
 // 多 file 字段：续写首个句柄，size 只报最后一段
 func TestHTTPPOSTMultiFile(t *testing.T) {
 	dir := t.TempDir()
+	setAllowlistForTest(t, []string{dir + "/"})
 	h := FileServerHandler()
 
 	var buf bytes.Buffer
@@ -190,6 +269,7 @@ func TestHTTPPOSTMultiFile(t *testing.T) {
 // 缺 path：400（body 全量消费后）
 func TestHTTPPOSTMissingPath(t *testing.T) {
 	dir := t.TempDir()
+	setAllowlistForTest(t, []string{dir + "/"})
 	h := FileServerHandler()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -212,6 +292,7 @@ func TestHTTPPOSTMissingPath(t *testing.T) {
 // （Python parse 循环同样报错——容忍范围仅指伪命中判定，非全 LF framing）。
 func TestHTTPPOSTDelimiterTailTolerance(t *testing.T) {
 	dir := t.TempDir()
+	setAllowlistForTest(t, []string{dir + "/"})
 	h := FileServerHandler()
 	boundary := "BNDRS123"
 	var buf bytes.Buffer
@@ -232,6 +313,7 @@ func TestHTTPPOSTDelimiterTailTolerance(t *testing.T) {
 
 func TestHTTPPOSTMidBodyLFBoundaryFails(t *testing.T) {
 	dir := t.TempDir()
+	setAllowlistForTest(t, []string{dir + "/"})
 	h := FileServerHandler()
 	boundary := "BNDRS123"
 	var buf bytes.Buffer
@@ -257,6 +339,7 @@ func TestHTTPPOSTNoBoundary(t *testing.T) {
 // path 字段值超 4096 → 400
 func TestHTTPPOSTPathTooLarge(t *testing.T) {
 	dir := t.TempDir()
+	setAllowlistForTest(t, []string{dir + "/"})
 	h := FileServerHandler()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -273,6 +356,7 @@ func TestHTTPPOSTPathTooLarge(t *testing.T) {
 // GET query 字面 %（非法转义）：Python 宽容保留原样 → 应取到文件名含 % 的文件
 func TestHTTPGETLiteralPercent(t *testing.T) {
 	dir := t.TempDir()
+	setAllowlistForTest(t, []string{dir + "/"})
 	name := "50%off.txt"
 	os.WriteFile(filepath.Join(dir, name), []byte("pct"), 0o644)
 	h := FileServerHandler()

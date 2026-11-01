@@ -435,7 +435,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 		})
 
 	// 5. file_transfer
-	add(s, ro("file_transfer", "获取客户端与靶机之间点对点传文件的命令(零网络调用,纯指引)。上传后需执行权限接 cmd_exec chmod +x。9001 拒绝连接=靶机 http_port=0(配置关闭)或版本 <1.7.0,先 upgrade_run 升级。"),
+	add(s, ro("file_transfer", "获取客户端与靶机之间点对点传文件的命令(零网络调用,纯指引)。上传后需执行权限接 cmd_exec chmod +x。9001 拒绝连接=靶机 http_port=0(配置关闭)或版本 <1.7.0,先 upgrade_run 升级。靶机侧路径限白名单: /home/tmp/ 与 /opt/socket/versions/*/.staging/(升级自动走 staging,无需关心);传其他目录会 403,v1.9.11 起生效(Python 靶机不受限)。"),
 		func(ctx context.Context, a fileTransferArgs) any {
 			httpPort := orDefault(a.HTTPPort, 9001)
 			var cmds []map[string]string
@@ -455,7 +455,8 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 				return map[string]any{"ok": 0, "note": "无已注册靶机,先 add_target 注册再用",
 					"usage": []string{
 						"下载: curl -o 本地文件 \"http://<靶机IP>:9001/files?path=<远端绝对路径>\"",
-						"上传: curl -F \"path=<远端绝对路径>\" -F \"file=@本地文件\" http://<靶机IP>:9001/files"}}
+						"上传: curl -F \"path=<远端绝对路径>\" -F \"file=@本地文件\" http://<靶机IP>:9001/files",
+						"路径白名单(Go 靶机 v1.9.11+): /home/tmp/ 与 /opt/socket/versions/*/.staging/,白名单外 403"}}
 			}
 			return map[string]any{"ok": len(cmds), "commands": cmds}
 		})
@@ -768,6 +769,12 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 			}
 			binaryPath, sha, err := EnsureReleaseBinary(ver, b.DownloadDir, b.proxyResolved)
 			if err != nil {
+				// 下载失败也写审计（六轮验收 P3-1）：此前直接 return，audit_log
+				// 空白——失败原因只在 MCP 回执里活一次，事后无从查起，与终态
+				// 审计口径（§八.2）不一致。target="*" = 未进入单靶执行阶段。
+				b.Audit.Write("upgrade_run", map[string]any{"version": ver, "force": a.Force},
+					[]map[string]any{{"target": "*", "ok": false, "error": err.Error()}},
+					0, 1, int(time.Since(t0).Milliseconds()), sourceIPFromCtx(ctx))
 				return map[string]any{"ok": 0, "version": ver, "failed": []map[string]any{{"target": "*", "reason": err.Error()}}, "results": []any{}}
 			}
 			log.Printf("upgrade_run: v%s sha=%s... binary=%s targets=%v", ver, sha[:16], binaryPath, targets)

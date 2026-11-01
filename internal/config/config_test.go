@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -136,6 +137,21 @@ proxy: http://10.12.186.204:7897
 	got := MisplacedKeys([]byte(flat))
 	if len(got) != 3 {
 		t.Fatalf("顶层 3 个 mcp 子键应全部检出，实际 %d: %v", len(got), got)
+	}
+
+	// agent 段键写顶层同样静默（六轮验收 P2-2：顶层 tcp_port: 9100 → 仍监听 9000 零提示）
+	agentFlat := `tcp_port: 9100
+log_file: /tmp/agent.log
+chromium_prefetch: true
+`
+	agentGot := MisplacedKeys([]byte(agentFlat))
+	if len(agentGot) != 3 {
+		t.Fatalf("顶层 3 个 agent 子键应全部检出，实际 %d: %v", len(agentGot), agentGot)
+	}
+	for _, w := range agentGot {
+		if !strings.Contains(w, "agent:") {
+			t.Fatalf("agent 键警告应指向 agent: 段: %v", w)
+		}
 	}
 
 	nested := `mcp:

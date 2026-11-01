@@ -9,6 +9,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -257,4 +260,51 @@ func upgradeRunForTest(t *testing.T, b *Bridge, targets []string, version string
 		})
 	// version 字段与 upgrade_run 工具同款
 	return map[string]any{"ok": batch["ok"], "version": ver, "failed": batch["failed"], "results": batch["results"]}
+}
+
+// 下载阶段失败也必须写审计（P3-1，六轮验收）：此前 EnsureReleaseBinary 出错
+// 直接 return，audit_log 无任何记录——失败原因只在 MCP 回执里活一次，事后查
+// 审计是空白，与 §八.2「失败原因必须落审计」口径不一致（推包/确认阶段失败有
+// 记录）。走真实 SDK 链路 + 真实 handler 闭包（不经 upgradeRunForTest 复制品）。
+func TestUpgradeRunDownloadFailureWritesAudit(t *testing.T) {
+	b := newTestBridge(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) })
+	prevRel := releaseBase
+	releaseBase = startHTTP(t, mux).URL
+	t.Cleanup(func() { releaseBase = prevRel })
+
+	srv := NewServer(b)
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
+		&mcp.StreamableHTTPOptions{DisableLocalhostProtection: true})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, nil).
+		Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("客户端连接失败: %v", err)
+	}
+	defer cs.Close()
+
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "upgrade_run",
+		Arguments: map[string]any{"targets": []string{"127.0.0.2"}, "version": "9.9.9"},
+	})
+	if err != nil {
+		t.Fatalf("upgrade_run 调用失败: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("upgrade_run 回执错误（应返回结构化 failed 而非 isError）: %+v", res.Content)
+	}
+
+	e := b.Audit.LastEntry()
+	if e == nil {
+		t.Fatal("下载失败必须有审计记录（此前无）")
+	}
+	if e.Tool != "upgrade_run" || e.FailedCount != 1 {
+		t.Fatalf("审计应为 upgrade_run/failed=1: %+v", e)
+	}
 }

@@ -85,11 +85,19 @@ func defaults() Config {
 	}
 }
 
-// mcpChildKeys 这些键属于 mcp: 之下。写在顶层时 YAML 不报错、静默丢弃——
-// 真机中央曾因此 mirror/proxy 全部未生效，下载裸连 GitHub 失败（五轮验收定位）。
-var mcpChildKeys = []string{"proxy", "upgrade_repo", "upgrade_mirror", "download_dir", "db_path"}
+// misplacedKeys已知叶子键 → 所属段（顶层写错时 YAML 静默丢弃，不报错）。
+// 真机中央曾因此 mirror/proxy 全部未生效，下载裸连 GitHub 失败（五轮验收）；
+// 六轮验收补 agent 段（顶层 tcp_port → 仍监听 9000 零提示）。固定顺序遍历，
+// 输出稳定。
+var misplacedKeys = []struct{ key, section string }{
+	{"tcp_port", "agent"}, {"log_file", "agent"}, {"chromium_prefetch", "agent"},
+	{"proxy", "mcp"}, {"upgrade_repo", "mcp"}, {"upgrade_mirror", "mcp"},
+	{"download_dir", "mcp"}, {"db_path", "mcp"}, {"log_level", "mcp"},
+	{"default_timeout", "mcp"}, {"behind_proxy", "mcp"}, {"audit_retention_days", "mcp"},
+	{"cmd_exec_whitelist", "mcp"}, {"bind", "mcp"}, {"pool", "mcp"},
+}
 
-// MisplacedKeys 检出「mcp 子键写在顶层」的配置错误，返回可直接打印的告警。
+// MisplacedKeys 检出「子键写在顶层」的配置错误，返回可直接打印的告警。
 // 未知顶层键中只挑这些已知键名——通用未知键不告警（存量配置可能带自定义键，
 // 全量严格模式会把无关机器炸掉）。畸形 YAML 返回 nil（与 Load 同语义）。
 func MisplacedKeys(data []byte) []string {
@@ -98,9 +106,10 @@ func MisplacedKeys(data []byte) []string {
 		return nil
 	}
 	var warns []string
-	for _, k := range mcpChildKeys {
-		if _, ok := top[k]; ok {
-			warns = append(warns, fmt.Sprintf("配置键 %q 写在了顶层，不会生效——请移到 mcp: 之下（如:\n  mcp:\n    %s: ...）", k, k))
+	for _, k := range misplacedKeys {
+		if _, ok := top[k.key]; ok {
+			warns = append(warns, fmt.Sprintf("配置键 %q 写在了顶层，不会生效——请移到 %s: 之下（如:\n  %s:\n    %s: ...）",
+				k.key, k.section, k.section, k.key))
 		}
 	}
 	return warns

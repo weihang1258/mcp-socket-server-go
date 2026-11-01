@@ -1,7 +1,7 @@
 # 客户端安全与质量反馈 —— 处理回函
 
-**版本**：socketstack v1.9.5 ~ v1.9.10
-**日期**：2026-10-30 初版，2026-10-31 修订（含 v1.9.7 ~ v1.9.10）
+**版本**：socketstack v1.9.5 ~ v1.9.11
+**日期**：2026-10-30 初版，2026-11-01 修订（含 v1.9.7 ~ v1.9.11）
 
 ---
 
@@ -33,10 +33,15 @@
 
 - **P1-3（启动时清防火墙）**
   靶机需要被中央无障碍访问，启动时清理本机防火墙规则是既定行为，与原型一致。
+  具体动作（v1.9.11 起明确写进文档）：`systemctl stop/disable firewalld`、
+  `iptables -F -X -Z`、`setenforce 0`。**手工加的防火墙规则会在 agent 每次重启
+  后失效**；将来要做网络隔离须依赖靶机上层的 ACL/交换机策略，不能靠靶机本地
+  防火墙。
 
 - **P2-3（`capture_stop` 仅返回布尔值）**
   返回 `{"stopped": true, "legacy": true}` 是**协议契约**。若要返回 `pcap_complete` / `exitcode`
   四态，需要同时改动 agent 侧线协议与 MCP 侧解析，会与存量 Python 1.8.3 靶机不兼容。属协议升级，不在本次范围。
+  （六轮验收再次提出，状态维持待定：是否按兼容方式扩展由产品决策，见 §十三.5。）
 
 > 补充：P3-1（审计来源 IP）原也被归入此项，后来认为它属于**实现缺陷而非设计取舍**——不做鉴权不代表不需要知道谁调的。已在本次修复。
 
@@ -329,12 +334,12 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 ## 十一、升级方式
 
 发布页：
-`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.10`
+`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.11`
 资产：`socket_server`（单个自包含二进制，无外部依赖）
 
 国内下载（GitHub 直链不可达时）：
-`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.10/socket_server`
-`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.10/socket_server`
+`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.11/socket_server`
+`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.11/socket_server`
 
 安装：
 `sudo ./socket_server install`（仅 agent）
@@ -346,7 +351,7 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 2. 如果脚本此前依赖「install 退出码 0 = 依赖装好了」，从 v1.9.7 起 install 不再装任何系统包；需要浏览器库的机器要补执行 `deps install-browser`
 3. 版本目录只保留最近 3 个，**本地无更旧版本**；回滚必须由中央下发指定版本（`upgrade_run(targets=[...], version="x.y.z")`），中央缓存目录请勿清理
 4. 已在 v1.9.7 的机器升级后首次重启即自动清理旧版本目录，无需补推
-5. **中央下发前先确认缓存里有该版本的包**（见 §十二）——实网下载在中央节点不可依赖，铺开用的版本请提前离线导入缓存
+5. **中央首次下发某版本前，先实测一次该版本的下载**（显式 `upgrade_run` 单靶试一发）——配置层级正确时实网可用（§十二.5）；网络故障时的备选是离线导入缓存（§十二.6）
 
 ---
 
@@ -395,3 +400,42 @@ sudo chmod 755 /var/lib/socketstack/downloads/socket_server/vX.Y.Z/socket_server
 sha256sum ...   # 与发布方核对
 # 之后 upgrade_run(targets=[...], version="X.Y.Z") 即缓存命中，零网络
 ```
+
+---
+
+## 十三、v1.9.11 —— 六轮验收清单处置（2026-11-01）
+
+验收问题清单五项处置如下，一项（P2-3）待产品决策。
+
+### 1. 回函 §十一 检查项第 5 条自相矛盾（P2-1）——已改
+
+属实：§十二.5 已改「默认实网下载」，检查项 5 还是旧口径「实网不可依赖」。已改为「首次下发前实测一次下载；配置层级正确时实网可用，网络故障备选离线导入」。
+
+### 2. 配置层级告警只覆盖 mcp 段（P2-2）——已补 agent 段
+
+属实：`warnMisplacedCfg` 只挂在 mcp 启动路径，agent 段键（`tcp_port` / `log_file` / `chromium_prefetch`）写顶层依旧静默。已扩展：
+
+- 检测列表覆盖两段全部已知键（mcp 段顺带补齐 `bind` / `pool` / `log_level` 等，警告指明所属段）
+- `runAgent` 入口同样调用检测，并打印生效值一行：`agent 配置: port=… log=… mirror=…`
+
+### 3. 下载阶段失败不写审计（P3-1）——已补
+
+属实：`EnsureReleaseBinary` 出错直接 return，审计空白，与 §八.2 口径不一致。已补：下载失败终态写一条审计（`target="*"`，`ok_count=0` / `failed_count=1`，`error` 带完整原因——含 v1.9.10 加的 mirror/proxy 上下文）。测试走真实 SDK 链路断言落库，不经 handler 复制品。
+
+### 4. 9001 文件服务路径收窄（存量 P3-2，验收方要求）——已收窄
+
+不做鉴权（P0-1 设计认定不变），仅收窄可读写目录防误操作：
+
+- **允许**：`/home/tmp/` 前缀；升级 staging `/opt/socket/versions/*/.staging/`（dt20 推送链路必经，自动放行）
+- **拒绝**：其余路径 403，错误信息带允许范围说明；normalize（含软链解析）之后判定，穿越/软链逃逸无效
+- **影响**：手工传文件请放 `/home/tmp/`（file_transfer 工具的指引文本已同步）；Python 靶机不受影响（跑的是 Python 代码，语义不变）
+- **验证**：升级链路端到端（PushBinary → staging）真机复验通过
+
+### 5. dt6 布尔值 → 四态（存量 P2-3）——待产品决策
+
+此前双方确认过「协议契约不改」（§二），六轮验收再次提出。扩展成 `pcap_complete` / `exitcode` 四态需要：agent 侧线协议加字段 + MCP 侧解析兼容新旧两种回执。可行性上**可以做向后兼容**（新靶机返回四态、MCP 对旧靶机的布尔回执照旧解析），不再有 §二 当年担心的存量不兼容问题。是否扩展请产品拍板：确认后下个版本实现。
+
+### 6. 其他
+
+- 防火墙清除行为已写进 §二 P1-3（具体命令 + 「手工规则重启即失效」警示）
+- 已闭环项对照表收到，与我们的记录一致

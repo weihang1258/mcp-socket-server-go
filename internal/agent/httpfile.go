@@ -316,6 +316,35 @@ func fieldName(headers string) string {
 
 // ---- http.Handler ----
 
+// fileAllowlistPrefixes 9001 允许读写的目录前缀（P3-2，六轮验收）。
+//
+// 为什么收窄：P0-1「不做鉴权」是设计认定不变，但任意路径意味着一次手滑的
+// path= 就能覆盖 /opt/socket/versions/current/socket_server 或 unit 文件——
+// 防误操作不防恶意（恶意场景鉴权才管用，那不在本次范围）。升级链路的
+// staging（versions/<v>/.staging/，dt20 PushBinary 必经）单独放行，见
+// filePathAllowed。var 仅为测试注入（既有测试的 TempDir）。
+var fileAllowlistPrefixes = []string{"/home/tmp/"}
+
+var errPathDenied = errors.New("path denied")
+
+// filePathAllowed normalize 之后的绝对路径是否可读写。
+// 升级 staging 独立放行：/opt/socket/versions/**/.staging/**。
+func filePathAllowed(p string) bool {
+	if strings.HasPrefix(p, "/opt/socket/versions/") && strings.Contains(p, "/.staging/") {
+		return true
+	}
+	for _, pre := range fileAllowlistPrefixes {
+		if strings.HasPrefix(p, pre) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathDeniedMsg(p string) string {
+	return fmt.Sprintf("path 超出允许范围（/home/tmp/ 与 /opt/socket/versions/*/.staging/）: %s", p)
+}
+
 // FileServerHandler :9001 处理器（GET /files 下载流式；POST /files 上传流式）。
 func FileServerHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -344,6 +373,10 @@ func handleFileGET(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := httpNormalize(raw)
+	if !filePathAllowed(path) { // 白名单判断在 normalize 之后（EvalSymlinks 防软链/穿越绕过）
+		sendErrorJSON(w, 403, pathDeniedMsg(path))
+		return
+	}
 	fi, err := os.Stat(path)
 	if err != nil || !fi.Mode().IsRegular() { // Python isfile：仅常规文件
 		sendErrorJSON(w, 404, fmt.Sprintf("file not found: %s", path))
@@ -399,6 +432,9 @@ func handleFilePOST(w http.ResponseWriter, r *http.Request) {
 		}
 		if pathVal != "" {
 			dest := httpNormalize(pathVal)
+			if !filePathAllowed(dest) { // 写盘前拦：白名单外不留 .part
+				return nil, fmt.Errorf("%w: %s", errPathDenied, pathDeniedMsg(dest))
+			}
 			os.MkdirAll(filepath.Dir(dest), 0o777)
 			part := dest + ".part"
 			f, err := os.Create(part)
@@ -418,6 +454,10 @@ func handleFilePOST(w http.ResponseWriter, r *http.Request) {
 
 	pathVal, size, fileSeen, err := parseMultipartStream(r.Body, length, boundary, openFile)
 	if err != nil {
+		if errors.Is(err, errPathDenied) {
+			sendErrorJSON(w, 403, strings.TrimPrefix(err.Error(), "path denied: "))
+			return
+		}
 		if errors.Is(err, errMultipart) {
 			sendErrorJSON(w, 400, err.Error()) // ValueError 类（畸形/超限）
 			return
@@ -430,6 +470,10 @@ func handleFilePOST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dest := httpNormalize(pathVal)
+	if !filePathAllowed(dest) { // file-first：临时文件已收，搬运前拦（defer 会清掉 tempPath）
+		sendErrorJSON(w, 403, pathDeniedMsg(dest))
+		return
+	}
 	if tempPath != "" {
 		os.MkdirAll(filepath.Dir(dest), 0o777)
 		if err := moveFile(tempPath, dest); err != nil { // rename 优先，EXDEV 回退 copy+unlink
