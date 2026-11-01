@@ -1,7 +1,7 @@
 # 客户端安全与质量反馈 —— 处理回函
 
-**版本**：socketstack v1.9.5 ~ v1.9.18
-**日期**：2026-10-30 初版，2026-11-01 修订（含 v1.9.7 ~ v1.9.18）
+**版本**：socketstack v1.9.5 ~ v1.9.19
+**日期**：2026-10-30 初版，2026-11-01/02 修订（含 v1.9.7 ~ v1.9.19）
 
 ---
 
@@ -333,13 +333,13 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 ## 十一、升级方式
 
 发布页：
-`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.18`
+`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.19`
 资产：`socket_server`（单个自包含二进制，无外部依赖，静态链接）
-sha256：`0bcba9152b73785ec8ee44a25d7a5a97e03634fcd76956bbcb5731e4bd42ca4c`
+sha256：`74020171bcfa5f715da1155b82ff29b550817b82e22befb4c0d0545c6658f703`
 
 国内下载（GitHub 直链不可达时）：
-`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.18/socket_server`
-`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.18/socket_server`
+`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.19/socket_server`
+`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.19/socket_server`
 
 安装：
 `sudo ./socket_server install`（仅 agent）
@@ -808,3 +808,56 @@ wait=true。
 
 v1.9.18（sha `0bcba915…`，静态链接；release.sh 镜像闸对新资产误报 FATAL 一次，
 手动镜像 sha 核对一致后放行），双机 upgrade_run 闭环。
+
+---
+
+## 二十、v1.9.19 —— 出口 A 细分两型与文案前缀统一（2026-11-02）
+
+对验收 v1.9.18 复测（N1–N8 全过）提出的三条跟进项，全部属实并已处置。
+
+### 1. P1 池满误并建连失败档 —— 属实，已细分（v1.9.19）
+
+验收判定准确：`pool.Acquire` 的「连接池满，等待超时」与建连失败同为「请求
+未发出」，但语义不同——池满=**靶机健康、并发占满**（处置：调并发/等释放），
+建连失败=**靶机不可达**（处置：等恢复）。v1.9.17 把两者都交给 `dialErrText`
+统一套「连接未建立…」话术，混淆了两种处置。
+
+修复：`dialErrText` 按错误文本分型（wire 错误无类型，与 `isConnLost` 同法）：
+
+| 情形 | 非幂等 | retry-safe |
+|---|---|---|
+| 建连失败 | `…refused（连接未建立，请求未发送执行，未产生副作用；可稍后重试）` | `…refused（请稍后重试）` |
+| **池满** | `靶机 X 连接池满，等待超时（请求未发送执行，未产生副作用；可稍后重试）` | `靶机 X 连接池满，等待超时（请稍后重试）` |
+
+池满两档均不出现「连接未建立」。
+
+### 2. P2 「pool: 」前缀不一致 —— 属实，已删除（v1.9.19）
+
+`"pool: "` 只出现在 runOne 出口 A 一处（既非按通道分、也非按出口分），删除；
+档位信息由 `dialErrText` 尾注承载。至此两通道（runOne/Sched.Batch）、两出口
+（A/B）的失败文案均无人工前缀，映射测试已加「不得带 pool: 前缀」断言锁定。
+
+### 3. 池满真机触发（验收未构造成功，本轮补上）
+
+同靶 6 路并发 `pcap_flow_extract`（无锁类、走 Sched.Batch，连接池上限 5）+
+大目录拉长单次提取（4KB×10 万文件）：5 路占满连接池，第 6 路 10 秒借用超时
+命中池满，真机返回：
+
+```
+{"reason":"靶机 10.12.131.82 连接池满,等待超时（请稍后重试）","target":"10.12.131.82"}
+```
+
+池满+非幂等档的组合无法真机构造（runOne 侧全部工具持锁类，同靶并发先被
+锁拒绝、到不了池），由单测 `TestDialErrTextKinds` 四象限锁定（建连失败/池满
+× 两档，各断言必含与必不含）。
+
+### 4. 说明
+
+另 5 路并发样本返回 `read tcp …: i/o timeout`——dt200 提取耗时超过工具
+timeout 的读超时，错误带双端地址（`10.12.131.35:52756->10.12.131.82:9000`），
+现场可判读，非缺陷。
+
+### 5. 发布
+
+v1.9.19（sha `74020171…`，静态链接，镜像回源核对一致）双机 upgrade_run 闭环；
+单测 `-race` 全绿。
