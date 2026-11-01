@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/weihang1258/mcp-socket-server-go/internal/frame"
+	"time"
 )
 
 // ---- mock socket_server（对拍基座，按 datatype 回 canned 响应）----
@@ -316,4 +317,102 @@ func portOf(addr string) int {
 	i := strings.LastIndex(addr, ":")
 	n, _ := strconv.Atoi(addr[i+1:])
 	return n
+}
+
+// 读错误（reset/EOF）不得吞成空响应（六轮验收 P2）：当前第一个 Read 的
+// 非 timeout 错误与短探超时走同一分支返回 nil，上层拿空字节去 json.Unmarshal
+// 报成 "unexpected end of JSON input"，误导往协议不兼容/数据截断排查。
+// Python 语义是 socket.timeout 才 return，ConnectionResetError 冒泡——对齐。
+func TestRecvUntilTimeoutErrorNotSwallowed(t *testing.T) {
+	// 对端 accept 即关 → 客户端第一 Read 得 EOF
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, e := l.Accept()
+			if e != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	addr := l.Addr().(*net.TCPAddr)
+	c := NewClient("127.0.0.1", addr.Port, 5)
+	if err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if _, err := c.recvUntilTimeout(300 * time.Millisecond); err == nil {
+		t.Fatal("对端关闭必须冒泡，不得吞成空响应")
+	}
+
+	// 对照：静默连接（无响应）→ 第一 Read 超时 → (空, nil) 契约保持
+	l2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l2.Close()
+	go func() {
+		for {
+			cn, e := l2.Accept()
+			if e != nil {
+				return
+			}
+			t.Cleanup(func() { cn.Close() })
+		}
+	}()
+	addr2 := l2.Addr().(*net.TCPAddr)
+	c2 := NewClient("127.0.0.1", addr2.Port, 1)
+	if err := c2.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	out, err := c2.recvUntilTimeout(200 * time.Millisecond)
+	if err != nil {
+		t.Fatalf("静默超时应保持 (空, nil) 契约: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("静默超时应为空: %q", out)
+	}
+}
+
+// 空闲连接复用前必须探活（六轮验收 P2）：靶机重启后池里的半开连接各吞一次
+// 请求，并发 N 路同一时刻集中失败 N 条。Acquire 探针检出即丢弃、换新建。
+func TestPoolAcquireSkipsDeadIdle(t *testing.T) {
+	m := newMockServer(t, stdMockHandler(t))
+	p := NewTargetPool(hostOf(m.Addr), portOf(m.Addr))
+
+	// 半开：底层 TCP 已死（服务端关），Client.conn 非 nil——Release 却标健康
+	c1, err := p.Acquire(1, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c1.conn.Close()
+	p.Release(c1, true)
+
+	// 已 Close：conn=nil 的死亡连接同样入池
+	c2, err := p.Acquire(1, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2.Close()
+	p.Release(c2, true)
+
+	// 两次 Acquire 都必须跳过死连接，拿到的是新建活连接
+	for i := 0; i < 2; i++ {
+		c, err := p.Acquire(1, 5)
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i, err)
+		}
+		if c == c1 || c == c2 {
+			t.Fatalf("死连接被复用（第 %d 次）", i)
+		}
+		if !probeAlive(c) {
+			t.Fatalf("Acquire 返回的应是活连接（第 %d 次）", i)
+		}
+	}
 }

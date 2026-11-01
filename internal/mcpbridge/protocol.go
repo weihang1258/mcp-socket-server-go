@@ -153,20 +153,31 @@ func (c *Client) recvN(n int) ([]byte, error) {
 }
 
 // recvUntilTimeout 首 chunk 后 0.5s 短探（裸 JSON/inline）。
+//
+// 错误区分（六轮验收 P2）：只有超时走「空/已收即返回」（Python except
+// socket.timeout: return）；reset/EOF 冒泡——Python 里 ConnectionResetError
+// 同样冒泡，吞掉会让上层拿空/残缺字节去 json.Unmarshal，报成
+// "unexpected end of JSON input"，误导往协议不兼容排查。
 func (c *Client) recvUntilTimeout(probe time.Duration) ([]byte, error) {
 	var out []byte
 	c.conn.SetReadDeadline(time.Now().Add(time.Duration(c.Timeout) * time.Second))
 	buf := make([]byte, 65536)
 	n, err := c.conn.Read(buf)
 	if err != nil {
-		return out, nil // 超时即空（Python except socket.timeout: return）
+		if isTimeout(err) {
+			return out, nil // 超时即空（Python except socket.timeout: return）
+		}
+		return nil, err // reset/EOF 冒泡
 	}
 	out = append(out, buf[:n]...)
 	c.conn.SetReadDeadline(time.Now().Add(probe))
 	for {
 		n, err = c.conn.Read(buf)
 		if err != nil {
-			break // 短探超时结束
+			if isTimeout(err) {
+				break // 短探超时结束
+			}
+			return nil, err // 数据中途 reset/EOF：冒泡，让调用方看到真实原因
 		}
 		out = append(out, buf[:n]...)
 	}
@@ -582,6 +593,29 @@ func NewTargetPool(host string, port int) *TargetPool {
 	return p
 }
 
+// isTimeout 网络超时判定（net.Error.Timeout()）。
+func isTimeout(err error) bool {
+	ne, ok := err.(interface{ Timeout() bool })
+	return ok && ne.Timeout()
+}
+
+// probeAlive 空闲连接存活探针：1ms 读探针，零协议开销。
+// 静默（i/o timeout）= 活；EOF/reset = 对端已死；读到数据 = 上次响应残留
+// 协议错位，同样视为死。复用前先验，死的丢弃——否则靶机重启后池里每条
+// 半开连接各吞一次请求（六轮验收 P2）。
+func probeAlive(c *Client) bool {
+	if c.conn == nil {
+		return false
+	}
+	c.conn.SetReadDeadline(time.Now().Add(time.Millisecond))
+	buf := make([]byte, 1)
+	_, err := c.conn.Read(buf)
+	if err == nil {
+		return false
+	}
+	return isTimeout(err)
+}
+
 // Acquire 借出（borrow 超时）；复用同步 socket_timeout（N8）；connect 失败回滚计数。
 func (p *TargetPool) Acquire(borrowTimeout, socketTimeout int) (*Client, error) {
 	deadline := time.Now().Add(time.Duration(borrowTimeout) * time.Second)
@@ -594,14 +628,14 @@ func (p *TargetPool) Acquire(borrowTimeout, socketTimeout int) (*Client, error) 
 		}
 		p.condWait(remain)
 	}
-	// 复用空闲连接；过期的收集锁外关闭
+	// 复用空闲连接；过期/探针判死的收集锁外关闭
 	var reuse *Client
 	var expired []*Client
 	now := time.Now()
 	for len(p.idle) > 0 {
 		pc := p.idle[len(p.idle)-1]
 		p.idle = p.idle[:len(p.idle)-1]
-		if now.Sub(pc.lastUsed) > poolIdleTimeoutSec*time.Second {
+		if now.Sub(pc.lastUsed) > poolIdleTimeoutSec*time.Second || !probeAlive(pc.c) {
 			expired = append(expired, pc.c)
 			continue
 		}

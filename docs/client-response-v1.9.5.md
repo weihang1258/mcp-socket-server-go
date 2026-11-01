@@ -1,7 +1,7 @@
 # 客户端安全与质量反馈 —— 处理回函
 
-**版本**：socketstack v1.9.5 ~ v1.9.11
-**日期**：2026-10-30 初版，2026-11-01 修订（含 v1.9.7 ~ v1.9.11）
+**版本**：socketstack v1.9.5 ~ v1.9.12
+**日期**：2026-10-30 初版，2026-11-01 修订（含 v1.9.7 ~ v1.9.12）
 
 ---
 
@@ -333,12 +333,12 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 ## 十一、升级方式
 
 发布页：
-`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.11`
+`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.12`
 资产：`socket_server`（单个自包含二进制，无外部依赖）
 
 国内下载（GitHub 直链不可达时）：
-`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.11/socket_server`
-`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.11/socket_server`
+`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.12/socket_server`
+`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.12/socket_server`
 
 安装：
 `sudo ./socket_server install`（仅 agent）
@@ -438,3 +438,30 @@ sha256sum ...   # 与发布方核对
 
 - 防火墙清除行为已写进 §二 P1-3（具体命令 + 「手工规则重启即失效」警示）
 - 已闭环项对照表收到，与我们的记录一致
+
+
+---
+
+## 十四、v1.9.12 —— 靶机重启瞬间并发全败 + JSON 错误文案误导（P2）
+
+验收实测的三种现象同源，两处修复：
+
+### 1. 池里死连接直接复用 → Acquire 复用前探活
+
+`TargetPool.Acquire` 弹出空闲连接后直接交给调用方，零存活校验。靶机重启后池里 N 条半开连接，每条吞掉一次请求：并发 N 路 → 同一时刻集中失败 N 条（验收 5 路全败两轮复现）。
+
+修复：复用前 1ms 读探针——静默=活；EOF/reset=对端已死；读到数据=上次响应残留（协议错位）同样判死。探针零协议开销（不发包，靠 read deadline），死连接丢弃后自动新建。重启瞬间的失败模式从「N 条全败」收敛为「至多在途请求 1 条」。
+
+### 2. 读错误被吞成空响应 → reset/EOF 冒泡
+
+`recvUntilTimeout` 第一个 Read 的错误不分青红皂白返回空（注释写的「超时即空」）——超时**和**连接重置走同一分支。上层拿空字节去 `json.Unmarshal`，报成 `unexpected end of JSON input`。
+
+这个文案会让排查往「协议不兼容 / 数据截断」方向走，定性成本高（验收原话）。实际 Python 版语义就是：`socket.timeout` 才返回空，`ConnectionResetError` 冒泡。修复后对齐：只有超时保持「空/已收即返回」，reset/EOF 作为真实错误上抛，调用方看到的是 `connection reset by peer` 这类可判读原因。
+
+受影响工具：version / isfile / isdir / capture_start / capture_stop / replay_run / socket_listen（走 `recvUntilTimeout`）；cmd_exec 走 `recvGzipRaw` 不受第二处影响，探活两处都受益。
+
+### 3. 修复后行为（同一场景预期）
+
+- 重启瞬间在途请求：仍可能失败 **1 条**（请求已发出、服务端消失，这属于物理现实，任何客户端都救不了），文案为真实原因（`connection reset by peer`）
+- 其余并发请求：探针剔除死连接后新建，正常返回
+- 静默超时契约不变（超时=空，Python 语义）
