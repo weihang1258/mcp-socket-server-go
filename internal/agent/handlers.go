@@ -9,7 +9,7 @@ import (
 )
 
 // Version 靶机版本号（dt14/dt19 上报；发行时 -ldflags 覆盖）。
-var Version = "1.9.15"
+var Version = "1.9.16"
 
 // Repo 升级互操作的仓库标识（dt19）。
 const Repo = "weihang1258/socket_server"

@@ -750,8 +750,9 @@ func isConnLost(err error) bool {
 	return msg == io.EOF.Error() || strings.Contains(msg, "connection reset")
 }
 
-// Batch 并发执行（全局 50 并发上限）。
-func (s *Scheduler) Batch(targets []string, port int, timeout int, fn func(c *Client) (any, error)) []TargetResult {
+// Batch 并发执行（全局 50 并发上限）。retrySafe 语义同 runBatch——调用点必须
+// 表态（八轮验收：此前写死 true，走此通道的新工具会静默拿到可重试文案档）。
+func (s *Scheduler) Batch(targets []string, port int, timeout int, retrySafe bool, fn func(c *Client) (any, error)) []TargetResult {
 	var wg sync.WaitGroup
 	results := make([]TargetResult, len(targets))
 	for i, host := range targets {
@@ -770,8 +771,7 @@ func (s *Scheduler) Batch(targets []string, port int, timeout int, fn func(c *Cl
 			data, err := fn(c)
 			if err != nil {
 				healthy = false
-				// 现有两路调用（pcap_flow_extract 只读 / capture_stop 幂等）均重发安全
-				results[i] = TargetResult{Target: host, Ok: false, Err: connErrText(err, true)}
+				results[i] = TargetResult{Target: host, Ok: false, Err: connErrText(err, retrySafe)}
 			} else {
 				results[i] = TargetResult{Target: host, Ok: true, Data: data}
 			}

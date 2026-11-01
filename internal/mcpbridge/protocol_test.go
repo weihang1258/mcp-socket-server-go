@@ -517,7 +517,7 @@ func TestRunBatchConnLostNonIdempotentText(t *testing.T) {
 	}()
 	addr := l.Addr().(*net.TCPAddr)
 	b := newTestBridge(t)
-	for _, tool := range []string{"cmd_exec", "replay_run"} { // 各非幂等调用点同传 false，此处抽验
+	for _, tool := range []string{"cmd_exec", "replay_run"} { // 机制层；工具→档位映射由 TestToolConnLostTierMapping 锁
 		out := b.runBatch(context.Background(), []string{"127.0.0.1"}, addr.Port, LkNone, "", tool, nil, false, 5,
 			func(c *Client) (any, error) { return c.Version() })
 		failed := out["failed"].([]map[string]any)

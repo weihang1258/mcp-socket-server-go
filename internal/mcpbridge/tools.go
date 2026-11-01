@@ -486,7 +486,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 	add(s, ro("pcap_flow_extract", "提取 pcap 五元组流(datatype 200,只读)。>1000 条截断。protoType: 1=TCP 2=UDP 4=ICMP。"),
 		func(ctx context.Context, a pcapFlowArgs) any {
 			resolved := b.resolve(a.Targets)
-			results := b.Sched.Batch(resolved, orDefault(a.Port, 9000), orDefault(a.Timeout, 30), func(c *Client) (any, error) {
+			results := b.Sched.Batch(resolved, orDefault(a.Port, 9000), orDefault(a.Timeout, 30), true, func(c *Client) (any, error) {
 				return c.PcapFlowExtractRaw(a.PcapDir)
 			})
 			okN := 0
@@ -582,7 +582,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 		func(ctx context.Context, a captureStopArgs) any {
 			path := orDefaultStr(a.Path, "/home/tmp/tmp.pcap")
 			t0 := time.Now()
-			results := b.Sched.Batch(b.resolve(a.Targets), orDefault(a.Port, 9000), orDefault(a.Timeout, 30), func(c *Client) (any, error) {
+			results := b.Sched.Batch(b.resolve(a.Targets), orDefault(a.Port, 9000), orDefault(a.Timeout, 30), true, func(c *Client) (any, error) {
 				return c.CaptureStop(path)
 			})
 			okN := 0

@@ -396,3 +396,88 @@ func TestUpgradeRunApplyLostStillPolls(t *testing.T) {
 		t.Fatalf("results: %v", out)
 	}
 }
+
+// 工具→断连文案档位的映射锁（八轮验收 P2）：此前 TestRunBatchConnLostNonIdempotentText
+// 锁的是 runBatch 入参——测试自己传 false，把 tools.go 里 cmd_exec 的实参改成 true
+// 它照样绿；Sched.Batch 通道的 retrySafe 写死在函数体，调用点连表态的参数都没有。
+// 本测试经真实工具注册路径（SDK CallTool → 工具 handler → 调用点实参）逐工具断言：
+// 改错任何一个调用点的实参、或 Sched.Batch 的写死值，这里就红。
+func TestToolConnLostTierMapping(t *testing.T) {
+	b := newTestBridge(t)
+	b.proxyResolved = "" // 真机 legacy proxy= 兜底会劫持下载到 127.0.0.1
+
+	// 靶机模拟：listener 活着（dial 判活必过），请求一收到即断连（在途 EOF）
+	m := newMockServerOn(t, "127.0.0.2", func(dt int32, p []byte, w *mockConnIO) {
+		w.drop()
+	})
+	tgt := "127.0.0.2"
+	pt := portOf(m.Addr)
+
+	// upgrade_run 腿需要中央下载先成功：fake release 供包
+	content := []byte("UPGRADE-BIN")
+	sum := sha256Of(content)
+	releaseMux := http.NewServeMux()
+	releaseMux.HandleFunc("/v1.9.1/socket_server", func(w http.ResponseWriter, r *http.Request) { w.Write(content) })
+	releaseMux.HandleFunc("/v1.9.1/socket_server.sha256", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, sum) })
+	prevRel := releaseBase
+	releaseBase = startHTTP(t, releaseMux).URL
+	t.Cleanup(func() { releaseBase = prevRel })
+
+	srv := NewServer(b)
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
+		&mcp.StreamableHTTPOptions{DisableLocalhostProtection: true})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, nil).
+		Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("客户端连接失败: %v", err)
+	}
+	defer cs.Close()
+
+	cases := []struct {
+		tool      string
+		args      map[string]any
+		wantRetry bool // true=可重试档（只读/幂等）；false=状态未知档（非幂等）
+	}{
+		{"version", map[string]any{"targets": []string{tgt}, "port": pt, "timeout": 3}, true},
+		{"isfile", map[string]any{"targets": []string{tgt}, "path": "/x", "port": pt, "timeout": 3}, true},
+		{"isdir", map[string]any{"targets": []string{tgt}, "path": "/x", "port": pt, "timeout": 3}, true},
+		{"pcap_flow_extract", map[string]any{"targets": []string{tgt}, "pcap_dir": "/x", "port": pt, "timeout": 3}, true},
+		{"capture_stop", map[string]any{"targets": []string{tgt}, "path": "/x.pcap", "port": pt, "timeout": 3}, true},
+		{"cmd_exec", map[string]any{"targets": []string{tgt}, "args": "echo x", "port": pt, "timeout": 3}, false},
+		{"capture_start", map[string]any{"targets": []string{tgt}, "path": "/home/tmp/t.pcap", "port": pt, "timeout": 3}, false},
+		{"socket_listen", map[string]any{"targets": []string{tgt}, "action": "start", "listen_port": 30001, "port": pt, "timeout": 3}, false},
+		{"boce_run", map[string]any{"targets": []string{tgt}, "url": "http://127.0.0.1:1/", "timeout": 10, "port": pt}, false},
+		{"replay_run", map[string]any{"targets": []string{tgt}, "pcaps": []string{"/x.pcap"}, "uplink_iface": "lo", "downlink_iface": "lo", "port": pt, "timeout": 3}, false},
+		{"upgrade_run", map[string]any{"targets": []string{tgt}, "version": "1.9.1", "force": true, "port": pt}, false},
+	}
+	for _, tc := range cases {
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: tc.tool, Arguments: tc.args})
+		if err != nil {
+			t.Fatalf("%s: 调用失败: %v", tc.tool, err)
+		}
+		out, _ := res.StructuredContent.(map[string]any)
+		failed, _ := out["failed"].([]any)
+		if len(failed) != 1 {
+			t.Fatalf("%s: 应恰 1 条失败: %v", tc.tool, out)
+		}
+		reason := fmt.Sprint(failed[0].(map[string]any)["reason"])
+		gotRetry := strings.Contains(reason, "请稍后重试")
+		gotUnknown := strings.Contains(reason, "勿直接重试")
+		if tc.wantRetry && !gotRetry {
+			t.Errorf("%s: 应为可重试档，实际: %v", tc.tool, reason)
+		}
+		if !tc.wantRetry && !gotUnknown {
+			t.Errorf("%s: 应为状态未知档，实际: %v", tc.tool, reason)
+		}
+		if gotRetry && gotUnknown {
+			t.Errorf("%s: 两档文案混叠: %v", tc.tool, reason)
+		}
+		if !strings.Contains(reason, "靶机连接已断") {
+			t.Errorf("%s: 应为断连语义文案，实际: %v", tc.tool, reason)
+		}
+	}
+}
