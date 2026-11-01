@@ -1,7 +1,7 @@
 # 客户端安全与质量反馈 —— 处理回函
 
-**版本**：socketstack v1.9.5 ~ v1.9.15
-**日期**：2026-10-30 初版，2026-11-01 修订（含 v1.9.7 ~ v1.9.15）
+**版本**：socketstack v1.9.5 ~ v1.9.16
+**日期**：2026-10-30 初版，2026-11-01 修订（含 v1.9.7 ~ v1.9.16）
 
 ---
 
@@ -333,13 +333,13 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 ## 十一、升级方式
 
 发布页：
-`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.15`
+`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.16`
 资产：`socket_server`（单个自包含二进制，无外部依赖，静态链接）
-sha256：`55c10152247522fe69c70f9e1f3bfca2cda30d816edd91dfabe79c6ec208e1b6`
+sha256：`ae017c48213bfcbd7908d58a7035b8fb5a49a58391f5a5f6b238984505998f0c`
 
 国内下载（GitHub 直链不可达时）：
-`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.15/socket_server`
-`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.15/socket_server`
+`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.16/socket_server`
+`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.16/socket_server`
 
 安装：
 `sudo ./socket_server install`（仅 agent）
@@ -599,3 +599,84 @@ cmd_exec: rm -f /tmp/idem4.txt; systemd-run --on-active=10 \
   `TestRunBatchEOFGetsFriendlyText`（version 档保持可重试文案）。
 - 真机（真 MCP `:9010`）：v1.9.15 部署后重跑第 1 条同款复现命令，cmd_exec
   返回新档文案；version/isfile/list_targets/cmd_exec 正常路径回归通过。
+
+---
+
+## 十七、v1.9.16 —— 分档的两处旁路收口（2026-11-01，当日第二轮）
+
+验收对 v1.9.15 的源码核对结论全部属实，先回应结论再逐一处置：
+
+**「文案分档本身改对了，真机验证通过」**——确认。两处旁路都是**保证缺失**
+而非行为错误：今天线上的每个工具拿到的档位都是对的，但「改错也不会被发现」
+的通道存在。回函 §十六.3 的「编译期强制」只对 runBatch 的 10 个调用点成立，
+**在 Sched.Batch 这条并行通道上不成立，该句如实收回**；§十六.2 第 2 条复盘的
+「统一处理掩盖语义差异」确实在旁路里残留了一份。
+
+### 1. Sched.Batch 写死 retrySafe=true —— 属实，已改参数化（v1.9.16）
+
+验收分析准确：Sched.Batch 是 runBatch 之外的第二条执行通道，档位写死在
+函数体里，调用点连表态的参数都没有。当前两路调用（pcap_flow_extract、
+capture_stop）恰好都重发安全，所以线上行为无错——但任何新增工具沿用
+Sched.Batch（现成写法、少传 2 个参数）就会静默拿到可重试档，这正是 §十六
+声称已堵死的那类错误。
+
+**修复**：`Scheduler.Batch` 签名增加 `retrySafe bool` 参数，两个调用点显式
+传 true（pcap_flow_extract 只读 / capture_stop 幂等）。至此两条通道（runBatch
++ Batch）的所有调用点都由编译期强制表态。
+
+### 2. 单测锁入参不锁映射 —— 属实，已补经真实注册路径的映射锁（v1.9.16）
+
+验收对 `TestRunBatchConnLostNonIdempotentText` 的解剖完全正确：测试自己把
+false 塞给 runBatch，tools.go 里 cmd_exec 的实参改成 true 它照样绿——
+「本次起测试按档断言」做到了，按**工具**断言没做到。§十六.2 第 3 条的
+承诺只兑现了一半。
+
+**修复**：新增 `TestToolConnLostTierMapping`，经**真实工具注册路径**（SDK
+CallTool → 工具 handler → 调用点实参）对 11 个带档位语义的工具逐个断言：
+version/isfile/isdir/pcap_flow_extract/capture_stop → 可重试档；
+cmd_exec/capture_start/socket_listen/boce_run/replay_run/upgrade_run →
+状态未知档。**变异验证**（改错实参必须变红，否则测试无效）已逐项执行：
+
+| 变异 | 预期 | 实测 |
+|---|---|---|
+| tools.go cmd_exec 实参 false→true | cmd_exec 腿红 | ✅ 红 |
+| tools.go version 实参 true→false | version 腿红 | ✅ 红 |
+| Sched.Batch 写死值 true→false（v1.9.15 代码） | pcap/capture_stop 腿红 | ✅ 红 |
+
+（原 `TestRunBatchConnLostNonIdempotentText` 保留为机制层测试，注释已改为
+指向映射锁。）
+
+### 3. 只读档真机证据 —— 本轮已补齐（含 Sched.Batch 新参数路径的真机验证）
+
+验收在端口拒绝窗口内 3 次尝试全被建连重试兜住（各 1.003s 成功）——这与
+v1.9.13 §十四.1 的实测一致：TERM 后 ≥几毫秒发起的调用毫秒级自愈，version
+这类毫秒级完成的只读调用要**在途**撞上重启，只能靠拉长它的执行时长。
+
+本轮用 pcap_flow_extract（走 Sched.Batch 通道的只读工具）制造确定性命中：
+10 万个 20KB pcap 文件的目录把 dt200 执行拉长到分钟级，与定时重启同拍发射
+→ 提取在途跨过重启，真机返回：
+
+```
+{"failed":[{"reason":"靶机连接已断（靶机可能正在重启，请稍后重试）: EOF",
+            "target":"10.12.131.82"}],"ok":0,"results":[]}
+```
+
+即**可重试档在真机出现**，且这次失败恰好流经 v1.9.16 新参数化的
+Sched.Batch 通道——两个收口点的真机行为一次验证。前两次尝试（2KB 模板、
+35s/25s 定时）未命中，属提取时长短于窗口，与档位无关。
+
+### 4. 对验收更正的确认
+
+接受更正，我方代码核对结论一致：`recvUntilTimeout` 首读用
+`c.Timeout × time.Second`（protocol.go:163），cmd_exec 的 c.Timeout 就是
+60，**没有更短读超时**；probeAlive 的 1ms deadline 在 send 前被重置。
+「10.166s」是 `--on-active` 预约重启的实际触发时刻（v1.9.15 复现命令里
+重启定在命令发出后 ~10s，与回执耗时恰好同形，造成误读）。「耗时无法判读
+执行进度」的结论方向不变，成因表述以本轮更正为准。
+
+### 5. 验证与发布
+
+- 单测 `-race` 全绿（含新增映射锁）；三组变异验证全红
+- v1.9.16 已发版（sha `ae017c48…`，静态链接，镜像回源 sha 核对一致），
+  35/82 双机 upgrade_run 升级闭环；cmd_exec/isfile/version/list_targets
+  正常路径回归通过
