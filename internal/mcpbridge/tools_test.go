@@ -530,3 +530,28 @@ func TestToolConnLostTierMapping(t *testing.T) {
 		}
 	}
 }
+
+// B18 note 回归（全量功能扫出自查）：cmd_exec wait=false 时 agent 回 "null"，
+// 客户端返回 nil map；fn 直接 `return c.CmdExec(...)` 把 **typed nil map** 装进
+// any——runOne 的 `case nil` 不匹配、`case map[string]any` 里 v==nil 落空，
+// note 成死代码（Python 版此处回执带 note）。v 為 nil map 必须与裸 nil 同义。
+func TestRunBatchTypedNilGetsNote(t *testing.T) {
+	b := newTestBridge(t)
+	m := newMockServer(t, func(dt int32, p []byte, w *mockConnIO) {
+		if dt == 1 {
+			w.text("null") // agent wait=false 契约：json null
+		}
+	})
+	out := b.runBatch(context.Background(), []string{m.Addr}, portOf(m.Addr), LkNone, "", "", nil, false, 5,
+		func(c *Client) (any, error) {
+			var r map[string]any // 模拟 fn 直返客户端结果的 typed nil
+			return r, nil
+		})
+	rows := out["results"].([]map[string]any)
+	if len(rows) != 1 {
+		t.Fatalf("应 1 行: %v", out)
+	}
+	if _, has := rows[0]["note"]; !has {
+		t.Fatalf("typed nil 必须与裸 nil 同义（note 不得丢失）: %v", rows[0])
+	}
+}

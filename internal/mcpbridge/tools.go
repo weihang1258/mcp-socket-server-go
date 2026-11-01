@@ -165,7 +165,9 @@ func (b *Bridge) runOne(r *TargetResult, hp string, port int, class Lk, lockKey 
 	} else {
 		switch v := data.(type) {
 		case map[string]any:
-			if e, has := v["_error"]; has { // 通用失败通道
+			if v == nil { // typed nil map（fn 直返客户端结果的 wait=false 路径）与裸 nil 同义
+				data = map[string]any{"note": "wait=false 为异步执行不返回回显;需要 stdout 请 wait=true"} // B18
+			} else if e, has := v["_error"]; has { // 通用失败通道
 				ok = false
 				*r = TargetResult{Target: hp, Ok: false, Err: fmt.Sprint(e)}
 				data = nil
