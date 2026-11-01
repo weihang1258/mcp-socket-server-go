@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -306,5 +307,92 @@ func TestUpgradeRunDownloadFailureWritesAudit(t *testing.T) {
 	}
 	if e.Tool != "upgrade_run" || e.FailedCount != 1 {
 		t.Fatalf("审计应为 upgrade_run/failed=1: %+v", e)
+	}
+}
+
+// dt20 apply 响应丢失（EOF）时升级可能已实际完成（靶机切链后自杀式重启与
+// 响应存在竞态，2026-11-01 真机两次 upgrade_run 均撞到，一次实成一次实败）。
+// 该靶机必须照常进入确认轮询、由 dt14 版本终审判定，而不是直接记推送失败
+// 跳过轮询。走真实 handler 闭包 + SDK 链路（不经 upgradeRunForTest 复制品）。
+func TestUpgradeRunApplyLostStillPolls(t *testing.T) {
+	b := newTestBridge(t)
+	b.proxyResolved = "" // 真机 /opt/socket/config 的 legacy proxy= 会兜底进 127.0.0.1 下载 → 502
+	content := []byte("UPGRADE-BIN")
+	sum := sha256Of(content)
+
+	releaseMux := http.NewServeMux()
+	releaseMux.HandleFunc("/v1.9.1/socket_server", func(w http.ResponseWriter, r *http.Request) { w.Write(content) })
+	releaseMux.HandleFunc("/v1.9.1/socket_server.sha256", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, sum)
+	})
+	prevRel := releaseBase
+	releaseBase = startHTTP(t, releaseMux).URL
+	t.Cleanup(func() { releaseBase = prevRel })
+
+	// :9001 推包接收端：200 {"ok":true}。绑 127.0.0.2（PushBinary 打 c.Host）
+	ln, err := net.Listen("tcp", "127.0.0.2:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushOK := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true,"path":"/x","size":1}`))
+	})
+	pushSrv := &http.Server{Handler: pushOK}
+	go pushSrv.Serve(ln) //nolint:errcheck // 测试接收端
+	t.Cleanup(func() { pushSrv.Close(); ln.Close() })
+	prevPort := pushHTTPPort
+	pushHTTPPort = ln.Addr().(*net.TCPAddr).Port
+	t.Cleanup(func() { pushHTTPPort = prevPort })
+
+	// 靶机：预检 1.8.3 → dt20 收到即断连（响应丢失竞态）→ 之后版本翻成 1.9.1。
+	// 绑 127.0.0.2：真实 handler 的 resolve 会剥 targets 端口（Python registry
+	// 语义），127.0.0.1 会打中真机自身 agent（实测踩过）。
+	var applied atomic.Bool // handler 跑在多连接 goroutine 上，-race 要求同步
+	m := newMockServerOn(t, "127.0.0.2", func(dt int32, p []byte, w *mockConnIO) {
+		switch dt {
+		case 14:
+			if applied.Load() {
+				w.text(`"1.9.1"`) // 升级后新版本（轮询确认用）
+			} else {
+				w.text(`"1.8.3"`)
+			}
+		case 20:
+			applied.Store(true) // 切链+自杀重启开始：响应永不送出
+			w.drop()
+		}
+	})
+
+	srv := NewServer(b)
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv },
+		&mcp.StreamableHTTPOptions{DisableLocalhostProtection: true})
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "0"}, nil).
+		Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("客户端连接失败: %v", err)
+	}
+	defer cs.Close()
+
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "upgrade_run",
+		Arguments: map[string]any{"targets": []string{m.Addr}, "version": "1.9.1", "port": portOf(m.Addr)},
+	})
+	if err != nil {
+		t.Fatalf("upgrade_run 调用失败: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("upgrade_run 回执错误: %+v", res.Content)
+	}
+	out := res.StructuredContent.(map[string]any)
+	if out["ok"] != float64(1) {
+		t.Fatalf("apply 响应丢失但升级实际完成，应经轮询确认 upgraded=1: %v", out)
+	}
+	results := out["results"].([]any)
+	if len(results) != 1 || results[0].(map[string]any)["upgraded"] != true {
+		t.Fatalf("results: %v", out)
 	}
 }

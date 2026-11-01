@@ -40,6 +40,7 @@ type mockConnIO struct {
 func (m *mockConnIO) raw(b []byte)             { m.conn.Write(b) }
 func (m *mockConnIO) text(s string)            { m.conn.Write([]byte(s)) }
 func (m *mockConnIO) frame(dt int32, p []byte) { m.conn.Write(frame.Encode(dt, p)) }
+func (m *mockConnIO) drop()                    { m.conn.Close() } // 模拟响应丢失（对端自杀式断连 → 客户端 EOF）
 func (m *mockConnIO) fileResp(gz bool, c []byte) {
 	n := make([]byte, 8)
 	binary.LittleEndian.PutUint64(n, uint64(len(c)))
@@ -49,7 +50,14 @@ func (m *mockConnIO) fileResp(gz bool, c []byte) {
 
 func newMockServer(t *testing.T, handler func(dt int32, payload []byte, w *mockConnIO)) *mockServer {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	return newMockServerOn(t, "127.0.0.1", handler)
+}
+
+// newMockServerOn 指定绑定地址（127.0.0.2 等 loopback 别名——真实 handler 的
+// resolve 会剥 targets 端口，127.0.0.1 会打中真机自身 agent 的测试用它隔离）。
+func newMockServerOn(t *testing.T, host string, handler func(dt int32, payload []byte, w *mockConnIO)) *mockServer {
+	t.Helper()
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
 		t.Fatal(err)
 	}

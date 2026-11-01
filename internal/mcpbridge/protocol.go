@@ -733,11 +733,16 @@ func (s *Scheduler) GetPool(host string, port int) *TargetPool {
 // 上下文，现场无法判断「等一秒重试即可」。包装成可判读文案，原始原因保留在尾
 // 部供定位。
 func connErrText(err error) string {
-	msg := err.Error()
-	if msg == io.EOF.Error() || strings.Contains(msg, "connection reset") {
-		return "靶机连接已断（靶机可能正在重启，请稍后重试）: " + msg
+	if isConnLost(err) {
+		return "靶机连接已断（靶机可能正在重启，请稍后重试）: " + err.Error()
 	}
-	return msg
+	return err.Error()
+}
+
+// isConnLost 连接级断开（EOF/reset）——服务端消失的两种表现。
+func isConnLost(err error) bool {
+	msg := err.Error()
+	return msg == io.EOF.Error() || strings.Contains(msg, "connection reset")
 }
 
 // Batch 并发执行（全局 50 并发上限）。

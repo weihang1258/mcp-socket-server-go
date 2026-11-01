@@ -794,6 +794,13 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 					}
 					resp, err := c.UpgradeApply(ver, sha, a.Force)
 					if err != nil {
+						// dt20 由靶机切链后自杀式重启收尾：响应与重启存在竞态，
+						// EOF/reset 时升级可能已实际完成（2026-11-01 真机两次
+						// upgrade_run 均撞到，一次实成一次实败）。标记后照常进入
+						// 确认轮询、由 dt14 版本终审判定，不直接记推送失败。
+						if isConnLost(err) {
+							return map[string]any{"_applyLost": true, "from_version": cur}, nil
+						}
 						return nil, err
 					}
 					if e, has := resp["error"].(string); has {
@@ -810,7 +817,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 			var pushed []map[string]any
 			if rows, ok := batch["results"].([]map[string]any); ok {
 				for _, r := range rows {
-					if r["pushed"] == true {
+					if r["pushed"] == true || r["_applyLost"] == true {
 						pushed = append(pushed, r)
 					}
 				}
@@ -864,6 +871,9 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 				if confirmed[t] {
 					results = append(results, map[string]any{"target": t, "upgraded": true,
 						"version": ver, "from_version": it["from_version"]})
+				} else if it["_applyLost"] == true {
+					failed = append(failed, map[string]any{"target": t,
+						"reason": "dt20 响应丢失（与靶机重启竞态）且 180 秒内未确认到新版本，升级可能未完成，请查靶机日志 /var/log/socket_server.log"})
 				} else {
 					failed = append(failed, map[string]any{"target": t,
 						"reason": "推送已受理但 180 秒内未确认到新版本（端口未释放/重启异常），请查靶机日志 /var/log/socket_server.log"})
