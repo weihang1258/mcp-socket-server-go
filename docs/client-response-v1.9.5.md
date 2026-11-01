@@ -1,7 +1,7 @@
 # 客户端安全与质量反馈 —— 处理回函
 
-**版本**：socketstack v1.9.5 ~ v1.9.12
-**日期**：2026-10-30 初版，2026-11-01 修订（含 v1.9.7 ~ v1.9.12）
+**版本**：socketstack v1.9.5 ~ v1.9.13
+**日期**：2026-10-30 初版，2026-11-01 修订（含 v1.9.7 ~ v1.9.13）
 
 ---
 
@@ -333,12 +333,12 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 ## 十一、升级方式
 
 发布页：
-`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.12`
+`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.13`
 资产：`socket_server`（单个自包含二进制，无外部依赖）
 
 国内下载（GitHub 直链不可达时）：
-`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.12/socket_server`
-`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.12/socket_server`
+`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.13/socket_server`
+`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.13/socket_server`
 
 安装：
 `sudo ./socket_server install`（仅 agent）
@@ -442,26 +442,63 @@ sha256sum ...   # 与发布方核对
 
 ---
 
-## 十四、v1.9.12 —— 靶机重启瞬间并发全败 + JSON 错误文案误导（P2）
+## 十四、v1.9.12 → v1.9.13 —— 靶机重启瞬间并发失败（P2，含我方结论更正）
 
-验收实测的三种现象同源，两处修复：
+v1.9.12 回函断言「重启瞬间至多在途 1 条失败」，**验收复测证伪（7/7 复现并发 N 条全败），本节如实更正**，并依据真机实测把机制讲清。
 
-### 1. 池里死连接直接复用 → Acquire 复用前探活
+### 1. 机制更正：重启瞬间的并发全败是「请求在途」的物理失败，不是复用错判
 
-`TargetPool.Acquire` 弹出空闲连接后直接交给调用方，零存活校验。靶机重启后池里 N 条半开连接，每条吞掉一次请求：并发 N 路 → 同一时刻集中失败 N 条（验收 5 路全败两轮复现）。
+我们用与验收完全一致的场景做了系统实测（真 MCP `:9010`、真靶机 82、
+`systemd-run --on-active` 定时重启、5 路栅栏齐发、按「齐发时刻相对 TERM
+的偏移」从 -300ms 扫到 +300ms 共 12 组，v1.9.12 与 v1.9.13 两版对照）：
 
-修复：复用前 1ms 读探针——静默=活；EOF/reset=对端已死；读到数据=上次响应残留（协议错位）同样判死。探针零协议开销（不发包，靠 read deadline），死连接丢弃后自动新建。重启瞬间的失败模式从「N 条全败」收敛为「至多在途请求 1 条」。
+- **TERM 后任何 ≥ 几毫秒发起的调用都能毫秒级自愈**：靶机 agent 无优雅
+  关停（SIGTERM 即死），FIN 亚毫秒到达中央、`systemctl restart` 的
+  停→起间隙 <300ms。v1.9.12 的 1ms 读探针在这些时刻全部正确判死、
+  新建即成功——12 组偏移实测 **0 失败**（两版同）。
+- **验收 7/7 复现的「并发 N 全败 + 裸 EOF」只能发生在另一种情形**：5 路
+  请求已发出、响应未回的毫秒级窗口内进程恰好死亡（请求在途跨 TERM）。
+  这与连接池、探针均无关——**请求已发出，服务端没了，任何客户端都救不了**。
+  失败条数 = 在途并发数，故「并发 N → 全败 N」。我方此前「至多在途 1 条」
+  的说法撤回；v1.9.12 探针在这个场景里确实无能为力，但根因不是探针判活
+  误判（该窗口在真机 <1ms），而是「请求已发出」这一物理事实。
+- 探针误判复用（读探针在 FIN 传播窗内判活→复用→EOF）在原理上存在，但
+  实测该窗口在现网 <1ms，**不是**验收 7/7 的主因。
 
-### 2. 读错误被吞成空响应 → reset/EOF 冒泡
+### 2. v1.9.13 的三处改进（如实定位各自的价值）
 
-`recvUntilTimeout` 第一个 Read 的错误不分青红皂白返回空（注释写的「超时即空」）——超时**和**连接重置走同一分支。上层拿空字节去 `json.Unmarshal`，报成 `unexpected end of JSON input`。
+1. **复用前 dial 验证**：弹出空闲连接后，除读探针外再对靶机做一次
+   TCP 握手（300ms 上限，不发数据）。进程死=监听 socket 关=新 SYN 即刻
+   RST，不受 FIN 传播影响——原理性堵死「探针判活但服务端已死」的复用路径。
+   代价是每次复用多一次建连握手（局域网 <1ms，有意取舍，见设计文档 §12）。
+2. **判死后不再报错，改走新建**：dial 判死的复用连接被丢弃后直接落入
+   新建路径，由建连退避重试（3 次、500ms 起翻倍）自然吃掉 restart 间隙；
+   只重试**建连**、绝不重发请求（cmd_exec 非幂等边界不变）。
+3. **在途失败的文案语义化**：对已发出请求遇到 EOF/reset 的场景（即验收
+   复现的「裸 EOF」），错误文案从裸 `EOF` 改为
+   `靶机连接已断（靶机可能正在重启，请稍后重试）: EOF`——真实原因保留在
+   尾部，现场可判读「等一秒重试即可」。
 
-这个文案会让排查往「协议不兼容 / 数据截断」方向走，定性成本高（验收原话）。实际 Python 版语义就是：`socket.timeout` 才返回空，`ConnectionResetError` 冒泡。修复后对齐：只有超时保持「空/已收即返回」，reset/EOF 作为真实错误上抛，调用方看到的是 `connection reset by peer` 这类可判读原因。
+### 3. 对「重启瞬间」的如实预期（验收方可按此验收 v1.9.13）
 
-受影响工具：version / isfile / isdir / capture_start / capture_stop / replay_run / socket_listen（走 `recvUntilTimeout`）；cmd_exec 走 `recvGzipRaw` 不受第二处影响，探活两处都受益。
+- 请求在途跨 TERM 的调用：**仍会失败，且条数 = 在途并发数**——这是物理，
+  我方不再承诺消除；文案为第 3 条的可判读形式。
+- TERM 后发起的调用：探针 + dial 双重校验后新建，正常返回；restart 间隙
+  内的调用由建连重试兜住（间隙 <300ms，实测无感）。
+- 静默超时契约不变（超时=空响应，Python 语义）。
 
-### 3. 修复后行为（同一场景预期）
+### 4. 验证方式
 
-- 重启瞬间在途请求：仍可能失败 **1 条**（请求已发出、服务端消失，这属于物理现实，任何客户端都救不了），文案为真实原因（`connection reset by peer`）
-- 其余并发请求：探针剔除死连接后新建，正常返回
-- 静默超时契约不变（超时=空，Python 语义）
+- 单测（`-race` 全绿）：`TestAcquireDialCheckRejectsReuseWhenListenerClosed`
+  （listener 已关、旧连接仍 ESTABLISHED 的 FIN 窗口模拟 → 弃复用走新建）、
+  `TestRunBatchEOFGetsFriendlyText`（accept-then-close = 请求在途服务端死 →
+  断言语义化文案）、`TestPoolAcquireSkipsDeadIdle`、`TestRecvUntilTimeoutErrorNotSwallowed`。
+- 真机（走真 MCP `:9010`，非自搭桩）：两版对照 12 组偏移齐发实测，
+  数据支撑本节第 1 条的机制结论；v1.9.13 已部署中央（35）与验证全程无回归。
+
+### 5. 顺带发现（提示项）
+
+并发压测**同一靶机的 `cmd_exec`** 时，MCP 侧有「锁类 shell 冲突」串行化
+保护（同靶机同时只放行 1 条，其余直接拒绝）——这是设计行为（防止并发
+shell 互相踩踏）。测并发请用 `version` / `isfile` 等只读工具；`cmd_exec`
+并发打同一靶机会先撞这把锁，读到的拒绝文案不是连接问题。

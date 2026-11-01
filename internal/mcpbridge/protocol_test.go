@@ -2,9 +2,11 @@ package mcpbridge
 
 import (
 	"bytes"
+	"context"
 	"compress/gzip"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -267,7 +269,7 @@ func TestPoolBasics(t *testing.T) {
 	p.Release(conns[0], true)
 	c6, err := p.Acquire(1, 5)
 	if err != nil {
-		t.Fatal("reuse after release")
+		t.Fatalf("reuse after release: %v", err)
 	}
 	if c6 != conns[0] {
 		t.Fatal("must reuse same client")
@@ -414,5 +416,74 @@ func TestPoolAcquireSkipsDeadIdle(t *testing.T) {
 		if !probeAlive(c) {
 			t.Fatalf("Acquire 返回的应是活连接（第 %d 次）", i)
 		}
+	}
+}
+
+// FIN 传播窗口（六轮验收 P2 复测）：服务端进程死亡瞬间，旧连接的 FIN 还没
+// 跨网到达——读探针读不到任何异常（判活），复用即 EOF，并发 N 路同时全败。
+// 读探针永远覆盖不了这个窗口；换 dial 验证：进程死=监听 socket 关=新 SYN
+// 即刻 RST，不受 FIN 传播影响。判死后弃复用走新建（connectWithRetry 退避
+// 吃重启窗口），最终报建连重试文案。
+func TestAcquireDialCheckRejectsReuseWhenListenerClosed(t *testing.T) {
+	// 模拟：listener 关闭（进程死）但已建立连接的 FIN 未达（客户端侧仍 ESTABLISHED）
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tcpL := l.(*net.TCPListener)
+	raw, err := net.DialTCP("tcp", nil, tcpL.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	// 服务端 accept 后立即关 listener（连接仍活——FIN 未达模拟）
+	srv, _ := l.Accept()
+	defer srv.Close()
+	l.Close()
+
+	addr := srv.LocalAddr().(*net.TCPAddr)
+	p := NewTargetPool("127.0.0.1", addr.Port)
+	c1 := NewClient("127.0.0.1", addr.Port, 5)
+	c1.conn = raw // 池中连接：本侧 ESTABLISHED，读探针必然判活
+	p.Release(c1, true)
+
+	c2, err := p.Acquire(1, 5)
+	if err == nil {
+		c2.Close()
+		t.Fatal("listener 已关：dial 验证应弃复用，新建也应失败")
+	}
+	if !strings.Contains(err.Error(), "靶机可能正在重启") {
+		t.Fatalf("应为建连失败文案（可判读），实际: %v", err)
+	}
+}
+
+// runBatch 的连接级错误文案语义化：裸 EOF 现场无法判断「等一秒重试即可」。
+func TestRunBatchEOFGetsFriendlyText(t *testing.T) {
+	// 服务端 accept 即关：Version 的读得到 EOF
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, e := l.Accept()
+			if e != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	addr := l.Addr().(*net.TCPAddr)
+	s := NewScheduler()
+	b := &Bridge{Sched: s}
+	out := b.runBatch(context.Background(), []string{"127.0.0.1"}, addr.Port, LkNone, "", "", nil, 5,
+		func(c *Client) (any, error) { return c.Version() })
+	failed := out["failed"].([]map[string]any)
+	if len(failed) != 1 {
+		t.Fatalf("应失败: %+v", out)
+	}
+	if !strings.Contains(fmt.Sprint(failed[0]["reason"]), "靶机可能正在重启") {
+		t.Fatalf("EOF 应带语义化文案，实际: %v", failed[0]["reason"])
 	}
 }

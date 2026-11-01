@@ -89,7 +89,9 @@ func TestFileServerPathAllowlist(t *testing.T) {
 	}
 
 	// GET 升级 staging → 200（dt20 链路）
-	staging := "/opt/socket/versions/1.9.11/.staging/socket_server"
+	// 版本号取永不存在的形态：不能写死现网版本——真机上 .staging 可能残留
+	// 历史测试/推送的文件（实测踩过），404 前提即被打破
+	staging := "/opt/socket/versions/99.99.99/.staging/socket_server"
 	// 真实 staging 文件在测试机上不存在 → 404（而非 403），证明白名单放行了
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/files?path="+staging, nil))
@@ -109,7 +111,9 @@ func TestFileServerPathAllowlist(t *testing.T) {
 	if w := post("/etc/evil"); w.Code != 403 {
 		t.Fatalf("白名单外 POST 应 403，got %d: %s", w.Code, w.Body.String())
 	}
-	// POST 升级 staging → 放行（PushBinary 路径；实际写入被测试环境 /opt 权限挡 → 非 403 即可）
+	// POST 升级 staging → 放行（PushBinary 路径；root 下会真写盘，必须自清——
+	// 残留会让下轮全量的 GET 检查拿到 200 而非 404，测试间污染）
+	t.Cleanup(func() { os.RemoveAll("/opt/socket/versions/99.99.99") })
 	if w := post(staging); w.Code == 403 {
 		t.Fatalf("staging POST 不应 403: %s", w.Body.String())
 	}

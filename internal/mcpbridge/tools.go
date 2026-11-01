@@ -159,7 +159,7 @@ func (b *Bridge) runOne(r *TargetResult, hp string, port int, class Lk, lockKey 
 	if err != nil {
 		healthy = false
 		ok = false
-		*r = TargetResult{Target: hp, Ok: false, Err: err.Error()}
+		*r = TargetResult{Target: hp, Ok: false, Err: connErrText(err)}
 	} else {
 		switch v := data.(type) {
 		case map[string]any:

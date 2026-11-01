@@ -616,6 +616,21 @@ func probeAlive(c *Client) bool {
 	return isTimeout(err)
 }
 
+// targetReachable 服务端进程存活验证（TCP 握手，不发数据，300ms 上限）。
+//
+// 为什么读探针不够（六轮验收 P2 复测）：服务端收到 TERM 退出后，旧连接的
+// FIN 需经网络到达中央，这期间客户端侧 socket 仍 ESTABLISHED——1ms 读探针
+// 无数据即判活，复用即 EOF，并发 N 路同时全败。读探针在原理上覆盖不了这个
+// 窗口。新 dial 不受 FIN 传播影响：进程死=监听 socket 关=SYN 即刻 RST。
+func targetReachable(addr string) bool {
+	c, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
+}
+
 // Acquire 借出（borrow 超时）；复用同步 socket_timeout（N8）；connect 失败回滚计数。
 func (p *TargetPool) Acquire(borrowTimeout, socketTimeout int) (*Client, error) {
 	deadline := time.Now().Add(time.Duration(borrowTimeout) * time.Second)
@@ -648,8 +663,15 @@ func (p *TargetPool) Acquire(borrowTimeout, socketTimeout int) (*Client, error) 
 		c.Close()
 	}
 	if reuse != nil {
-		reuse.SetTimeout(socketTimeout) // N8
-		return reuse, nil
+		if targetReachable(p.port) { // FIN 窗口：探针判活但服务端已死 → 弃复用走新建
+			reuse.SetTimeout(socketTimeout) // N8
+			return reuse, nil
+		}
+		// 弃复用，落入下方新建：connectWithRetry 自带退避，专吃 5~15s 重启窗口
+		// （只重试建连、绝不重发请求）。借出计数不重复扣——新建失败路径统一
+		// 负责 --；dial 判死到新建之间服务端恰好回来由 connectWithRetry 首次
+		// 尝试自然覆盖。
+		reuse.Close()
 	}
 	c := NewClient(p.host, p.portN, socketTimeout)
 	if err := c.Connect(); err != nil {
@@ -707,6 +729,17 @@ func (s *Scheduler) GetPool(host string, port int) *TargetPool {
 	return p
 }
 
+// connErrText 连接级错误语义化（六轮验收 P2 复测）：裸 EOF/reset 无地址无
+// 上下文，现场无法判断「等一秒重试即可」。包装成可判读文案，原始原因保留在尾
+// 部供定位。
+func connErrText(err error) string {
+	msg := err.Error()
+	if msg == io.EOF.Error() || strings.Contains(msg, "connection reset") {
+		return "靶机连接已断（靶机可能正在重启，请稍后重试）: " + msg
+	}
+	return msg
+}
+
 // Batch 并发执行（全局 50 并发上限）。
 func (s *Scheduler) Batch(targets []string, port int, timeout int, fn func(c *Client) (any, error)) []TargetResult {
 	var wg sync.WaitGroup
@@ -727,7 +760,7 @@ func (s *Scheduler) Batch(targets []string, port int, timeout int, fn func(c *Cl
 			data, err := fn(c)
 			if err != nil {
 				healthy = false
-				results[i] = TargetResult{Target: host, Ok: false, Err: err.Error()}
+				results[i] = TargetResult{Target: host, Ok: false, Err: connErrText(err)}
 			} else {
 				results[i] = TargetResult{Target: host, Ok: true, Data: data}
 			}
