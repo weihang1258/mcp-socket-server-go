@@ -1,7 +1,7 @@
 # 客户端安全与质量反馈 —— 处理回函
 
-**版本**：socketstack v1.9.5 ~ v1.9.16
-**日期**：2026-10-30 初版，2026-11-01 修订（含 v1.9.7 ~ v1.9.16）
+**版本**：socketstack v1.9.5 ~ v1.9.17
+**日期**：2026-10-30 初版，2026-11-01 修订（含 v1.9.7 ~ v1.9.17）
 
 ---
 
@@ -333,13 +333,13 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 ## 十一、升级方式
 
 发布页：
-`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.16`
+`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.17`
 资产：`socket_server`（单个自包含二进制，无外部依赖，静态链接）
-sha256：`ae017c48213bfcbd7908d58a7035b8fb5a49a58391f5a5f6b238984505998f0c`
+sha256：`861a9911f4328fcd64db7d2b3304258a821caf4f4f50556e85231e14f03e2e44`
 
 国内下载（GitHub 直链不可达时）：
-`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.16/socket_server`
-`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.16/socket_server`
+`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.17/socket_server`
+`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.17/socket_server`
 
 安装：
 `sudo ./socket_server install`（仅 agent）
@@ -680,3 +680,77 @@ Sched.Batch 通道——两个收口点的真机行为一次验证。前两次�
 - v1.9.16 已发版（sha `ae017c48…`，静态链接，镜像回源 sha 核对一致），
   35/82 双机 upgrade_run 升级闭环；cmd_exec/isfile/version/list_targets
   正常路径回归通过
+
+---
+
+## 十八、v1.9.17 —— 建连失败（出口 A）未分档收口（2026-11-01，当日第三轮）
+
+验收指出属实：v1.9.15 的分档只覆盖「请求已发出」（出口 B：在途断连），
+「连接建立失败」（出口 A：`pool.Acquire` 失败，请求未发出）沿用 v1.9.5 的
+通用文案——cmd_exec 在端口 refused 时拿到「请稍后重试」，违反 §十六.3
+承诺的「非幂等工具不出现该句」。这是我方测试覆盖的洞：映射锁测试的靶机
+mock 只会 accept-then-drop，永远走不到 dial-refused——**参数锁住了，
+失败出口 × 场景矩阵没锁全**，与 §十七 两处旁路同属一类错误（锁了一半）。
+
+### 1. 修复（v1.9.17）：出口 A 同样分档，且与出口 B 可一眼区分
+
+两种出口可重试性相反，文案必须可区分。`connectWithRetry` 文案改为只述事实
+（「已重试 3 次，靶机可能正在重启」），重试建议由调用方按工具幂等性分档追加
+（`dialErrText`）：
+
+| 出口 | 情形 | 非幂等（cmd_exec 等） | retry-safe（version 等） |
+|---|---|---|---|
+| **A 建连失败** | 请求未发出，命令**必然未执行** | `pool: 连接 … 失败（已重试 3 次，靶机可能正在重启）: dial … refused`**`（连接未建立，请求未发送执行，未产生副作用；可稍后重试）`** | `…refused（请稍后重试）` |
+| **B 在途断连** | 请求已发出，状态未知 | `靶机连接已断（…命令执行状态未知——…请先核实副作用，勿直接重试）: EOF`（v1.9.15，不变） | `靶机连接已断（靶机可能正在重启，请稍后重试）: EOF`（不变） |
+
+「请稍后重试」自 v1.9.15 起为非幂等工具失败文案的**保留字**——任何失败路径
+（出口 A/B × runOne/Sched.Batch 两通道）都不得混入。Sched.Batch 的出口 A
+（`Scheduler.Batch` 的 Acquire 失败分支）同轮修掉，两通道对称。
+
+### 2. 测试：映射锁补建连失败场景腿 + 三组变异验证
+
+`TestToolConnLostTierMapping` 增加场景二（loopback 确定性 refused 端口）：
+version/cmd_exec/pcap_flow_extract 三腿（覆盖 runOne 与 Sched.Batch 两通道
+的出口 A）。RED 现场与验收复现逐字一致（cmd_exec + 请稍后重试），GREEN 后
+变异验证：
+
+| 变异 | 预期 | 实测 |
+|---|---|---|
+| runOne 出口 A 恒 retrySafe | cmd_exec 建连腿红 | ✅ 红 |
+| Sched.Batch 出口 A 恒非幂等档 | pcap 建连腿红 | ✅ 红 |
+| connectWithRetry 塞回「请稍后重试」 | cmd_exec 建连腿红（保留字） | ✅ 红 |
+
+### 3. 真机验证（真 MCP `:9010`，靶机 82，v1.9.17）
+
+停服窗口测试（先 `systemd-run --on-active=90` 臂自动 start 作安全网，再
+`systemctl stop`，窗口内连发探测，到点自动恢复）：
+
+```
+cmd_exec ×3 → pool: 连接 …:9000 失败（已重试 3 次，靶机可能正在重启）:
+              dial … connection refused（连接未建立，请求未发送执行，
+              未产生副作用；可稍后重试）
+version  ×1 → pool: 连接 …:9000 失败（已重试 3 次，靶机可能正在重启）:
+              dial … connection refused（请稍后重试）
+```
+
+同窗口两档文案一眼可区分；停服调用自身的响应丢失按出口 B 报（状态未知档），
+符合语义。窗口结束自动 start 恢复，双机 v1.9.17、cmd_exec 正常路径回归通过。
+
+### 4. 对 §五「ok=1/code=0/5ms」观察的自查结论
+
+桥接层不存在「靶机不可达却报成功」的路径：`cmd_exec` 的 ok=1 只能来自 dt1
+响应的成功解码，靶机死了就没有响应（EOF/超时 → failed）。本轮停服窗口内
+4 连发（cmd_exec ×3 + version ×1）**全部 failed，零 ok=1**，与上述一致。
+
+验收那 2 次 5ms 成功的成因：发射时刻实际落在端口 refused 窗口**之外**
+（stop 尚未生效或 start 已完成——`systemctl restart` 的停→起间隙只有
+亚秒级，2ms 探针与发射的相对时刻未对齐时极易落在窗口外）。此时靶机是活的，
+命令**真实执行**：`code=0, stdout=""` 即「执行成功且该命令本就无输出」，
+不是伪造成功。可用返回耗时自证：5ms 是真执行；若在 refused 窗口内，
+connectWithRetry 三次退避（500ms+1s）必然把耗时拉到 ≥1.5s（验收自己的
+1.503s 失败样本即如此）。
+
+### 5. 发布
+
+v1.9.17 已发版（sha `861a9911…`，静态链接，镜像回源核对一致），35/82 双机
+upgrade_run 升级闭环。单测 `-race` 全绿。
