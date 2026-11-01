@@ -1,7 +1,7 @@
 # 客户端安全与质量反馈 —— 处理回函
 
-**版本**：socketstack v1.9.5 ~ v1.9.13
-**日期**：2026-10-30 初版，2026-11-01 修订（含 v1.9.7 ~ v1.9.13）
+**版本**：socketstack v1.9.5 ~ v1.9.14
+**日期**：2026-10-30 初版，2026-11-01 修订（含 v1.9.7 ~ v1.9.14）
 
 ---
 
@@ -333,12 +333,13 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 ## 十一、升级方式
 
 发布页：
-`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.13`
-资产：`socket_server`（单个自包含二进制，无外部依赖）
+`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.14`
+资产：`socket_server`（单个自包含二进制，无外部依赖，静态链接）
+sha256：`ba4b4ca0595497597bbe6cf363c6fe5da37a70112dd9a14879075d6fe71d8cbb`
 
 国内下载（GitHub 直链不可达时）：
-`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.13/socket_server`
-`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.13/socket_server`
+`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.14/socket_server`
+`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.14/socket_server`
 
 安装：
 `sudo ./socket_server install`（仅 agent）
@@ -513,7 +514,8 @@ v1.9.13 首发资产（存在约 25 分钟，sha256 `8cb3da77…`）是**动态�
 （构建方漏了 `CGO_ENABLED=0`），依赖 glibc ≥ 2.34，**在旧 glibc 靶机上无法
 启动**——已在真机 82 上踩实（服务 crash-loop 失联，手工切回 1.9.12 恢复）。
 **当前资产已替换为静态构建**（sha256 `08262bdd65d61af982abb8752242f3b3eb802713f326d07a9db80d836240e1bc`，
-`file` 验证 statically linked，与 v1.9.12 及之前各版同构，任何靶机可用）。
+`file` 验证 statically linked，与 v1.9.12 及之前各版同构，任何靶机可用；
+此后的 v1.9.14 直接以静态构建发布）。
 已部署首版的机器请按 §十一 升级，或手工替换
 `/opt/socket/versions/1.9.13/socket_server` 后 `systemctl restart socket_server`。
 
