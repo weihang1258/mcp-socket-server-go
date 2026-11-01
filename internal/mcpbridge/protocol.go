@@ -731,10 +731,15 @@ func (s *Scheduler) GetPool(host string, port int) *TargetPool {
 
 // connErrText 连接级错误语义化（六轮验收 P2 复测）：裸 EOF/reset 无地址无
 // 上下文，现场无法判断「等一秒重试即可」。包装成可判读文案，原始原因保留在尾
-// 部供定位。
-func connErrText(err error) string {
+// 部供定位。retrySafe 按工具幂等性分档（七轮验收 P2）：只读工具重发无副作用，
+// 建议稍后重试；非幂等工具（cmd_exec/replay 等）请求可能已部分执行或已完成但
+// 响应丢失，必须引导先核实副作用、勿盲目重试——「请稍后重试」对它们是危险建议。
+func connErrText(err error, retrySafe bool) string {
 	if isConnLost(err) {
-		return "靶机连接已断（靶机可能正在重启，请稍后重试）: " + err.Error()
+		if retrySafe {
+			return "靶机连接已断（靶机可能正在重启，请稍后重试）: " + err.Error()
+		}
+		return "靶机连接已断（靶机可能正在重启；命令执行状态未知——可能已部分执行或已完成但响应丢失，请先核实副作用，勿直接重试）: " + err.Error()
 	}
 	return err.Error()
 }
@@ -765,7 +770,8 @@ func (s *Scheduler) Batch(targets []string, port int, timeout int, fn func(c *Cl
 			data, err := fn(c)
 			if err != nil {
 				healthy = false
-				results[i] = TargetResult{Target: host, Ok: false, Err: connErrText(err)}
+				// 现有两路调用（pcap_flow_extract 只读 / capture_stop 幂等）均重发安全
+				results[i] = TargetResult{Target: host, Ok: false, Err: connErrText(err, true)}
 			} else {
 				results[i] = TargetResult{Target: host, Ok: true, Data: data}
 			}

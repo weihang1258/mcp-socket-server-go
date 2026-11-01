@@ -34,7 +34,7 @@ func TestRunBatchPartialFailure(t *testing.T) {
 	// 死靶机：resolve 会剥 host:port 的端口（Python registry 语义，端口由工具参数统一），
 	// 故用不同 loopback 地址（127.0.0.2 无监听 → 连接拒绝）
 	dead := "127.0.0.2"
-	out := b.runBatch(context.Background(), []string{m.Addr, dead}, portOf(m.Addr), LkNone, "", "", nil, 5,
+	out := b.runBatch(context.Background(), []string{m.Addr, dead}, portOf(m.Addr), LkNone, "", "", nil, false, 5,
 		func(c *Client) (any, error) {
 			v, err := c.Version()
 			if err != nil {
@@ -59,7 +59,7 @@ func TestRunBatchFalseFailed(t *testing.T) {
 			w.text(`{"res":false}`) // 无 error（v1.8.3 契约）
 		}
 	})
-	out := b.runBatch(context.Background(), []string{m.Addr}, portOf(m.Addr), LkCapture, "/home/tmp/tmp.pcap", "", nil, 5,
+	out := b.runBatch(context.Background(), []string{m.Addr}, portOf(m.Addr), LkCapture, "/home/tmp/tmp.pcap", "", nil, false, 5,
 		func(c *Client) (any, error) {
 			d, err := c.CaptureStart("", "/home/tmp/tmp.pcap", "", true)
 			if err != nil {
@@ -84,7 +84,7 @@ func TestCaptureLockLifecycle(t *testing.T) {
 	m := newMockServer(t, stdMockHandler(t))
 	tgt := []string{m.Addr}
 	port := portOf(m.Addr)
-	b.runBatch(context.Background(), tgt, port, LkCapture, "/home/tmp/tmp.pcap", "", nil, 5,
+	b.runBatch(context.Background(), tgt, port, LkCapture, "/home/tmp/tmp.pcap", "", nil, false, 5,
 		func(c *Client) (any, error) {
 			d, err := c.CaptureStart("", "/home/tmp/tmp.pcap", "", true)
 			if err != nil {
@@ -99,7 +99,7 @@ func TestCaptureLockLifecycle(t *testing.T) {
 		t.Fatal("capture lock must be kept on success")
 	}
 	// stop（独立实现）释放
-	b.runBatch(context.Background(), tgt, port, LkNone, "", "", nil, 5, func(c *Client) (any, error) { return nil, nil })
+	b.runBatch(context.Background(), tgt, port, LkNone, "", "", nil, false, 5, func(c *Client) (any, error) { return nil, nil })
 	// 手动走 capture_stop 的释放路径：模拟 stop 工具行为
 	c, _ := b.Sched.GetPool("127.0.0.1", port).Acquire(1, 5)
 	c.CaptureStop("/home/tmp/tmp.pcap")
@@ -114,7 +114,7 @@ func TestCmdExecWhitelist(t *testing.T) {
 	b := newTestBridge(t)
 	b.Whitelist = []string{"git ", "ls "}
 	m := newMockServer(t, stdMockHandler(t))
-	out := b.runBatch(context.Background(), []string{m.Addr}, portOf(m.Addr), LkShell, "", "", nil, 5,
+	out := b.runBatch(context.Background(), []string{m.Addr}, portOf(m.Addr), LkShell, "", "", nil, false, 5,
 		func(c *Client) (any, error) { return c.CmdExec("rm -rf /", "", nil, true) })
 	// 白名单在工具层拦截——runBatch 不含白名单逻辑；此处模拟工具层行为：
 	_ = out
@@ -239,7 +239,7 @@ func upgradeRunForTest(t *testing.T, b *Bridge, targets []string, version string
 	}
 	log.Printf("upgrade_run test: v%s sha=%s...", ver, sha[:8])
 	batch := b.runBatch(context.Background(), targets, portOf(targets[0]), LkSystem, "", "upgrade_run",
-		map[string]any{"version": ver, "force": force}, 10, func(c *Client) (any, error) {
+		map[string]any{"version": ver, "force": force}, false, 10, func(c *Client) (any, error) {
 			cur, err := c.Version()
 			if err != nil {
 				return nil, err

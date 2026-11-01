@@ -466,6 +466,7 @@ func TestAcquireDialCheckRejectsReuseWhenListenerClosed(t *testing.T) {
 }
 
 // runBatch 的连接级错误文案语义化：裸 EOF 现场无法判断「等一秒重试即可」。
+// 只读工具（version 等）：重复执行无副作用，文案建议稍后重试。
 func TestRunBatchEOFGetsFriendlyText(t *testing.T) {
 	// 服务端 accept 即关：Version 的读得到 EOF
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -483,15 +484,52 @@ func TestRunBatchEOFGetsFriendlyText(t *testing.T) {
 		}
 	}()
 	addr := l.Addr().(*net.TCPAddr)
-	s := NewScheduler()
-	b := &Bridge{Sched: s}
-	out := b.runBatch(context.Background(), []string{"127.0.0.1"}, addr.Port, LkNone, "", "", nil, 5,
+	b := newTestBridge(t)
+	out := b.runBatch(context.Background(), []string{"127.0.0.1"}, addr.Port, LkNone, "", "version", nil, true, 5,
 		func(c *Client) (any, error) { return c.Version() })
 	failed := out["failed"].([]map[string]any)
 	if len(failed) != 1 {
 		t.Fatalf("应失败: %+v", out)
 	}
-	if !strings.Contains(fmt.Sprint(failed[0]["reason"]), "靶机可能正在重启") {
-		t.Fatalf("EOF 应带语义化文案，实际: %v", failed[0]["reason"])
+	reason := fmt.Sprint(failed[0]["reason"])
+	if !strings.Contains(reason, "靶机可能正在重启") || !strings.Contains(reason, "请稍后重试") {
+		t.Fatalf("只读工具 EOF 应带可重试文案，实际: %v", reason)
+	}
+}
+
+// 非幂等工具（cmd_exec 等）在途断连：命令可能已部分执行或已完成但响应丢失，
+// 执行状态未知——文案必须阻止盲目重试（2026-11-01 七轮验收 P2：真机实测
+// 「请稍后重试」引导重复执行，S 已写入、E 未写）。runBatch 显式传 retrySafe=false。
+func TestRunBatchConnLostNonIdempotentText(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, e := l.Accept()
+			if e != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	addr := l.Addr().(*net.TCPAddr)
+	b := newTestBridge(t)
+	for _, tool := range []string{"cmd_exec", "replay_run"} { // 各非幂等调用点同传 false，此处抽验
+		out := b.runBatch(context.Background(), []string{"127.0.0.1"}, addr.Port, LkNone, "", tool, nil, false, 5,
+			func(c *Client) (any, error) { return c.Version() })
+		failed := out["failed"].([]map[string]any)
+		if len(failed) != 1 {
+			t.Fatalf("%s: 应失败: %+v", tool, out)
+		}
+		reason := fmt.Sprint(failed[0]["reason"])
+		if !strings.Contains(reason, "执行状态未知") || !strings.Contains(reason, "勿直接重试") {
+			t.Fatalf("%s: 非幂等工具 EOF 必须阻止盲目重试，实际: %v", tool, reason)
+		}
+		if strings.Contains(reason, "请稍后重试") {
+			t.Fatalf("%s: 不得出现「请稍后重试」: %v", tool, reason)
+		}
 	}
 }

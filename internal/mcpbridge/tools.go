@@ -102,8 +102,9 @@ func (b *Bridge) resolve(targets []string) []string {
 
 // runBatch _run_batch 移植：锁 → 池 → fn → 释放；CAPTURE 成功保留锁；
 // {"_error":...} → failed；nil → note；false → failed。
+// retrySafe 标记本工具重发是否无副作用，只影响断连文案分档（见 connErrText）。
 func (b *Bridge) runBatch(ctx context.Context, targets []string, port int, class Lk, lockKey string,
-	auditTool string, auditParams map[string]any, timeout int,
+	auditTool string, auditParams map[string]any, retrySafe bool, timeout int,
 	fn func(c *Client) (any, error)) map[string]any {
 	t0 := time.Now()
 	resolved := b.resolve(targets)
@@ -118,7 +119,7 @@ func (b *Bridge) runBatch(ctx context.Context, targets []string, port int, class
 		go func(i int, hp string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			b.runOne(&results[i], hp, port, class, lockKey, timeout, fn)
+			b.runOne(&results[i], hp, port, class, lockKey, retrySafe, timeout, fn)
 		}(i, hp)
 	}
 	wg.Wait()
@@ -131,7 +132,7 @@ func (b *Bridge) runBatch(ctx context.Context, targets []string, port int, class
 }
 
 // runOne 单靶机执行（锁 → 池 → fn → 释放；CAPTURE 成功保留锁）。
-func (b *Bridge) runOne(r *TargetResult, hp string, port int, class Lk, lockKey string, timeout int,
+func (b *Bridge) runOne(r *TargetResult, hp string, port int, class Lk, lockKey string, retrySafe bool, timeout int,
 	fn func(c *Client) (any, error)) {
 	host, portN := splitHostPort(hp, port)
 	// 1. 锁（fail-fast）
@@ -159,7 +160,7 @@ func (b *Bridge) runOne(r *TargetResult, hp string, port int, class Lk, lockKey 
 	if err != nil {
 		healthy = false
 		ok = false
-		*r = TargetResult{Target: hp, Ok: false, Err: connErrText(err)}
+		*r = TargetResult{Target: hp, Ok: false, Err: connErrText(err, retrySafe)}
 	} else {
 		switch v := data.(type) {
 		case map[string]any:
@@ -427,7 +428,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 	// 4. version
 	add(s, ro("version", "查询靶机 socket_server 版本号(datatype 14,只读)。升级前先调本工具确认各靶机现版本，再决定调 upgrade_run 升到哪个版本。"),
 		func(ctx context.Context, a targetsArgs) any {
-			out := b.runBatch(ctx, tg(a), orDefault(a.Port, 9000), LkNone, "", "", nil, orDefault(a.Timeout, 15), func(c *Client) (any, error) {
+			out := b.runBatch(ctx, tg(a), orDefault(a.Port, 9000), LkNone, "", "", nil, true, orDefault(a.Timeout, 15), func(c *Client) (any, error) {
 				return c.Version()
 			})
 			out["results"] = renameField(out["results"], "result", "version")
@@ -464,7 +465,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 	// 6. isfile
 	add(s, ro("isfile", "检查靶机文件是否存在(datatype 7,只读)。文件内容的上传下载用 file_transfer 工具(返回点对点直传命令)。"),
 		func(ctx context.Context, a isfilePathArgs) any {
-			out := b.runBatch(ctx, a.Targets, orDefault(a.Port, 9000), LkNone, "", "", nil, orDefault(a.Timeout, 15), func(c *Client) (any, error) {
+			out := b.runBatch(ctx, a.Targets, orDefault(a.Port, 9000), LkNone, "", "", nil, true, orDefault(a.Timeout, 15), func(c *Client) (any, error) {
 				return c.Isfile(a.Path)
 			})
 			out["results"] = renameField(out["results"], "result", "exists")
@@ -474,7 +475,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 	// 7. isdir
 	add(s, ro("isdir", "检查目录是否存在(datatype 8,只读)。"),
 		func(ctx context.Context, a isfilePathArgs) any {
-			out := b.runBatch(ctx, a.Targets, orDefault(a.Port, 9000), LkNone, "", "", nil, orDefault(a.Timeout, 15), func(c *Client) (any, error) {
+			out := b.runBatch(ctx, a.Targets, orDefault(a.Port, 9000), LkNone, "", "", nil, true, orDefault(a.Timeout, 15), func(c *Client) (any, error) {
 				return c.Isdir(a.Path)
 			})
 			out["results"] = renameField(out["results"], "result", "exists")
@@ -543,7 +544,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 				}
 			}
 			return b.runBatch(ctx, a.Targets, port, LkShell, "", "cmd_exec",
-				map[string]any{"args": a.Args, "cwd": a.Cwd, "wait": wait}, effTimeout,
+				map[string]any{"args": a.Args, "cwd": a.Cwd, "wait": wait}, false, effTimeout,
 				func(c *Client) (any, error) {
 					return c.CmdExec(a.Args, a.Cwd, a.Env, wait)
 				})
@@ -560,7 +561,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 			return b.runBatch(ctx, a.Targets, orDefault(a.Port, 9000), LkCapture,
 				orDefaultStr(a.Path, "/home/tmp/tmp.pcap"), "capture_start",
 				map[string]any{"iface": a.Iface, "path": orDefaultStr(a.Path, "/home/tmp/tmp.pcap"), "extended": a.Extended, "single_queue": sq},
-				orDefault(a.Timeout, 30), func(c *Client) (any, error) {
+				false, orDefault(a.Timeout, 30), func(c *Client) (any, error) {
 					d, err := c.CaptureStart(a.Iface, orDefaultStr(a.Path, "/home/tmp/tmp.pcap"), a.Extended, sq)
 					if err != nil {
 						return nil, err
@@ -637,7 +638,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 				inner = 3
 			}
 			return b.runBatch(ctx, a.Targets, port, LkBrowser, "", "boce_run",
-				map[string]any{"url": a.Url, "count": orDefault(a.Count, 1), "mode": orDefaultStr(a.Mode, "封堵")}, socketTimeout,
+				map[string]any{"url": a.Url, "count": orDefault(a.Count, 1), "mode": orDefaultStr(a.Mode, "封堵")}, false, socketTimeout,
 				func(c *Client) (any, error) {
 					return c.BoceRun(a.Url, orDefault(a.Count, 1), a.Interval, orDefault(a.ThreadCount, 1), inner, orDefaultStr(a.Mode, "封堵"), a.ChromiumPath)
 				})
@@ -675,7 +676,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 			}
 			return b.runBatch(ctx, a.Targets, orDefault(a.Port, 9000), LkReplay, "", "replay_run",
 				map[string]any{"pcaps": a.Pcaps, "uplink_iface": a.UplinkIface, "downlink_iface": a.DownlinkIface, "mbps": a.Mbps},
-				orDefault(a.Timeout, 120), func(c *Client) (any, error) {
+				false, orDefault(a.Timeout, 120), func(c *Client) (any, error) {
 					return c.ReplayRun(a.Pcaps, a.UplinkIface, a.DownlinkIface, upV, downV, a.Mbps, fis, fid, fs, fd)
 				})
 		})
@@ -699,7 +700,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 			maxBytes := orDefault(a.MaxBytes, 1048576)
 			return b.runBatch(ctx, a.Targets, orDefault(a.Port, 9000), LkSystem, "", "socket_listen",
 				map[string]any{"action": a.Action, "listen_port": listenPort, "file": file, "max_bytes": maxBytes},
-				orDefault(a.Timeout, 30), func(c *Client) (any, error) {
+				false, orDefault(a.Timeout, 30), func(c *Client) (any, error) {
 					switch a.Action {
 					case "start":
 						res, err := c.SocketListen("start", listenPort, "", 0)
@@ -781,7 +782,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 
 			// 中间段不写审计（Python 未传 audit_tool；仅终态一条，复审 P1-3）
 			batch := b.runBatch(ctx, targets, port, LkSystem, "", "",
-				map[string]any{"version": ver, "force": a.Force}, orDefault(a.Timeout, 60), func(c *Client) (any, error) {
+				map[string]any{"version": ver, "force": a.Force}, false, orDefault(a.Timeout, 60), func(c *Client) (any, error) {
 					cur, err := c.Version()
 					if err != nil {
 						return nil, err
