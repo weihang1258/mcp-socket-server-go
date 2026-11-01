@@ -149,7 +149,8 @@ func (b *Bridge) runOne(r *TargetResult, hp string, port int, class Lk, lockKey 
 		if class != LkNone {
 			b.Locks.Release(hp, class, lockKey)
 		}
-		*r = TargetResult{Target: hp, Ok: false, Err: "pool: " + err.Error()}
+		// 出口 A：请求未发出（建连失败/池不可用），按工具幂等性分档（dialErrText）
+		*r = TargetResult{Target: hp, Ok: false, Err: "pool: " + dialErrText(err, retrySafe)}
 		return
 	}
 	// 3. 执行

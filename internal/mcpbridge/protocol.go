@@ -107,7 +107,10 @@ func (c *Client) connectWithRetry() error {
 			backoff *= 2
 		}
 	}
-	return fmt.Errorf("连接 %s 失败（已重试 %d 次，靶机可能正在重启，请稍后重试）: %w",
+	// 只述事实（重试次数/疑似重启）；重试建议由调用方按工具幂等性分档追加
+	//（dialErrText）——「请稍后重试」对非幂等工具的建连失败虽无风险（命令未
+	// 发出），但该短语自 v1.9.15 起是非幂等工具失败文案的保留字，不得混入。
+	return fmt.Errorf("连接 %s 失败（已重试 %d 次，靶机可能正在重启）: %w",
 		addr, dialRetryAttempts, lastErr)
 }
 
@@ -750,6 +753,17 @@ func isConnLost(err error) bool {
 	return msg == io.EOF.Error() || strings.Contains(msg, "connection reset")
 }
 
+// dialErrText 建连失败（出口 A：请求未发出）的分档（九轮验收 P2）。与
+// connErrText（出口 B：请求已发出、在途断连）的可重试性相反——此处命令必然
+// 未执行、重试安全，文案必须让调用方能一眼区分两种情形；非幂等工具用
+// 「未发送执行+可稍后重试」明示安全侧，且不得混入「请稍后重试」保留字。
+func dialErrText(err error, retrySafe bool) string {
+	if retrySafe {
+		return err.Error() + "（请稍后重试）"
+	}
+	return err.Error() + "（连接未建立，请求未发送执行，未产生副作用；可稍后重试）"
+}
+
 // Batch 并发执行（全局 50 并发上限）。retrySafe 语义同 runBatch——调用点必须
 // 表态（八轮验收：此前写死 true，走此通道的新工具会静默拿到可重试文案档）。
 func (s *Scheduler) Batch(targets []string, port int, timeout int, retrySafe bool, fn func(c *Client) (any, error)) []TargetResult {
@@ -764,7 +778,7 @@ func (s *Scheduler) Batch(targets []string, port int, timeout int, retrySafe boo
 			pool := s.GetPool(host, port)
 			c, err := pool.Acquire(poolBorrowTimeoutSec, timeout)
 			if err != nil {
-				results[i] = TargetResult{Target: host, Ok: false, Err: err.Error()}
+				results[i] = TargetResult{Target: host, Ok: false, Err: dialErrText(err, retrySafe)}
 				return
 			}
 			healthy := true

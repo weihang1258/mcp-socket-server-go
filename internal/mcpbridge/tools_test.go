@@ -480,4 +480,53 @@ func TestToolConnLostTierMapping(t *testing.T) {
 			t.Errorf("%s: 应为断连语义文案，实际: %v", tc.tool, reason)
 		}
 	}
+
+	// —— 场景二：建连失败（出口 A，请求未发出，九轮验收）——
+	// 可重试性与出口 B 相反（命令必然未执行，重试安全），文案必须可区分；
+	// 非幂等工具不得出现「请稍后重试」（v1.9.15 起为非幂等失败文案保留字）。
+	ln2, err := net.Listen("tcp", "127.0.0.2:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusedPort := ln2.Addr().(*net.TCPAddr).Port
+	ln2.Close() // 关闭即 refused（loopback 即刻 RST，确定性）
+	dialCases := []struct {
+		tool      string
+		extra     map[string]any
+		wantRetry bool
+	}{
+		{"version", nil, true},
+		{"cmd_exec", map[string]any{"args": "echo x"}, false},
+		{"pcap_flow_extract", map[string]any{"pcap_dir": "/x"}, true}, // Sched.Batch 通道出口 A
+	}
+	for _, tc := range dialCases {
+		args := map[string]any{"targets": []string{tgt}, "port": refusedPort, "timeout": 3}
+		for k, v := range tc.extra {
+			args[k] = v
+		}
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: tc.tool, Arguments: args})
+		if err != nil {
+			t.Fatalf("%s(建连失败): 调用失败: %v", tc.tool, err)
+		}
+		out, _ := res.StructuredContent.(map[string]any)
+		failed, _ := out["failed"].([]any)
+		if len(failed) != 1 {
+			t.Fatalf("%s(建连失败): 应恰 1 条失败: %v", tc.tool, out)
+		}
+		reason := fmt.Sprint(failed[0].(map[string]any)["reason"])
+		if tc.wantRetry && !strings.Contains(reason, "请稍后重试") {
+			t.Errorf("%s(建连失败): 应为可重试档，实际: %v", tc.tool, reason)
+		}
+		if !tc.wantRetry {
+			if !strings.Contains(reason, "未发送执行") || !strings.Contains(reason, "可稍后重试") {
+				t.Errorf("%s(建连失败): 应明示命令未发送执行、可稍后重试，实际: %v", tc.tool, reason)
+			}
+			if strings.Contains(reason, "请稍后重试") {
+				t.Errorf("%s(建连失败): 非幂等工具不得出现「请稍后重试」: %v", tc.tool, reason)
+			}
+			if strings.Contains(reason, "勿直接重试") || strings.Contains(reason, "执行状态未知") {
+				t.Errorf("%s(建连失败): 与出口 B 文案混叠（此情形命令必然未执行）: %v", tc.tool, reason)
+			}
+		}
+	}
 }
