@@ -1,7 +1,7 @@
 # 客户端安全与质量反馈 —— 处理回函
 
-**版本**：socketstack v1.9.5 ~ v1.9.19
-**日期**：2026-10-30 初版，2026-11-01/02 修订（含 v1.9.7 ~ v1.9.19）
+**版本**：socketstack v1.9.5 ~ v1.9.21
+**日期**：2026-10-30 初版，2026-11-01/02 修订（含 v1.9.7 ~ v1.9.21）
 
 ---
 
@@ -333,13 +333,13 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 ## 十一、升级方式
 
 发布页：
-`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.19`
+`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.21`
 资产：`socket_server`（单个自包含二进制，无外部依赖，静态链接）
-sha256：`74020171bcfa5f715da1155b82ff29b550817b82e22befb4c0d0545c6658f703`
+sha256：`5e0cb0f92fdfaef7216ed42201551dd05031f7b95c1c525d4a20b54a61464ceb`
 
 国内下载（GitHub 直链不可达时）：
-`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.19/socket_server`
-`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.19/socket_server`
+`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.21/socket_server`
+`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.21/socket_server`
 
 安装：
 `sudo ./socket_server install`（仅 agent）
@@ -861,3 +861,43 @@ timeout 的读超时，错误带双端地址（`10.12.131.35:52756->10.12.131.82
 
 v1.9.19（sha `74020171…`，静态链接，镜像回源核对一致）双机 upgrade_run 闭环；
 单测 `-race` 全绿。
+
+---
+
+## 二十一、v1.9.20/v1.9.21 —— 所有监听端口 0.0.0.0 双栈收口（2026-11-02）
+
+应用收方要求，对全部监听端口盘点并收口。逐端口盘点结论：
+
+| 端口 | 服务 | 盘点结论 | 处置 |
+|---|---|---|---|
+| :9000 | agent 线协议（dt 帧） | 已双栈（tcp4 0.0.0.0 + tcp6 [::] 分绑，v6 失败降级） | 无需改 |
+| :9001 | HTTP 文件服务 | 已双栈（同上策略） | 无需改 |
+| socket_listen | dt17 用户态监听 | host 为空时已双栈 | 无需改 |
+| **:9010** | **MCP Streamable HTTP** | **单栈缺口**——`ListenAndServe` 只绑一条 | **v1.9.20 双栈化** |
+
+### 修复过程（两连发，如实记录）
+
+**v1.9.20**：`RunStreamableHTTP` 改为显式双条绑定（`0.0.0.0:port` + `[::]:port`，
+v6 失败降级仅 v4，与 :9000/:9001 同策略）。真机部署后发现一个隐式行为：
+`net.Listen("tcp", "0.0.0.0:p")` 在 Go 里实际生成 **AF_INET6 双栈通配 socket**
+（ss 显示 `*:9010`，v4-mapped 收 v4）——运行时结果已是双栈（v4/v6 实连均通），
+但我的 `[::]` 第二条被 EADDRINUSE 降级、日志打出误导性的「降级为仅 IPv4」。
+**v1.9.21**：v4 侧改显式 `tcp4` 绑定，与 :9000/:9001 的分绑方式完全一致，
+行为可预期、日志如实（双栈）。
+
+### 真机终验（v1.9.21，双机）
+
+```
+35（agent+mcp 同机）: 0.0.0.0:9000/9001/9010 + [::]:9000/9001/9010   六条全在
+82（agent）         : 0.0.0.0:9000/9001 + [::]:9000/9001             四条全在
+:9010 实连: v4 http://127.0.0.1:9010/mcp → 400 ✅  v6 http://[::1]:9010/mcp → 400 ✅
+启动日志: 「监听 0.0.0.0:9010/mcp」+「监听 [::]:9010/mcp (IPv6, 双栈)」
+```
+
+（400 = HTTP 服务已应答、GET /mcp 缺 MCP 握手头，属预期。）
+
+### 发布
+
+v1.9.20（d7a4ef14…）→ v1.9.21（5e0cb0f9…），均静态链接、镜像回源
+核对一致，双机 upgrade_run 闭环；单测 `-race` 全绿（新增
+`TestListenAddrsDualStack` 锁定地址推导：0.0.0.0→双条、::/具体地址→单条）。
