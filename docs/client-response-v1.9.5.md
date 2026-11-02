@@ -333,13 +333,13 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 ## 十一、升级方式
 
 发布页：
-`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.22`
+`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.23`
 资产：`socket_server`（单个自包含二进制，无外部依赖，静态链接）
-sha256：`1eef3114ec0c2015c7d78c7b739ff6174d3935da9b6f234cc4ec90619b2e81d6`
+sha256：`65c27dbc2e7285a37966abce294ec8f0504c43b088dcd5da76a8b2ef516034e0`
 
 国内下载（GitHub 直链不可达时）：
-`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.22/socket_server`
-`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.22/socket_server`
+`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.23/socket_server`
+`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.23/socket_server`
 
 安装：
 `sudo ./socket_server install`（仅 agent）
@@ -959,3 +959,86 @@ v1.9.22 静态链接，sha256：
 `1eef3114ec0c2015c7d78c7b739ff6174d3935da9b6f234cc4ec90619b2e81d6`。
 gh-proxy.com 与 ghfast.top 镜像下载均与该 sha 一致，下载产物均经 `file`
 核实为 statically linked。发布链接见 §十一。
+
+---
+
+## 二十三、v1.9.23 —— pcapdump 下载卡死的真正根因：dt16 未实现（2026-11-02）
+
+### 1. 撤回 §二十二 的结论范围
+
+§二十二 的 :9001 白名单撤销是**真实缺陷且已修**，但它不是 pcapdump 卡住的根因：
+验收脚本的 pcapdump 下载走的是 **TCP :9000**，不是 HTTP :9001。此前用 curl 验
+:9001 返回 200，只证明 HTTP 路径通，不能证明脚本那条路径通——这是我方判断失误。
+
+### 2. 根因（客户端源码 + 真机复现确认）
+
+客户端 `dpiAutoExcel/device/socket_linux.py`：
+
+```python
+def download_pcap(self, remotepath, localpath, return_pkts=False):
+    if self.isfile(file=remotepath):      # 文件：dt7 + dt21/dt3
+        ...
+    else:                                  # 目录（pcapdump 传的是目录）
+        for remotepcap in self.listdir(path=remotepath, args='-name "*.pcap"', sorted=True):
+            fl = self.getfo(remotepath=full_remote, gzip=True)
+```
+
+`listdir` 不直接发数据，而是 `python_cmd(f"os.popen('cd {path};find ./ ...')", "read()")`
+→ 即 **datatype 16**。设计文档原决定「dt16 不复刻」（Go 无解释器），但实现里
+`Do()` 没有 dt16 分支，落到末尾 `return nil, nil`——**一个字节都不回**。客户端
+`python_cmd` 里 `recv` 等响应，因此永久阻塞：现场表现正是停在
+`/dev/shm/.../1001--->>out/..._pcapdump....pcap` 这一行，服务端日志也没有任何记录。
+
+真机复现（EU v1.9.22）：发客户端同形态 dt16 → **8 秒无任何响应**；同期
+dt7/dt8/dt200/dt21+dt3 全部正常（0.01–0.08s），排除了文件不存在与服务端卡顿。
+
+### 3. 修复（v1.9.23）
+
+`internal/agent/pythoncmd.go`：受限复刻 `python_cmd`，**不执行任意 Python**：
+
+- 支持 `os.popen('cmd')` / `os.popen("cmd")`（字面量），用 `/bin/sh -c` 执行；
+- 支持其后的 `.read()` / `.strip()` / `.lstrip()` / `.rstrip()` / `.upper()` /
+  `.lower()`，含 `read().strip()` 连写；
+- 其它表达式一律回 `[4B i][gzip {"error":...}]`（客户端可解析，绝不挂死）。
+
+响应严格一次写出完整帧 `[4B i][gzip JSON]`：客户端 `python_cmd` 的续收循环是
+`data[4:]` 之后继续 `recv` 累加，若服务端分两次写会被判「接收字节数大于原始文件字节数」。
+
+### 4. 同时补齐日志（客户端 #22 明确要求）
+
+Python 原版 `protocol.py` 每收一帧都打「指定接收有效字节数 / 本条接收长度 /
+接收总长度 / response(N)：hex」，`handlers.py` 每个 datatype 都有入口与结果日志；
+Go 版此前只在出错时打，成功路径全静默——现场无法判断请求到没到。v1.9.23 起按
+Python 原文案逐条补齐（payload 用 Python repr 风格），并对 dt16 同样记录。
+
+### 5. 真机终验（EU 10.12.131.32，v1.9.23）
+
+用客户端真实逻辑复刻（`listdir` → 逐文件 `getfo`）：
+
+```text
+listdir(dt16): ['./421310_001002_1001202611021303286235480001000.pcap']   0.03s
+getfo(dt21+dt3): 1,158,928 字节
+download_pcap(目录) 完成: 1 个文件 1158928 bytes, 0.11s
+```
+
+回归：dt8 isdir / dt7 isfile / dt200 五元组（164,005 字节）/ dt3 下载 sha256
+`105d478a…` 全部通过。服务端日志已可见完整序列：
+
+```text
+是否文件，类型：7，参数：{'file': '.../1001'}
+False
+python操作，类型：16，参数：['os.popen(...find... )', 'read()']
+response(78)：...
+文件名上传:21 {"filepath": ".../....pcap"}
+文件传输：下载文件，类型：3，文件路径：...
+response(165646)：...
+```
+
+三台（35/82/32）均已 `upgrade_run` 到 v1.9.23。
+
+### 6. 发布
+
+v1.9.23 静态链接，sha256：
+`65c27dbc2e7285a37966abce294ec8f0504c43b088dcd5da76a8b2ef516034e0`。
+gh-proxy.com 与 ghfast.top 镜像下载均一致；单测全绿（新增 dt16 列目录/链式调用/
+拒绝任意表达式/帧完整性，以及日志逐字对照用例）。
