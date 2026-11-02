@@ -558,3 +558,31 @@ func TestRunBatchTypedNilGetsNote(t *testing.T) {
 		t.Fatalf("typed nil 必须与裸 nil 同义（note 不得丢失）: %v", rows[0])
 	}
 }
+
+// RunStreamableHTTP 双栈（2026-11-02 要求：所有监听端口 0.0.0.0 双栈）：
+// host 为 IPv4 通配时必须同时绑 [::]，v6 失败降级仅 v4 不致命。
+// 绑定形态由（未公开的）listenAddrs 提供可测缝——直接断言它对
+// "0.0.0.0" 返回 v4+v6 两条、对 "::" 只返回 v6、对具体地址原样。
+func TestListenAddrsDualStack(t *testing.T) {
+	cases := []struct {
+		host  string
+		want  []string
+		descr string
+	}{
+		{"0.0.0.0", []string{"0.0.0.0:9000", "[::]:9000"}, "v4 通配必须双栈"},
+		{"::", []string{"[::]:9000"}, "v6 通配单条（v6 socket 本身收 v4-mapped）"},
+		{"127.0.0.1", []string{"127.0.0.1:9000"}, "具体地址原样"},
+	}
+	for _, tc := range cases {
+		got := listenAddrs(tc.host, 9000)
+		if len(got) != len(tc.want) {
+			t.Errorf("%s: host=%q 应 %d 条,实际 %d 条: %v", tc.descr, tc.host, len(tc.want), len(got), got)
+			continue
+		}
+		for i := range tc.want {
+			if got[i] != tc.want[i] {
+				t.Errorf("%s: host=%q 第 %d 条应 %q,实际 %q", tc.descr, tc.host, i, tc.want[i], got[i])
+			}
+		}
+	}
+}
