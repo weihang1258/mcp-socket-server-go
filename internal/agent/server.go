@@ -49,12 +49,16 @@ func handleConn(conn net.Conn, do DoFunc) {
 			}
 			dataLen = int32(binary.LittleEndian.Uint32(chunk[:4]))
 			acc = append(acc[:0], chunk[4:]...)
+			logf("指定接收有效字节数：%d", dataLen)
+			logf("本条接收长度%d", len(chunk[4:]))
 		} else {
 			acc = append(acc, chunk...)
+			logf("本条接收长度%d", len(chunk))
 		}
 
 		// Python 每收一段做一次三态判定（不做帧内 salvage，超收全弃——quirk 保真）
 		if int32(len(acc)) < dataLen {
+			logf("接收总长度%d", len(acc))
 			continue // 规则 3a：未收满，继续
 		}
 		if int32(len(acc)) > dataLen {
@@ -64,6 +68,7 @@ func handleConn(conn net.Conn, do DoFunc) {
 			dataLen = -1
 			continue
 		}
+		logf("接收总长度%d", len(acc))
 		// 恰好收满一帧
 		data := acc
 		acc = make([]byte, 0, len(acc))
@@ -101,12 +106,14 @@ func processFrame(conn net.Conn, cs *ConnState, data []byte, do DoFunc) bool {
 			return false // 规则 7：do() 异常 → 断连无响应
 		}
 		if resp != nil {
+			logResponse(resp)         // protocol.py:122 response(N)：<前100字节 hex>
 			sendWithRetry(conn, resp) // 规则 5：业务响应 sleep 3s 重发一次
 		}
 		return true // 规则 6：nil 响应静默继续
 	}
 
 	// bin 模式（dt22 之后）：帧体即文件内容，datatype 恒视作 23
+	logf("文件内容上传，类型：23") // protocol.py:96
 	cs.content = append(cs.content, data...)
 	if uint64(len(cs.content)) == cs.length {
 		cs.bin = false
@@ -131,6 +138,7 @@ func handleDT21(conn net.Conn, cs *ConnState, payload []byte) bool {
 		log.Printf("文件名上传 JSON 解析失败: %v", err)
 		return false
 	}
+	logf("文件名上传:21 %s", string(payload)) // protocol.py:78（Python 打原始 data 字节 repr）
 	cs.filepath = fileinfo.Filepath
 	cs.gzip = fileinfo.Gzip
 	cs.gzipSet = true
@@ -147,6 +155,7 @@ func handleDT22(conn net.Conn, cs *ConnState, payload []byte) bool {
 		log.Printf("dt22 payload %d bytes, struct.error 需恰 8B", len(payload))
 		return false
 	}
+	logf("文件上传：文件长度22 %x", payload) // protocol.py:85（Python 打 data.hex()）
 	cs.length = binary.LittleEndian.Uint64(payload[:8])
 	cs.content = cs.content[:0]
 	cs.bin = true
@@ -164,6 +173,7 @@ func handleDT24(conn net.Conn, cs *ConnState) bool {
 		log.Printf("dt24 filepath 为 None（dt21 未提供 filepath）")
 		return false
 	}
+	logf("文件上传：写文件，类型：24") // protocol.py:111
 	content := cs.content
 	if cs.gzip {
 		zr, err := gzip.NewReader(bytes.NewReader(content))

@@ -37,6 +37,7 @@ func pcapFlowExtract(payload []byte) ([]byte, error) {
 		return nil, err
 	}
 	flows := extractPcapFlowFiveTuples(dir)
+	logf("提取完成，共 %d 条流", len(flows)) // handlers.py:442
 	body, err := json.Marshal(flows)
 	if err != nil {
 		return nil, err

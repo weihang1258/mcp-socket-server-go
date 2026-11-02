@@ -38,7 +38,7 @@
 **非目标**
 - 不迁移 Python 版 SQLite 数据（旧 DB 不读不写不覆盖，新部署重新 add_target）；不兼容旧 config.yaml 键名（§7 的 /opt/socket/config 三键除外）。
 - 不做 MCP 鉴权（对齐现状：内网信任 + DNS rebinding 保护关闭）。
-- **datatype 16（python_cmd）不复刻**：Go 无解释器；收到后回 `[4B i][gzip JSON {"error":"datatype 16 not supported"}]`（沿用 dt1 响应形态，`recv_gzip_response` 可解析，旧中央不挂死）。验收标注旧 e2e dt16/dt122 用例预期失败。
+- **datatype 16（python_cmd）受限复刻（v1.9.23 修正）**：原决定「不复刻、回 error 帧」在实现时退化成了**不回任何字节**，而验收客户端 `device/socket_linux.py` 的 `download_pcap` 下载**目录**时经 `listdir` 必走 dt16（`os.popen('cd <dir>;find ...')` + `read()`），导致 pcapdump 下载永久阻塞、服务端日志空白（2026-11-02 实测 8s+ 无响应）。现按白名单支持 `os.popen(<字面量>)` 与其后的 `.read()/.strip()` 链，其余表达式回 `[4B i][gzip {"error":...}]`——绝不静默。Go 仍不执行任意 Python。
 - datatype 121/122/123 不复刻（源码已注释弃用）。
 - Python 源码中的**死代码不移植**（全仓 grep 无调用点；非穷尽列举，同型新增同理）：capture.py 的 `cache_cpus/restore_cpus/remove_cpusfile/get_tx_cpu/config_rx_thread_cpus/tcpdump_isrun`、replayer.py 的 `PcapStats/PacketBuffer`、netutils.py 的 `wait_until/wait_not_until/cur_time`、boce.py 的 `kill_all_chrome/_sniff_command`。/tmp/cpus 缓存机制随其死亡，不进设计。
 - 不删 Python 两仓库（参考实现 + 对拍 oracle）。
@@ -344,3 +344,4 @@ frame(字节层) → config/svc(含 serve 别名+unit 模板)
 | 64 | 建连失败（出口 A，请求未发出）同样按幂等性分档：`connectWithRetry` 文案只述事实（去「请稍后重试」），runOne/Sched.Batch 出口 A 经 `dialErrText(err, retrySafe)` 追加档位——非幂等「（连接未建立，请求未发送执行，未产生副作用；可稍后重试）」、retry-safe「（请稍后重试）」（v1.9.17） | 九轮验收：v1.9.15 只分了在途断连（出口 B），建连失败出口 A 仍是 v1.9.5 的通用文案——cmd_exec 端口 refused 时拿到「请稍后重试」。两种出口可重试性相反（A=命令必未执行可重试 / B=状态未知勿重试），调用方须能从文案一眼区分；「请稍后重试」自 v1.9.15 起为非幂等失败文案保留字，映射测试加建连失败场景腿（version/cmd_exec/pcap_flow_extract 三腿，runOne 与 Sched.Batch 两通道各锁） |
 | 65 | 出口 A 细分两型（v1.9.19）：建连失败（靶机不可达）与**池满**（靶机健康、并发占满）处置相反，`dialErrText` 按 `连接池满` 分型——池满不套「连接未建立」话术；删除 runOne 出口 A 的 `"pool: "` 人工前缀（十轮验收 P2：两通道/两出口前缀不一，档位由尾注承载） | 十轮验收：池满是「请求未发出」但非「建连失败」（P3 源码判定）；`pool: ` 只出现在 runOne 出口 A 一处，对按文案做自动化的调用方是噪声 |
 | 66 | 撤销 :9001 目录白名单：GET/POST 恢复 Python 原版 realpath 后全盘可读写（v1.9.22） | 2026-11-02 现成验收脚本下载 `/dev/shm/sess/pcap/...` pcapdump 文件时收到 403，测试流程卡住；Python `http_file.py` 明确「全盘可访问，与 TCP 9000 文件接口同级安全模型」。用户拍板保持接口与原版一致，v1.9.11 收窄方案作废，P0-1 无鉴权设计不变 |
+| 67 | dt16 `python_cmd` 从「不复刻」改为受限白名单实现（v1.9.23） | 设计原决定「Go 无解释器 → 回 error 帧」，但实现里 dt16 缺分支、直接静默返回 nil：验收客户端 `download_pcap` 下载目录时经 `listdir` → dt16，客户端 `recv` 永久阻塞（2026-11-02 EU 实测 8s+ 无响应、日志空白）。现支持 `os.popen(<字面量>)` + `.read()/.strip()` 链，其余回 error JSON；同时按 Python 原版补齐每帧/每个 handler 的日志（指定接收有效字节数/本条接收长度/接收总长度/response(N)/各 datatype 入口行），现场可判读 |
