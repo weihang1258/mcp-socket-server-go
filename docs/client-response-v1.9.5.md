@@ -333,13 +333,13 @@ logrotate 配置改为：`daily + maxsize 60M + maxage 7 + rotate 7 + copytrunca
 ## 十一、升级方式
 
 发布页：
-`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.21`
+`https://github.com/weihang1258/mcp-socket-server-go/releases/tag/v1.9.22`
 资产：`socket_server`（单个自包含二进制，无外部依赖，静态链接）
-sha256：`5e0cb0f92fdfaef7216ed42201551dd05031f7b95c1c525d4a20b54a61464ceb`
+sha256：`1eef3114ec0c2015c7d78c7b739ff6174d3935da9b6f234cc4ec90619b2e81d6`
 
 国内下载（GitHub 直链不可达时）：
-`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.21/socket_server`
-`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.21/socket_server`
+`https://ghfast.top/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.22/socket_server`
+`https://gh-proxy.com/https://github.com/weihang1258/mcp-socket-server-go/releases/download/v1.9.22/socket_server`
 
 安装：
 `sudo ./socket_server install`（仅 agent）
@@ -899,3 +899,63 @@ v6 失败降级仅 v4，与 :9000/:9001 同策略）。真机部署后发现一�
 v1.9.20（d7a4ef14…）→ v1.9.21（5e0cb0f9…），均静态链接、镜像回源
 核对一致，双机 upgrade_run 闭环；单测 `-race` 全绿（新增
 `TestListenAddrsDualStack` 锁定地址推导：0.0.0.0→双条、::/具体地址→单条）。
+
+---
+
+## 二十二、v1.9.22 —— :9001 恢复 Python 原版全盘读写（2026-11-02）
+
+### 1. 现场与根因
+
+EU（10.12.131.32，当时 v1.9.19）的验收日志停在 pcapdump 下载。现场文件实际存在：
+`.OK` 为 0 字节，`.pcap` 为 1,125,374 字节；对原 URL 发 GET 得到 **403**，响应为：
+
+```json
+{"error":"path 超出允许范围（/home/tmp/ 与 /opt/socket/versions/*/.staging/）: /dev/shm/..."}
+```
+
+直接原因是 v1.9.11 给 :9001 增加的目录白名单拒绝了 `/dev/shm/sess/pcap/...`，
+不是 pcap 文件不存在，也不是 dt200 的递归查找失败。
+
+Python `socket_server/http_file.py` 的 `_normalize` 只做 `realpath`，注释明确
+「全盘可访问，与 TCP 9000 文件接口同级安全模型」；`do_GET` 随后只按 `isfile`
+判定，没有目录白名单。Python `pcap_flow.py` 用 `os.walk` 递归查找 `*.pcap`，
+Go dt200 与该行为一致。因此 Go :9001 的白名单是与原版及现成脚本契约不一致之处。
+
+### 2. 修复与边界
+
+按用户拍板，**不改接口，直接取消 :9001 路径白名单**：GET/POST 均在路径归一化后
+恢复 Python 原版全盘可读写。文件不存在仍返回 404，不再因目录返回 403；升级推包、
+文件大小、Content-Type、multipart 等接口均未改。P0-1 无鉴权与全地址监听仍是既定设计。
+
+同时修复全量回归抓出的 v1.9.21 监听回归：具体 IPv6 地址（如 `::1`）误用 `tcp4`，
+现按 `net.ParseIP(host)` 选择 `tcp4/tcp6`；0.0.0.0 双栈分绑行为不变。
+
+单测将原白名单测试改为锁定 Python 全盘访问契约；`internal/agent`、
+`internal/mcpbridge`、`cmd/socketstack` 全绿。
+
+### 3. 真机终验
+
+通过真实 MCP `upgrade_run` 升级：35 与 82 从 v1.9.21 到 v1.9.22（35 自升级导致
+当前 MCP 连接 ECONNRESET，重启后核实版本）；EU 从 v1.9.19 到 v1.9.22，明确返回
+`upgraded=true`。三台 `version` 均为 1.9.22。
+
+对验收现场原始 pcap URL 重新下载：
+
+```text
+HTTP/1.1 200 OK
+Content-Length: 1125374
+Content-Type: application/octet-stream
+下载字节数: 1125374
+源文件 sha256: 5866ff066f3adb205db2b9d3eb7b097f5253190a605f8f3a850e6d90c71c0a02
+下载 sha256:   5866ff066f3adb205db2b9d3eb7b097f5253190a605f8f3a850e6d90c71c0a02
+```
+
+另回归 EU 常规 `/home/tmp/` 下载、中央 `cmd_exec`、MCP :9010 的 IPv4/IPv6
+HTTP 应答（均 400，缺 MCP 握手头属预期），均通过。
+
+### 4. 发布
+
+v1.9.22 静态链接，sha256：
+`1eef3114ec0c2015c7d78c7b739ff6174d3935da9b6f234cc4ec90619b2e81d6`。
+gh-proxy.com 与 ghfast.top 镜像下载均与该 sha 一致，下载产物均经 `file`
+核实为 statically linked。发布链接见 §十一。

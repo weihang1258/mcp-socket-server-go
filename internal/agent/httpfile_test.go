@@ -89,7 +89,7 @@ func TestFileServerPathAllowlist(t *testing.T) {
 		t.Fatalf("staging 应 404，got %d: %s", w.Code, w.Body.String())
 	}
 
-	// POST 常规路径 → 200；staging 等非白名单路径同样放行
+	// POST 常规路径与任意深层目录均放行；不依赖运行用户对 /opt 的写权限
 	post := func(path string) *httptest.ResponseRecorder {
 		body := "--B\r\nContent-Disposition: form-data; name=\"path\"\r\n\r\n" + path +
 			"\r\n--B\r\nContent-Disposition: form-data; name=\"file\"; filename=\"f\"\r\n\r\nDATA\r\n--B--\r\n"
@@ -98,10 +98,8 @@ func TestFileServerPathAllowlist(t *testing.T) {
 	if w := post(filepath.Join(dir, "up.bin")); w.Code != 200 {
 		t.Fatalf("POST 应 200，got %d: %s", w.Code, w.Body.String())
 	}
-	// staging POST：root 下会真写盘，必须自清（避免下轮 GET 变 200）
-	t.Cleanup(func() { os.RemoveAll("/opt/socket/versions/99.99.99") })
-	if w := post(staging); w.Code != 200 {
-		t.Fatalf("staging POST 应 200，got %d: %s", w.Code, w.Body.String())
+	if w := post(filepath.Join(dir, "arbitrary", "deep", "up.bin")); w.Code != 200 {
+		t.Fatalf("任意深层目录 POST 应 200，got %d: %s", w.Code, w.Body.String())
 	}
 }
 
