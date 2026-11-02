@@ -422,14 +422,12 @@ sha256sum ...   # 与发布方核对
 
 属实：`EnsureReleaseBinary` 出错直接 return，审计空白，与 §八.2 口径不一致。已补：下载失败终态写一条审计（`target="*"`，`ok_count=0` / `failed_count=1`，`error` 带完整原因——含 v1.9.10 加的 mirror/proxy 上下文）。测试走真实 SDK 链路断言落库，不经 handler 复制品。
 
-### 4. 9001 文件服务路径收窄（存量 P3-2，验收方要求）——已收窄
+### 4. ~~9001 文件服务路径收窄~~ —— **已撤回（v1.9.22，见§二十二）**
 
-不做鉴权（P0-1 设计认定不变），仅收窄可读写目录防误操作：
-
-- **允许**：`/home/tmp/` 前缀；升级 staging `/opt/socket/versions/*/.staging/`（dt20 推送链路必经，自动放行）
-- **拒绝**：其余路径 403，错误信息带允许范围说明；normalize（含软链解析）之后判定，穿越/软链逃逸无效
-- **影响**：手工传文件请放 `/home/tmp/`（file_transfer 工具的指引文本已同步）；Python 靶机不受影响（跑的是 Python 代码，语义不变）
-- **验证**：升级链路端到端（PushBinary → staging）真机复验通过
+本节原「仅允许 `/home/tmp/` 与升级 staging、其余 403」的方案已作废：
+现成验收脚本会从 `/dev/shm/sess/pcap/...` 下载 pcapdump 结果，白名单与
+Python 原版「全盘可访问」契约不兼容。v1.9.22 起 :9001 GET/POST 恢复全盘
+可读写；P0-1 无鉴权设计不变。
 
 ### 5. dt6 布尔值 → 四态（存量 P2-3）——维持不改
 

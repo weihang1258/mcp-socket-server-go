@@ -441,7 +441,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 		})
 
 	// 5. file_transfer
-	add(s, ro("file_transfer", "获取客户端与靶机之间点对点传文件的命令(零网络调用,纯指引)。上传后需执行权限接 cmd_exec chmod +x。9001 拒绝连接=靶机 http_port=0(配置关闭)或版本 <1.7.0,先 upgrade_run 升级。靶机侧路径限白名单: /home/tmp/ 与 /opt/socket/versions/*/.staging/(升级自动走 staging,无需关心);传其他目录会 403,v1.9.11 起生效(Python 靶机不受限)。"),
+	add(s, ro("file_transfer", "获取客户端与靶机之间点对点传文件的命令(零网络调用,纯指引)。上传后需执行权限接 cmd_exec chmod +x。9001 拒绝连接=靶机 http_port=0(配置关闭)或版本 <1.7.0,先 upgrade_run 升级。靶机侧路径与 Python 原版一致: realpath 归一化后全盘可读写(v1.9.22 起;升级推包自动走 staging,无需关心)。"),
 		func(ctx context.Context, a fileTransferArgs) any {
 			httpPort := orDefault(a.HTTPPort, 9001)
 			var cmds []map[string]string
