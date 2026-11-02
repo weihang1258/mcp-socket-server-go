@@ -47,7 +47,7 @@ func RunStreamableHTTP(ctx context.Context, b *Bridge, host string, port int) er
 	// 中间件注入的值才能传到工具 handler（streamable.go:700）。
 	srv := &http.Server{Handler: WithSourceIP(handler)}
 	addrs := listenAddrs(host, port)
-	ln, err := net.Listen("tcp", addrs[0])
+	ln, err := net.Listen("tcp4", addrs[0])
 	if err != nil {
 		return err
 	}
