@@ -30,7 +30,7 @@ type afpacketSource struct {
 var _ pktSource = (*afpacketSource)(nil)
 
 // openPacketSocketLinux 打开 AF_PACKET（export 给 openPacketSocketFn 替换）。
-func openPacketSocketLinux(eth string) (pktSource, error) {
+func openPacketSocketLinux(eth string, bpf []bpfInstr) (pktSource, error) {
 	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, 0) // proto=0：不注册收包
 	if err != nil {
 		return nil, fmt.Errorf("socket(AF_PACKET,RAW,0): %w", err)
@@ -49,9 +49,16 @@ func openPacketSocketLinux(eth string) (pktSource, error) {
 	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, SO_TIMESTAMPING, tsFlags); err != nil {
 		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, SO_TIMESTAMPING, SOF_TIMESTAMPING_RX_SOFTWARE); err != nil {
 			if err2 := unix.SetsockoptInt(fd, unix.SOL_SOCKET, SO_TIMESTAMPNS, 1); err2 != nil {
+				tsModeNow.Store(tsModeUser)
 				log.Printf("网卡 %s 不支持任何内核时间戳（%v），回退用户态时间戳", eth, err2)
+			} else {
+				tsModeNow.Store(tsModeNS)
 			}
+		} else {
+			tsModeNow.Store(tsModeSW)
 		}
+	} else {
+		tsModeNow.Store(tsModeHW) // HW 是否真生效由 cmsg ts[0] 是否非零判定
 	}
 	// PACKET_AUXDATA（VLAN 还原；失败仅 warn）
 	const SOL_PACKET = 263
@@ -84,7 +91,14 @@ func openPacketSocketLinux(eth string) (pktSource, error) {
 	if err := setsockoptBytes(fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP, mreq); err != nil {
 		log.Printf("网卡 %s 开启 promisc 失败: %v（仍可抓本机流量）", eth, err)
 	}
-	// bind 最后做：此时才注册收包 hook，杜绝未过滤窗口
+	// BPF 先于 bind 注入：socket 创建时 proto=0 未注册收包，此时注入过滤器不丢包；
+	// bind 之后才有帧进入，天然无「bind→attach」未过滤窗口（对齐 capture.py:183-193
+	// 的 attach_filter-before-bind 顺序）。
+	if err := attachBPF(fd, bpf); err != nil {
+		unix.Close(fd)
+		return nil, fmt.Errorf("BPF 注入失败: %w", err)
+	}
+	// bind 最后做：此时才注册收包 hook
 	addr := &unix.SockaddrLinklayer{Protocol: htonsUint16(0x0003), Ifindex: iface.Index} // ETH_P_ALL（x/sys 不转字节序，必须 htons——真机验收实锤）
 	if err := unix.Bind(fd, addr); err != nil {
 		unix.Close(fd)
@@ -130,11 +144,21 @@ func (s *afpacketSource) recvFrame(buf []byte, deadline time.Time) (int, []byte,
 		unix.SetsockoptTimeval(s.fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &dl)
 	}
 	oob := make([]byte, 1024)
-	n, oobn, _, _, err := unix.Recvmsg(s.fd, buf, oob, 0)
-	if err != nil {
-		return 0, nil, err
+	for {
+		n, oobn, _, _, err := unix.Recvmsg(s.fd, buf, oob, 0)
+		if err == unix.EINTR {
+			// EINTR = 被信号打断（Go runtime 的抢占信号、SIGURG 等）。
+			// **必须重试**：往上抛的话 captureRecvLoop 会当成非超时错误 goto drained，
+			// 抓包线程就此退出——真机实测（35 enp94s0f0np0）回放 5 秒只抓到前 135 包
+			// （时间戳跨度 <1s），而内核 drops=0，正是这条路径。
+			// Python 的 socket.recvmsg 内部自动重试 EINTR，所以原版没有这个问题。
+			continue
+		}
+		if err != nil {
+			return 0, nil, err
+		}
+		return n, oob[:oobn], nil
 	}
-	return n, oob[:oobn], nil
 }
 
 func (s *afpacketSource) close() error {
@@ -150,21 +174,11 @@ func deadlineFor(t time.Time) (unix.Timeval, error) {
 	return unix.NsecToTimeval(d.Nanoseconds()), nil
 }
 
-// injectBPF 编译产物注入（recv goroutine 起跑前调用）。
-func injectBPF(src pktSource, bpf []bpfInstr) error {
-	afp, ok := src.(*afpacketSource)
-	if !ok || len(bpf) == 0 {
-		return nil
-	}
-	return attachBPF(afp.fd, bpf)
-}
-
 // syscallReadRO 只读包装（供 setsockopt* 使用，避免重复 import）。
 var _ = os.Geteuid
 
 func init() {
 	openPacketSocketFn = openPacketSocketLinux
-	attachBPFIfAvailable = injectBPF
 }
 
 // htonsUint16 x/sys SockaddrLinklayer.Protocol 不做字节序转换（raw 为网络序 BE16），

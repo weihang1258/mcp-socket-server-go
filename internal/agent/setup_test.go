@@ -22,7 +22,7 @@ func TestSetupEnvironmentWiresFileLogging(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
 
 	// 只跑日志接线那一步（SetupEnvironment 其余步骤有系统副作用）
-	setupFileLogging()
+	setupFileLogging("")
 	log.Printf("MARKER-文件日志接线")
 
 	data, err := os.ReadFile(logPath)
@@ -43,8 +43,33 @@ func TestSetupEnvironmentCallsLogging(t *testing.T) {
 	setupMachineEffects = func() {} // 隔离 sysctl/java/防火墙等真实副作用
 	t.Cleanup(func() { setupLoggingFn, setupMachineEffects = prevFn, prevMach })
 
-	SetupEnvironment()
+	SetupEnvironment("")
 	if called.Load() != 1 {
 		t.Fatalf("SetupEnvironment 须调用日志接线 1 次，实际 %d", called.Load())
+	}
+}
+
+// 配置里的 agent.log_file 必须真正生效（此前 SetupEnvironment 恒传 ""，
+// 配置项是死代码）。
+func TestSetupEnvironmentUsesConfiguredLogFile(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "custom.log")
+	t.Setenv("SOCKET_SERVER_LOG", "") // 显式参数优先于 env
+
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	var got string
+	prevFn := setupLoggingFn
+	setupLoggingFn = func(p string) { got = p }
+	prevMach := setupMachineEffects
+	setupMachineEffects = func() {}
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+		setupLoggingFn, setupMachineEffects = prevFn, prevMach
+	})
+
+	SetupEnvironment(logPath)
+	if got != logPath {
+		t.Fatalf("配置的日志路径未传入: got %q want %q", got, logPath)
 	}
 }

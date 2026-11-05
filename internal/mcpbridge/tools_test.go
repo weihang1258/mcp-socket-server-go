@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -238,7 +239,7 @@ func upgradeRunForTest(t *testing.T, b *Bridge, targets []string, version string
 		return map[string]any{"ok": 0, "version": ver, "failed": []map[string]any{{"target": "*", "reason": err.Error()}}, "results": []any{}}
 	}
 	log.Printf("upgrade_run test: v%s sha=%s...", ver, sha[:8])
-	batch := b.runBatch(context.Background(), targets, portOf(targets[0]), LkSystem, "", "upgrade_run",
+	batch := b.runBatch(context.Background(), targets, portOf(targets[0]), LkSystem, "", "bridge_upgrade",
 		map[string]any{"version": ver, "force": force}, false, 10, func(c *Client) (any, error) {
 			cur, err := c.Version()
 			if err != nil {
@@ -291,22 +292,22 @@ func TestUpgradeRunDownloadFailureWritesAudit(t *testing.T) {
 	defer cs.Close()
 
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "upgrade_run",
+		Name:      "bridge_upgrade",
 		Arguments: map[string]any{"targets": []string{"127.0.0.2"}, "version": "9.9.9"},
 	})
 	if err != nil {
-		t.Fatalf("upgrade_run 调用失败: %v", err)
+		t.Fatalf("bridge_upgrade 调用失败: %v", err)
 	}
 	if res.IsError {
-		t.Fatalf("upgrade_run 回执错误（应返回结构化 failed 而非 isError）: %+v", res.Content)
+		t.Fatalf("bridge_upgrade 回执错误（应返回结构化 failed 而非 isError）: %+v", res.Content)
 	}
 
 	e := b.Audit.LastEntry()
 	if e == nil {
 		t.Fatal("下载失败必须有审计记录（此前无）")
 	}
-	if e.Tool != "upgrade_run" || e.FailedCount != 1 {
-		t.Fatalf("审计应为 upgrade_run/failed=1: %+v", e)
+	if e.Tool != "bridge_upgrade" || e.FailedCount != 1 {
+		t.Fatalf("审计应为 bridge_upgrade/failed=1: %+v", e)
 	}
 }
 
@@ -378,22 +379,26 @@ func TestUpgradeRunApplyLostStillPolls(t *testing.T) {
 	defer cs.Close()
 
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "upgrade_run",
+		Name:      "bridge_upgrade",
 		Arguments: map[string]any{"targets": []string{m.Addr}, "version": "1.9.1", "port": portOf(m.Addr)},
 	})
 	if err != nil {
-		t.Fatalf("upgrade_run 调用失败: %v", err)
+		t.Fatalf("bridge_upgrade 调用失败: %v", err)
 	}
 	if res.IsError {
-		t.Fatalf("upgrade_run 回执错误: %+v", res.Content)
+		t.Fatalf("bridge_upgrade 回执错误: %+v", res.Content)
 	}
 	out := res.StructuredContent.(map[string]any)
 	if out["ok"] != float64(1) {
 		t.Fatalf("apply 响应丢失但升级实际完成，应经轮询确认 upgraded=1: %v", out)
 	}
 	results := out["results"].([]any)
-	if len(results) != 1 || results[0].(map[string]any)["upgraded"] != true {
+	if len(results) != 1 {
 		t.Fatalf("results: %v", out)
+	}
+	data, _ := results[0].(map[string]any)["data"].(map[string]any)
+	if data["upgraded"] != true {
+		t.Fatalf("results[0].data.upgraded 应为 true: %v", out)
 	}
 }
 
@@ -442,17 +447,16 @@ func TestToolConnLostTierMapping(t *testing.T) {
 		args      map[string]any
 		wantRetry bool // true=可重试档（只读/幂等）；false=状态未知档（非幂等）
 	}{
-		{"version", map[string]any{"targets": []string{tgt}, "port": pt, "timeout": 3}, true},
-		{"isfile", map[string]any{"targets": []string{tgt}, "path": "/x", "port": pt, "timeout": 3}, true},
-		{"isdir", map[string]any{"targets": []string{tgt}, "path": "/x", "port": pt, "timeout": 3}, true},
-		{"pcap_flow_extract", map[string]any{"targets": []string{tgt}, "pcap_dir": "/x", "port": pt, "timeout": 3}, true},
+		{"bridge_version", map[string]any{"targets": []string{tgt}, "port": pt, "timeout": 3}, true},
+		{"file_stat", map[string]any{"targets": []string{tgt}, "path": "/x", "port": pt, "timeout": 3}, true},
+		{"pcap_extract_flows", map[string]any{"targets": []string{tgt}, "pcap_dir": "/x", "port": pt, "timeout": 3}, true},
 		{"capture_stop", map[string]any{"targets": []string{tgt}, "path": "/x.pcap", "port": pt, "timeout": 3}, true},
-		{"cmd_exec", map[string]any{"targets": []string{tgt}, "args": "echo x", "port": pt, "timeout": 3}, false},
+		{"shell_exec", map[string]any{"targets": []string{tgt}, "args": "echo x", "port": pt, "timeout": 3}, false},
 		{"capture_start", map[string]any{"targets": []string{tgt}, "path": "/home/tmp/t.pcap", "port": pt, "timeout": 3}, false},
-		{"socket_listen", map[string]any{"targets": []string{tgt}, "action": "start", "listen_port": 30001, "port": pt, "timeout": 3}, false},
-		{"boce_run", map[string]any{"targets": []string{tgt}, "url": "http://127.0.0.1:1/", "timeout": 10, "port": pt}, false},
+		{"listen_start", map[string]any{"targets": []string{tgt}, "listen_port": 30001, "port": pt, "timeout": 3}, false},
+		{"probe_visit", map[string]any{"targets": []string{tgt}, "url": "http://127.0.0.1:1/", "timeout": 10, "port": pt}, false},
 		{"replay_run", map[string]any{"targets": []string{tgt}, "pcaps": []string{"/x.pcap"}, "uplink_iface": "lo", "downlink_iface": "lo", "port": pt, "timeout": 3}, false},
-		{"upgrade_run", map[string]any{"targets": []string{tgt}, "version": "1.9.1", "force": true, "port": pt}, false},
+		{"bridge_upgrade", map[string]any{"targets": []string{tgt}, "version": "1.9.1", "force": true, "port": pt}, false},
 	}
 	for _, tc := range cases {
 		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: tc.tool, Arguments: tc.args})
@@ -495,9 +499,9 @@ func TestToolConnLostTierMapping(t *testing.T) {
 		extra     map[string]any
 		wantRetry bool
 	}{
-		{"version", nil, true},
-		{"cmd_exec", map[string]any{"args": "echo x"}, false},
-		{"pcap_flow_extract", map[string]any{"pcap_dir": "/x"}, true}, // Sched.Batch 通道出口 A
+		{"bridge_version", nil, true},
+		{"shell_exec", map[string]any{"args": "echo x"}, false},
+		{"pcap_extract_flows", map[string]any{"pcap_dir": "/x"}, true}, // Sched.Batch 通道出口 A
 	}
 	for _, tc := range dialCases {
 		args := map[string]any{"targets": []string{tgt}, "port": refusedPort, "timeout": 3}
@@ -584,5 +588,71 @@ func TestListenAddrsDualStack(t *testing.T) {
 				t.Errorf("%s: host=%q 第 %d 条应 %q,实际 %q", tc.descr, tc.host, i, tc.want[i], got[i])
 			}
 		}
+	}
+}
+
+// splitHostPort 裸 IPv6 不得被末段数字误拆（fd00::5 → host "fd00:" port 5）。
+func TestSplitHostPortIPv6(t *testing.T) {
+	cases := []struct {
+		in       string
+		defPort  int
+		wantHost string
+		wantPort int
+	}{
+		{"fd00::5", 9000, "fd00::5", 9000},
+		{"::1", 9000, "::1", 9000},
+		{"fd00::abcd", 9000, "fd00::abcd", 9000},
+		{"[fd00::5]:9100", 9000, "fd00::5", 9100},
+		{"10.12.131.82:9100", 9000, "10.12.131.82", 9100},
+		{"10.12.131.82", 9000, "10.12.131.82", 9000},
+		{"host.example", 9000, "host.example", 9000},
+	}
+	for _, tc := range cases {
+		h, p := splitHostPort(tc.in, tc.defPort)
+		if h != tc.wantHost || p != tc.wantPort {
+			t.Errorf("splitHostPort(%q) = (%q,%d), 期望 (%q,%d)", tc.in, h, p, tc.wantHost, tc.wantPort)
+		}
+	}
+}
+
+// isfile 不存在 = 成功结果 exists:false（Python Scheduler.batch 恒 ok=True），
+// 不是 failed。回归：Go 曾把它当 B23 failed，LLM 无法区分「不存在」与「连接失败」。
+func TestIsfileFalseIsSuccessWithExistsFalse(t *testing.T) {
+	b := newTestBridge(t)
+	m := newMockServer(t, func(dt int32, p []byte, w *mockConnIO) {
+		if dt == 7 {
+			w.text(`{"res":false}`)
+		}
+	})
+	out := b.runBatch(context.Background(), []string{m.Addr}, portOf(m.Addr), LkNone, "", "", nil, true, 5,
+		func(c *Client) (any, error) {
+			v, err := c.Isfile("/nope")
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"exists": v}, nil
+		})
+	if out["ok"] != 1 {
+		t.Fatalf("不存在应为成功结果: %v", out)
+	}
+	rows := out["results"].([]map[string]any)
+	if len(rows) != 1 || rows[0]["exists"] != false {
+		t.Fatalf("results 应含 exists:false: %v", rows)
+	}
+	if f := out["failed"].([]map[string]any); len(f) != 0 {
+		t.Fatalf("不应有 failed: %v", f)
+	}
+}
+
+// 空表/空结果必须是 []，不是 null（Python registry.py:86-90 返回 []）。
+func TestEmptyResultsMarshalAsArrays(t *testing.T) {
+	b := newTestBridge(t)
+	got := b.Registry.ListTargets()
+	if got == nil {
+		t.Fatal("ListTargets 空表不得返回 nil")
+	}
+	raw, _ := json.Marshal(map[string]any{"targets": got})
+	if !strings.Contains(string(raw), `"targets":[]`) {
+		t.Fatalf("空表应序列化为 []: %s", raw)
 	}
 }

@@ -236,9 +236,9 @@ func (li *listenInstance) pids() []string {
 		"ss -lptn 'sport = :%d'|grep users|awk -F ',' '{print $2}'|awk -F '=' '{print $2}'", li.port))
 	out, err := cmd.Output()
 	if err != nil {
-		return nil
+		return []string{} // Python pid.splitlines() 过滤空行 → 恒为列表；nil 会被 marshal 成 null
 	}
-	var pids []string
+	pids := []string{} // 初始化非 nil：无匹配时 Python 是 []，nil 会被 marshal 成 null
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			pids = append(pids, line)

@@ -292,17 +292,17 @@ func (r *Registry) ListTargets() []map[string]any {
 	defer r.mu.Unlock()
 	rows, err := r.conn.Query("SELECT host, port, tags, note, created_at FROM targets ORDER BY created_at")
 	if err != nil {
-		return nil
+		return []map[string]any{} // 空表 Python 返回 []，nil 会被 marshal 成 null
 	}
 	defer rows.Close()
-	var out []map[string]any
+	out := []map[string]any{}
 	for rows.Next() {
 		var host, tags, note, created string
 		var port int
 		if err := rows.Scan(&host, &port, &tags, &note, &created); err != nil {
 			continue
 		}
-		var tagList []string
+		tagList := []string{}
 		json.Unmarshal([]byte(tags), &tagList)
 		out = append(out, map[string]any{"host": host, "port": port, "tags": tagList, "note": note, "created_at": created})
 	}

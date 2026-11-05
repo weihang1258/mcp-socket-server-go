@@ -2,8 +2,8 @@ package mcpbridge
 
 import (
 	"bytes"
-	"context"
 	"compress/gzip"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -485,7 +485,7 @@ func TestRunBatchEOFGetsFriendlyText(t *testing.T) {
 	}()
 	addr := l.Addr().(*net.TCPAddr)
 	b := newTestBridge(t)
-	out := b.runBatch(context.Background(), []string{"127.0.0.1"}, addr.Port, LkNone, "", "version", nil, true, 5,
+	out := b.runBatch(context.Background(), []string{"127.0.0.1"}, addr.Port, LkNone, "", "bridge_version", nil, true, 5,
 		func(c *Client) (any, error) { return c.Version() })
 	failed := out["failed"].([]map[string]any)
 	if len(failed) != 1 {
@@ -517,7 +517,7 @@ func TestRunBatchConnLostNonIdempotentText(t *testing.T) {
 	}()
 	addr := l.Addr().(*net.TCPAddr)
 	b := newTestBridge(t)
-	for _, tool := range []string{"cmd_exec", "replay_run"} { // 机制层；工具→档位映射由 TestToolConnLostTierMapping 锁
+	for _, tool := range []string{"shell_exec", "replay_run"} { // 机制层；工具→档位映射由 TestToolConnLostTierMapping 锁
 		out := b.runBatch(context.Background(), []string{"127.0.0.1"}, addr.Port, LkNone, "", tool, nil, false, 5,
 			func(c *Client) (any, error) { return c.Version() })
 		failed := out["failed"].([]map[string]any)

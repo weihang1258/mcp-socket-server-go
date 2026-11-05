@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // 真机验收（设计 §9.4）：chromedp 驱动真实 chromium 走重定向链。
@@ -143,5 +145,44 @@ func TestRealBoceUnimplementedModeFails(t *testing.T) {
 	json.Unmarshal(unwrapDT131(t, resp), &m)
 	if m["total"] != float64(2) || m["fail"] != float64(2) || m["success"] != float64(0) {
 		t.Fatalf("弹窗 must all fail with total=count: %v", m)
+	}
+}
+
+// count > 1 必须并行（Python asyncio.gather）：串行会让耗时 ≈ count×单次，
+// 撞穿 MCP 桥的 timeout+10。这里用注入的 100ms 单次任务验证总耗时远小于串行和。
+func TestBoceBrowserCountIsParallel(t *testing.T) {
+	prev := boceRunOnceFn
+	t.Cleanup(func() { boceRunOnceFn = prev })
+	const count = 8
+	var inFlight, maxInFlight atomic.Int32
+	boceRunOnceFn = func(string, string, int, string) bool {
+		n := inFlight.Add(1)
+		for {
+			m := maxInFlight.Load()
+			if n <= m || maxInFlight.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond) // 保证并发窗口重叠
+		inFlight.Add(-1)
+		return true
+	}
+	payload, _ := json.Marshal(map[string]any{"url": "http://example.invalid/", "chromium_path": "/bin/true"})
+	resp, err := boceBrowser(payload, "重定向", count, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 直接数并发峰值，不靠墙钟阈值：CI/负载机上一台忙就会让耗时抖动，
+	// 而「同时在跑几次」是串行/并行的定义本身。
+	if got := maxInFlight.Load(); got < 2 {
+		t.Fatalf("count=%d 应并发执行（Python asyncio.gather），实际峰值并发 %d（串行）", count, got)
+	}
+	var r struct {
+		Total   int `json:"total"`
+		Success int `json:"success"`
+	}
+	json.Unmarshal(resp[4:], &r)
+	if r.Total != count || r.Success != count {
+		t.Fatalf("统计错: %+v", r)
 	}
 }

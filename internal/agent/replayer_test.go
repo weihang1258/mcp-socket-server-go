@@ -420,3 +420,81 @@ func resetReplaySender(t *testing.T) {
 	replayPrepareFn = func(up, down string) error { return nil } // 假发送器不需要真 socket
 	t.Cleanup(func() { replaySendFn = prev; replayPrepareFn = prevPrep; replaySender = nil })
 }
+
+// buildModifiedPacket 短传输层不得 panic（Python 整段 try/except → 返回原包）。
+// 回归：force_dport + 2/3 字节 TCP 段曾触发 index out of range 打死 agent 进程。
+func TestBuildModifiedPacketShortTransportNoPanic(t *testing.T) {
+	mkPkt := func(transLen int, v6 bool) []byte {
+		hdrLen, ethOff := 20, 14
+		if v6 {
+			hdrLen = 40
+		}
+		pkt := make([]byte, ethOff+hdrLen+transLen)
+		pkt[12], pkt[13] = 0x08, 0x00
+		if v6 {
+			pkt[14] = 0x60
+			pkt[14+6] = 6
+		} else {
+			pkt[14] = 0x45
+			pkt[14+9] = 6
+		}
+		return pkt
+	}
+	src4, src6 := "10.0.0.9", "fd00::9"
+	dport := uint16(80)
+	cases := []struct {
+		name string
+		pkt  []byte
+		src  *string
+	}{
+		{"v4/2B", mkPkt(2, false), &src4},
+		{"v4/3B", mkPkt(3, false), &src4},
+		{"v6/2B", mkPkt(2, true), &src6},
+		{"v6/3B", mkPkt(3, true), &src6},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("短传输层 panic（Python 返回原包）: %v", r)
+				}
+			}()
+			buildModifiedPacket(tc.pkt, tc.src, nil, nil, &dport)
+		})
+	}
+}
+
+// §6.2：dt0 回放到点必须停发包并回 status=timeout（而不是把整份 pcap 发完）。
+// 用 0 Mbps 以外的限速制造可观测的持续时间，并让 timeout_s 极小。
+func TestReplayerTimeoutStopsSending(t *testing.T) {
+	resetReplaySender(t)
+	dir := t.TempDir()
+	p := filepath.Join(dir, "t.pcap")
+	frames := [][]byte{}
+	for i := 0; i < 200; i++ {
+		frames = append(frames, ipv4("10.22.0.1", "10.22.0.2", 17, udpSeg(1000, 2000)))
+	}
+	writeReplayPcap(t, p, int(1e6), frames...)
+
+	// 1 Mbps + 200×约 100B ⇒ 完整回放约 0.16 秒；限速 0.05 秒超时必停在中途
+	m, err := replayDT0(t, map[string]any{
+		"pcaps": []string{p}, "uplink_iface": "up0", "downlink_iface": "down0",
+		"mbps": 1, "timeout_s": 0.05,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m["status"] != "timeout" || m["timeout"] != true {
+		t.Fatalf("want status=timeout: %v", m)
+	}
+	if n := replaySender.count(); n >= 200 {
+		t.Fatalf("超时后仍发满 200 包：%d", n)
+	}
+	if m["killed"] != true || m["verified"] != true {
+		t.Fatalf("cleanup 字段: %v", m)
+	}
+	// 回执里有已发统计，调用方不必猜"发了多少"
+	if _, ok := m["stats"].(map[string]any); !ok {
+		t.Fatalf("缺 stats: %v", m)
+	}
+}

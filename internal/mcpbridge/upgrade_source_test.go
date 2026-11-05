@@ -228,6 +228,30 @@ func TestHTTPClientBadProxyWarns(t *testing.T) {
 	}
 }
 
+// 本机地址必须绕开代理：三链升级真机验收把升级源指到 127.0.0.1 的本地
+// HTTP 服务，代理把它当远端转走 → HTTP 502，升级链第一步就断。curl 的
+// NO_PROXY、Go 的 ProxyFromEnvironment 对环回同样直连。
+func TestHTTPClientBypassesProxyForLoopback(t *testing.T) {
+	c := httpClient(5, "http://10.12.186.204:7897")
+	tr := c.Transport.(*http.Transport)
+	for _, raw := range []string{
+		"http://127.0.0.1:38717/v1.9.1/socket_server",
+		"http://localhost:8080/x",
+		"http://[::1]:9001/files",
+		"http://127.5.6.7/x",
+	} {
+		req, _ := http.NewRequest("GET", raw, nil)
+		if u, _ := tr.Proxy(req); u != nil {
+			t.Fatalf("%s 必须直连（不走代理），实际 -> %v", raw, u)
+		}
+	}
+	// 非环回仍走代理
+	req, _ := http.NewRequest("GET", "http://github.com/x", nil)
+	if u, _ := tr.Proxy(req); u == nil {
+		t.Fatal("远端地址必须继续走代理（别把 NO_PROXY 修成全局直连）")
+	}
+}
+
 // 版本归一化与 Python `str.strip().lstrip("v")` 一致：多个 v 前缀也剥。
 // 这是刻意保真的复刻（不是缺陷）——但必须锁住，否则有人"顺手修"成
 // strings.TrimPrefix(s, "v") 会与 Python 版行为分叉。

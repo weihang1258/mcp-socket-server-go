@@ -38,7 +38,16 @@ type Client struct {
 	Host    string
 	Port    int
 	Timeout int
-	conn    net.Conn
+	// CmdTimeout 本次借出期间的工具总超时（秒），由 runOne 写入；0 = 不发 timeout_s
+	//（agent 不限时，与旧版一致）。socket deadline 另加 10 秒余量，保证 agent 有机会
+	// 先杀进程再回包（方案 §6.2 第 4 条）。
+	CmdTimeout int
+	// BudgetEnd 本次工具调用的总截止时刻。每条子命令只发"剩余预算"，这样多步编排
+	// （安装/切换/升级）共享一个总预算，而不是每条命令各自拿满整个工具超时。
+	BudgetEnd time.Time
+	// agentVersion dt14 结果（懒查一次）；空 = 还没查过。
+	agentVersion string
+	conn         net.Conn
 }
 
 func NewClient(host string, port, timeout int) *Client {
@@ -198,7 +207,11 @@ func (c *Client) recvGzipRaw() (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	zr, _ := gzip.NewReader(strings.NewReader(string(gz)))
+	// 非 gzip 回执（对端异常/协议错位）时 NewReader 返回 nil，直接 ReadAll 会 panic
+	zr, err := gzip.NewReader(strings.NewReader(string(gz)))
+	if err != nil {
+		return nil, fmt.Errorf("回执不是 gzip 帧（协议错位？）: %w", err)
+	}
 	out, err := io.ReadAll(zr)
 	if err != nil {
 		return nil, err
@@ -255,6 +268,7 @@ func (c *Client) Version() (string, error) {
 	if err := json.Unmarshal(b, &v); err != nil {
 		return "", err
 	}
+	c.agentVersion = v // 任何一次查询都缓存，省掉后续子命令的额外 dt14
 	return v, nil
 }
 
@@ -308,6 +322,11 @@ func (c *Client) recvLenPrefixedArray() ([]any, error) {
 // CmdExec dt1：stdout >65536 字符截断（Python str len）；wait=false 回 nil。
 func (c *Client) CmdExec(args, cwd string, env map[string]string, wait bool) (map[string]any, error) {
 	payload := map[string]any{"args": args, "wait": wait}
+	// 老版本 agent 不认识 timeout_s，会回 "unexpected keyword argument" 且什么都不执行。
+	// 版本不明/低于本次引入该字段的版本时宁可不带超时，也不能让命令整体失败。
+	if v := c.agentTimeoutS(); v > 0 && c.supportsTimeoutS() {
+		payload["timeout_s"] = v
+	}
 	if cwd != "" {
 		payload["cwd"] = cwd
 	}
@@ -331,6 +350,45 @@ func (c *Client) CmdExec(args, cwd string, env map[string]string, wait bool) (ma
 		m["stdout_truncated"] = true
 	}
 	return m, nil
+}
+
+// timeoutSAgentMin 从该 agent 版本起 dt1 接受 timeout_s（本仓同步引入）。
+//
+// 1.9.27 而不是 1.9.26：timeout_s 落进源码时漏了升版本号，1.9.26 的已发布
+// 二进制（2026-11-03 09:53 构建）并不认识它——真机上每条 dt1 都回
+// "exec_cmd_subprocess() got unexpected keyword argument timeout_s" 并断连。
+// 能力变更必须升版本号（scripts/release.sh 以 handlers.go 的 Version 为准），
+// 否则版本门形同虚设。
+const timeoutSAgentMin = "1.9.27"
+
+// supportsTimeoutS 靶机 agent 是否支持 timeout_s。版本未知时按不支持处理：
+// 不带超时最多是"停不下来"（旧行为），带错参数则命令根本不执行。
+func (c *Client) supportsTimeoutS() bool {
+	v := c.agentVersion
+	if v == "" {
+		ver, err := c.Version()
+		if err != nil {
+			return false
+		}
+		v, c.agentVersion = ver, ver
+	}
+	return compareVersions(v, timeoutSAgentMin) >= 0
+}
+
+// agentTimeoutS 本次子命令可用的 agent 侧超时（秒）：0 = 不传 timeout_s。
+// 有总截止时刻时按剩余预算算（至少 1 秒，到点后立刻失败），否则退回工具总超时。
+func (c *Client) agentTimeoutS() int {
+	if !c.BudgetEnd.IsZero() {
+		rem := int(time.Until(c.BudgetEnd).Seconds())
+		if rem < 1 {
+			return 1
+		}
+		if c.CmdTimeout > 0 && rem > c.CmdTimeout {
+			rem = c.CmdTimeout
+		}
+		return rem
+	}
+	return c.CmdTimeout
 }
 
 func runeLen(s string) int { return len([]rune(s)) }
@@ -400,6 +458,9 @@ func (c *Client) CaptureStop(path string) (map[string]any, error) {
 func (c *Client) BoceRun(url string, count, interval, threadCount, timeout int, mode, chromiumPath string) (map[string]any, error) {
 	payload := map[string]any{"url": url, "count": count, "interval": interval,
 		"thread_count": threadCount, "timeout": timeout, "mode": mode}
+	if v := c.agentTimeoutS(); v > 0 && c.supportsTimeoutS() {
+		payload["timeout_s"] = v // 拨测总预算（方案 §6.2）；老 agent 不认这个键
+	}
 	if chromiumPath != "" {
 		payload["chromium_path"] = chromiumPath
 	}
@@ -421,6 +482,9 @@ func (c *Client) BoceRun(url string, count, interval, threadCount, timeout int, 
 func (c *Client) ReplayRun(pcaps []string, upIface, downIface string, upVlan, downVlan *uint16, mbps int,
 	forceIpSrc, forceIpDst *string, forceSport, forceDport *uint16) (map[string]any, error) {
 	payload := map[string]any{"pcaps": pcaps, "uplink_iface": upIface, "downlink_iface": downIface, "mbps": mbps}
+	if v := c.agentTimeoutS(); v > 0 && c.supportsTimeoutS() {
+		payload["timeout_s"] = v
+	}
 	if upVlan != nil {
 		payload["uplink_vlan"] = *upVlan
 	}
@@ -447,9 +511,17 @@ func (c *Client) ReplayRun(pcaps []string, upIface, downIface string, upVlan, do
 	if err != nil {
 		return nil, err
 	}
+	if len(strings.TrimSpace(string(b))) == 0 {
+		// 回放是长操作（50 Mbps × 300 秒），响应只在一帧到底时到达；这里收空
+		// 只可能真的到点——交给 runOne 的 cleanup 语义处理，别伪装成业务失败。
+		return map[string]any{"timeout": true, "killed": false, "verified": false}, nil
+	}
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, err
+	}
+	if m["status"] == "timeout" {
+		return m, nil
 	}
 	if m["status"] == "error" {
 		msg, _ := m["message"].(string)
@@ -676,7 +748,7 @@ func (p *TargetPool) Acquire(borrowTimeout, socketTimeout int) (*Client, error) 
 		// 尝试自然覆盖。
 		reuse.Close()
 	}
-	c := NewClient(p.host, p.portN, socketTimeout)
+	c := NewClient(p.host, p.portN, socketTimeout+10) // +10：留给 agent 先杀进程再回包（方案 §6.2 第 4 条）
 	if err := c.Connect(); err != nil {
 		p.mu.Lock()
 		p.inuse--
@@ -703,10 +775,12 @@ func (p *TargetPool) Release(c *Client, healthy bool) {
 
 // TargetResult 批量结果（_run_batch 用）。
 type TargetResult struct {
-	Target string
-	Ok     bool
-	Data   any
-	Err    string
+	Target  string
+	Ok      bool
+	Data    any
+	Err     string
+	ErrType string   // 已知错误类型时直接给（超时/建连失败），空则回落到文本判定
+	Cleanup *Cleanup // 仅 agent 超时回执填充
 }
 
 // Scheduler 全局池表 + 并发上限 50。
@@ -719,6 +793,10 @@ type Scheduler struct {
 func NewScheduler() *Scheduler {
 	return &Scheduler{pools: map[string]*TargetPool{}, sem: make(chan struct{}, 50)}
 }
+
+// Sem 全局并发闸门（Python Scheduler 的 max_global_concurrency 语义）。
+// 每次工具调用各建一个 sem 会让并发上限变成「调用数 × 50」（评审 P2-4）。
+func (s *Scheduler) Sem() chan struct{} { return s.sem }
 
 func (s *Scheduler) GetPool(host string, port int) *TargetPool {
 	s.mu.Lock()
@@ -808,4 +886,92 @@ func (p *TargetPool) condWait(remain time.Duration) {
 	timer := time.AfterFunc(remain, func() { p.cond.Broadcast() })
 	defer timer.Stop()
 	p.cond.Wait()
+}
+
+// ---- 文件传输（dt21/22/24 上传、dt21+dt3 下载；dpi_* 读写配置文件用）----
+
+// downloadFile 走 dt21（文件名）+ dt3（gzip 内容），返回原始字节。
+// 与 Python getfo 同序：先 21 握手，再 3 取内容。
+func (c *Client) downloadFile(path string) ([]byte, error) {
+	if err := c.dt21(path, true); err != nil {
+		return nil, err
+	}
+	p, _ := json.Marshal(map[string]any{"gzip": true})
+	if err := c.send(3, p); err != nil {
+		return nil, err
+	}
+	head, err := c.recvN(8)
+	if err != nil {
+		return nil, err
+	}
+	n := binary.LittleEndian.Uint64(head)
+	if n > 1<<30 {
+		return nil, fmt.Errorf("下载长度异常: %d", n)
+	}
+	body, err := c.recvN(int(n))
+	if err != nil {
+		return nil, err
+	}
+	zr, err := gzip.NewReader(strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(zr)
+}
+
+// uploadFile dt21 文件名 + dt22 长度 + dt24 写盘（gzip 压缩传输）。
+func (c *Client) uploadFile(path string, content []byte) error {
+	if len(content) == 0 {
+		content = []byte("^$") // Python putfo 的空文件哨兵
+	}
+	var buf strings.Builder
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(content); err != nil {
+		return err
+	}
+	if err := zw.Close(); err != nil {
+		return err
+	}
+	compressed := []byte(buf.String())
+	if err := c.dt21(path, true); err != nil {
+		return err
+	}
+	lenFrame := make([]byte, 8)
+	binary.LittleEndian.PutUint64(lenFrame, uint64(len(compressed)))
+	if err := c.send(22, lenFrame); err != nil {
+		return err
+	}
+	if _, err := c.recvUntilTimeout(300 * time.Millisecond); err != nil {
+		return err
+	}
+	if err := c.send(24, compressed); err != nil {
+		return err
+	}
+	_, err := c.recvUntilTimeout(300 * time.Millisecond)
+	return err
+}
+
+// dt21 发文件名并等 "21 ok"。
+func (c *Client) dt21(path string, gzip bool) error {
+	p, _ := json.Marshal(map[string]any{"filepath": path, "gzip": gzip})
+	if err := c.send(21, p); err != nil {
+		return err
+	}
+	ack, err := c.recvUntilTimeout(300 * time.Millisecond)
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(string(ack), "21 ok") {
+		return fmt.Errorf("dt21 握手失败: %q", string(ack))
+	}
+	return nil
+}
+
+// connErrType fn 执行期错误的类型：在途断连 = network，其余按文本判定。
+// 有了结构化类型就不再靠中文串猜"是不是超时"。
+func connErrType(err error) string {
+	if isConnLost(err) {
+		return ErrNetwork
+	}
+	return "" // 交回 classifyErr 兜底
 }

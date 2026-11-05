@@ -9,7 +9,7 @@ import (
 )
 
 // Version 靶机版本号（dt14/dt19 上报；发行时 -ldflags 覆盖）。
-var Version = "1.9.23"
+var Version = "1.9.27"
 
 // Repo 升级互操作的仓库标识（dt19）。
 const Repo = "weihang1258/socket_server"
@@ -163,7 +163,7 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		return pythonCmd(payload)
 	case 15: // 解压 zip：恒回裸 b"ok"（unzip 缺失/失败也 ok）；**data 未知键 → 断连
 		logHandler("解压zip文件", dt, payload)
-		if err := strictKeys("unzip", payload, "file", "outdir", "passwd", "overwrite"); err != nil {
+		if err := strictKeys("unzip", payload, "file", "outdir", "passwd", "overwrite", "timeout_s"); err != nil {
 			return nil, err
 		}
 		if err := requireKeys("unzip", payload, "file"); err != nil {
@@ -229,11 +229,30 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return nil, err
 		}
+		// 默认值只在「键缺失」时生效（Python 签名默认只对缺省生效）：
+		//   path:null      → os.path.lexists(None) TypeError → 断连
+		//   path:""        → lexists("") 假 → 子进程 open("") 失败 → res:false
+		//   single_queue:null → `if single_queue:` 为假 → 不改网卡队列
+		var raw map[string]json.RawMessage
+		json.Unmarshal(payload, &raw)
+		pathSet := false
+		if v, ok := raw["path"]; ok {
+			if string(v) == "null" {
+				return nil, fmt.Errorf("tcpdump_start() path=None: os.path.lexists(None) TypeError")
+			}
+			var sp string
+			if err := json.Unmarshal(v, &sp); err != nil {
+				return nil, err
+			}
+			p.Path, pathSet = sp, true
+		}
 		sq := true
 		if p.SingleQueue != nil {
 			sq = *p.SingleQueue
+		} else if v, ok := raw["single_queue"]; ok && string(v) == "null" {
+			sq = false // Python None 为假
 		}
-		if p.Path == "" {
+		if !pathSet {
 			p.Path = "/home/tmp/tmp.pcap"
 		}
 		ok, err := tcpdumpStart(p.Eth, p.Path, p.Extended, sq)
@@ -252,13 +271,21 @@ func Do(cs *ConnState, dt int32, payload []byte) ([]byte, error) {
 		if err := json.Unmarshal(payload, &p); err != nil {
 			return nil, err
 		}
-		if p.Path == "" {
+		// 同上：显式 "" / null 不得被当成缺省（Python "" → 未在抓 → res:true）
+		var raw map[string]json.RawMessage
+		json.Unmarshal(payload, &raw)
+		if _, ok := raw["path"]; !ok {
 			p.Path = "/home/tmp/tmp.pcap"
+		} else if string(raw["path"]) == "null" {
+			return nil, fmt.Errorf("tcpdump_stop() path=None: os.path.lexists(None) TypeError")
 		}
 		return json.Marshal(resBool(tcpdumpStop(p.Path)))
 	case 20: // 升级推送落地：同步段返回终态；后台 0.3s 后切链+重启
 		logHandler("升级推送落地", dt, payload)
-		resp, rv := applyPushedUpgrade(payload)
+		resp, rv, err := applyPushedUpgrade(payload)
+		if err != nil {
+			return nil, err // 畸形 JSON → 断连（Python json.loads 异常冒泡）
+		}
 		if rv != "" {
 			go restartAfterUpgrade(rv)
 		}

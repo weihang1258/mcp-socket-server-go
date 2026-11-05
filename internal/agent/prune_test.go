@@ -90,3 +90,42 @@ func TestPruneAtStartup(t *testing.T) {
 		t.Fatalf("当前版本必须保留: %v", err)
 	}
 }
+
+// current 软链指向的版本永远不能删，即便它不是正在跑的版本、也不在最近 keep 内。
+// 2026-11-02 本机实测：回滚后 current → 1.8.3（Python 版），起一个 v1.9.24 的
+// agent 做验收，启动清理按 Version 保留最近 3 个，把 1.8.3 目录删掉 → 软链悬空，
+// 下次 systemd 重启服务直接起不来。
+func TestPruneOldVersionsNeverDeletesCurrentLinkTarget(t *testing.T) {
+	dir := t.TempDir()
+	prevRoot := upgradeRoot
+	defer func() { upgradeRoot = prevRoot }()
+	upgradeRoot = dir
+
+	for _, v := range []string{"1.8.3", "1.9.21", "1.9.22", "1.9.23", "1.9.24"} {
+		os.MkdirAll(filepath.Join(dir, "versions", v), 0o755)
+	}
+	if err := os.Symlink(filepath.Join(dir, "versions", "1.8.3"), filepath.Join(dir, "versions", "current")); err != nil {
+		t.Fatalf("建软链: %v", err)
+	}
+
+	// 正在跑的是 1.9.24（回滚前的新版本），keep=2 → 1.8.3 本应被删
+	if err := pruneOldVersions("1.9.24", 2); err != nil {
+		t.Fatalf("pruneOldVersions: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "versions", "1.8.3")); err != nil {
+		t.Fatalf("current 软链指向的版本绝不能被删: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "versions", "1.9.21")); err == nil {
+		t.Fatalf("1.9.21 既非运行版本也非软链目标，应被清理")
+	}
+	// 软链必须仍然可达（悬空链 = 服务起不来）
+	if _, err := os.Stat(filepath.Join(dir, "versions", "current", "socket_server")); err != nil &&
+		!os.IsNotExist(err) {
+		t.Fatalf("current 解析异常: %v", err)
+	}
+	if target, err := os.Readlink(filepath.Join(dir, "versions", "current")); err != nil {
+		t.Fatalf("current 软链丢失: %v", err)
+	} else if filepath.Base(target) != "1.8.3" {
+		t.Fatalf("current 指向被改写: %s", target)
+	}
+}

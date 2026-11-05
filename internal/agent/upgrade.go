@@ -31,7 +31,13 @@ var restartServiceFn = defaultRestartService
 func defaultRestartService() error { return svcAgentRestart() }
 
 // overrideClients 测试注入活跃客户端数；默认 -1 = 用真实 Clients()。
-var overrideClients atomic.Int64
+// atomic.Int64 零值是 0，所以必须在 init 里显式置 -1——否则 activeClientsNow()
+// 恒返回 0，「还有其他客户端连接」的拒绝逻辑永远不会触发。
+var overrideClients = func() *atomic.Int64 {
+	v := &atomic.Int64{}
+	v.Store(-1)
+	return v
+}()
 
 func activeClientsNow() int64 {
 	if n := overrideClients.Load(); n >= 0 {
@@ -209,44 +215,45 @@ var (
 
 // applyPushedUpgrade dt20 同步段（_apply_pushed_upgrade 语义顺序）。
 // 返回响应字节；restartVersion 非空 → 后台 0.3s 后 switch_to。
-func applyPushedUpgrade(payload []byte) ([]byte, string) {
+// err 非空 = 畸形 JSON（Python json.loads 抛异常 → do() 冒泡 → 断连无响应）。
+func applyPushedUpgrade(payload []byte) ([]byte, string, error) {
 	var p struct {
 		Version string `json:"version"`
 		SHA     string `json:"sha256"`
 		Force   bool   `json:"force"`
 	}
 	if err := json.Unmarshal(payload, &p); err != nil {
-		return nil, "" // Python json.loads 异常 → do() 冒泡 → 断连无响应
+		return nil, "", err // Python json.loads 异常 → do() 冒泡 → 断连无响应
 	}
 	version := normalizeVersion(p.Version)
 	if !versionRe.MatchString(version) {
-		return jsonMarshal(map[string]string{"error": "version 参数非法（期望如 1.8.0）"}), ""
+		return jsonMarshal(map[string]string{"error": "version 参数非法（期望如 1.8.0）"}), "", nil
 	}
 	sha := strings.ToLower(strings.TrimSpace(p.SHA))
 	if len(sha) != 64 || !isHex64(sha) {
-		return jsonMarshal(map[string]string{"error": "缺少或非法 sha256（需 64 位十六进制）"}), ""
+		return jsonMarshal(map[string]string{"error": "缺少或非法 sha256（需 64 位十六进制）"}), "", nil
 	}
 	if !readAutoupgrade() {
-		return jsonMarshal(map[string]string{"error": "本机 autoupgrade=off，已拒绝升级（/opt/socket/config 改为 on 后重试）"}), ""
+		return jsonMarshal(map[string]string{"error": "本机 autoupgrade=off，已拒绝升级（/opt/socket/config 改为 on 后重试）"}), "", nil
 	}
 	select {
 	case upgradeLock <- struct{}{}:
 		defer func() { <-upgradeLock }()
 	default:
-		return jsonMarshal(map[string]string{"error": "升级进行中，请勿重复下发"}), ""
+		return jsonMarshal(map[string]string{"error": "升级进行中，请勿重复下发"}), "", nil
 	}
 	// active_clients>1（含 dt20 自身这条连接）且非 force → 拒
 	if n := activeClientsNow(); n > 1 && !p.Force {
 		return jsonMarshal(map[string]string{
 			"error": fmt.Sprintf("还有 %d 个其它客户端连接，拒绝升级（force=true 可强制）", n-1),
-		}), ""
+		}), "", nil
 	}
 	ok, err := finalizePushedVersion(version, sha)
 	if !ok {
 		log.Printf("升级落盘失败: %v", err)
-		return jsonMarshal(map[string]string{"error": err.Error()}), ""
+		return jsonMarshal(map[string]string{"error": err.Error()}), "", nil
 	}
-	return jsonMarshal(map[string]any{"ok": true, "version": version}), version
+	return jsonMarshal(map[string]any{"ok": true, "version": version}), version, nil
 }
 
 // dt20 后台段：0.3s 让响应先送达（字节已入内核缓冲），再切链+重启。

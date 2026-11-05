@@ -39,7 +39,7 @@ func TestStartAgentPrefetchesChromium(t *testing.T) {
 	var called atomic.Int32
 	prefetchChromium = func() { called.Add(1) }
 	prevSetup := setupEnv
-	setupEnv = func() {}
+	setupEnv = func(string) {}
 	prevHTTP, prevPort := startHTTPFile, readHTTPPort
 	startHTTPFile = func(int) (func(), error) { return func() {}, nil }
 	readHTTPPort = func() int { return 0 }
@@ -65,7 +65,7 @@ func TestStartAgentNoPrefetchWhenDisabled(t *testing.T) {
 	var called atomic.Int32
 	prefetchChromium = func() { called.Add(1) }
 	prevSetup := setupEnv
-	setupEnv = func() {}
+	setupEnv = func(string) {}
 	prevHTTP, prevPort := startHTTPFile, readHTTPPort
 	startHTTPFile = func(int) (func(), error) { return func() {}, nil }
 	readHTTPPort = func() int { return 0 }

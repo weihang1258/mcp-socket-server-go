@@ -20,6 +20,7 @@ func TestRealAFPacketCaptureOnLoopback(t *testing.T) {
 	prev := openPacketSocketFn
 	openPacketSocketFn = openPacketSocketLinux
 	t.Cleanup(func() { openPacketSocketFn = prev })
+	stubOffloadOff(t) // 真机用例也不许改本机网卡的 offload
 
 	path := filepath.Join(t.TempDir(), "real.pcap")
 	src := newFakeSource()

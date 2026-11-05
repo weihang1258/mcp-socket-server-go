@@ -252,8 +252,6 @@ func TestInstallOverwritesExistingVersion(t *testing.T) {
 	}
 }
 
-
-
 // status 必须给出拨测依赖诊断：chromium 已下载但缺库时要列出缺哪些 .so、
 // 并给出可直接复制的装包命令。未装 chromium 时不该报（首次 boce 才下载）。
 func TestStatusReportsMissingChromiumLibs(t *testing.T) {

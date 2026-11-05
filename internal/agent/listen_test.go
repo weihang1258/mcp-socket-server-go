@@ -286,3 +286,18 @@ func TestListenSocketbinFlush(t *testing.T) {
 	}
 	t.Fatal("socketbin flush never happened")
 }
+
+// pids() 命令失败/无匹配时返回空列表而非 nil（nil → JSON null，Python 恒为 []）。
+func TestListenPidsEmptyIsListNotNull(t *testing.T) {
+	var li listenInstance
+	li.port = freePort(t) // 该端口无人监听 → ss/grep 退出非 0
+	if got := li.pids(); got == nil {
+		t.Fatal("pids() 无匹配时不得返回 nil（会被 marshal 成 null）")
+	} else if len(got) != 0 {
+		t.Fatalf("pids() 应为空列表, 实际 %v", got)
+	}
+	b, _ := json.Marshal(li.pids())
+	if string(b) != "[]" {
+		t.Fatalf("JSON 应为 [], 实际 %s", b)
+	}
+}

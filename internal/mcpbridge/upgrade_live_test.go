@@ -182,10 +182,10 @@ func TestLiveThreeChainUpgradeInterop(t *testing.T) {
 	// → 升级后首个调用失败一次；真实客户端即重试，重试必须成功
 	runUpgrade := func(chain, ver string) map[string]any {
 		args := map[string]any{"targets": []string{"127.0.0.1"}, "version": ver, "timeout": 60}
-		out := mcpCall(t, cs, "upgrade_run", args)
+		out := mcpCall(t, cs, "bridge_upgrade", args)
 		if out["ok"] != float64(1) {
 			t.Logf("%s 首调失败（升级后死连接 quirk，预期可发生）: %v", chain, out["failed"])
-			out = mcpCall(t, cs, "upgrade_run", args)
+			out = mcpCall(t, cs, "bridge_upgrade", args)
 			if out["ok"] != float64(1) {
 				t.Fatalf("%s 重试仍失败: %v", chain, out)
 			}

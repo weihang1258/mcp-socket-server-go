@@ -106,11 +106,24 @@ func boceBrowser(payload []byte, mode string, count, timeout int) ([]byte, error
 
 	start := time.Now()
 	success := 0
+	// Python boce.py:401-407 `asyncio.gather(*tasks)` —— count 次拨测是**并行**的。
+	// 串行 for 循环会让 count=100 耗时 ≈ count×(goto+3s)，直接撞穿桥的 timeout+10；
+	// 并发后总耗时≈单次耗时，与 Python 对齐。
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	for i := 0; i < count; i++ {
-		if runSingleRedirect(chromium, req.Url, timeout, mode) {
-			success++
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok := boceRunOnceFn(chromium, req.Url, timeout, mode)
+			mu.Lock()
+			if ok {
+				success++
+			}
+			mu.Unlock()
+		}()
 	}
+	wg.Wait()
 	fail := count - success
 	ratio := 0.0
 	if count > 0 {
@@ -122,6 +135,9 @@ func boceBrowser(payload []byte, mode string, count, timeout int) ([]byte, error
 		SuccessRatio: fmt.Sprintf("%.2f%%", ratio),
 	}), nil
 }
+
+// boceRunOnceFn 单次拨测注入点（测试用；生产恒 runSingleRedirect）。
+var boceRunOnceFn = runSingleRedirect
 
 // runSingleRedirect 单次拨测。Python 仅异常串含 "Connection is closed" 且非 retry 才
 // 关 browser 重试一次（boce.py:380-389）；判定失败直接返回不重试。

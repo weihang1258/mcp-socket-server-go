@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,18 +20,37 @@ import (
 // 验收 #22 指出。本测试锁定 Python 原文案（JSON 用 Python repr 单引号风格）。
 
 // captureLog 把标准日志改写到 buffer，测试结束还原。
-func captureLog(t *testing.T) *bytes.Buffer {
+// syncBuffer 并发安全的日志缓冲：handler 在连接 goroutine 里写日志，
+// 测试在 main goroutine 读——裸 bytes.Buffer 在 -race 下必报竞争。
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func captureLog(t *testing.T) *syncBuffer {
 	t.Helper()
-	var buf bytes.Buffer
+	buf := &syncBuffer{}
 	oldOut := log.Writer()
 	oldFlags := log.Flags()
-	log.SetOutput(&buf)
+	log.SetOutput(buf)
 	log.SetFlags(0)
 	t.Cleanup(func() {
 		log.SetOutput(oldOut)
 		log.SetFlags(oldFlags)
 	})
-	return &buf
+	return buf
 }
 
 // roundTrip 发一帧并读走响应（读超时视为无响应，交给断言）。

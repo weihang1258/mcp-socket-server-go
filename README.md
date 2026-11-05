@@ -266,7 +266,10 @@ go test -race ./...    # 竞态检测
 ## 状态
 
 - agent：全部 datatype（0-20 / 131 / 171-175 / 200）+ :9001 + 升级落地；AF_PACKET 抓包/回放真机验收通过
-- mcp：15 个工具 + stdio/HTTP 双传输
+- mcp：45 个工具（11 个前缀族：target_ / file_ / shell_ / net_ / capture_ / replay_ / probe_ / listen_ / pcap_ / dpi_ / bridge_）+ stdio/HTTP 双传输
+  - 统一输入 `BaseIn`（targets / port / timeout / description），统一输出信封 `{ok,total,results,failed}`，失败行带 `error_type`（network / timeout / business）与 `cleanup`
+  - 每个工具带 `_meta{default_timeout_s, timeout_basis, danger_level}`
+  - 超时真停：桥下发 `timeout_s` → agent 按进程组 SIGTERM→2s→SIGKILL → 回执 `{timeout,killed,verified,pgid}`
 - 真机验收：反向 oracle 51 项（Go/Python 双跑）、15 工具 e2e、三链升级闭环（Go↔Python 混部）、chromedp 拨测、chromium 自动下载
 
 设计文档（唯一方案来源）：`docs/superpowers/specs/2026-10-28-go-rewrite-design.md`

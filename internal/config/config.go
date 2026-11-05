@@ -55,6 +55,10 @@ type MCP struct {
 	Pool               Pool     `yaml:"pool"`
 	AuditRetentionDays int      `yaml:"audit_retention_days"`
 	CmdExecWhitelist   []string `yaml:"cmd_exec_whitelist"`
+	// FTPUser/FTPPassword 供 dpi_prepare_package 由桥直连 FTP 下载安装包。
+	// 只在本机配置文件里，不进工具参数、不进审计、不写日志。
+	FTPUser     string `yaml:"ftp_user"`
+	FTPPassword string `yaml:"ftp_password"`
 }
 
 type Config struct {

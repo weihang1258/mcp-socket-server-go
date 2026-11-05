@@ -12,7 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -51,11 +53,13 @@ var (
 )
 
 type captureEntry struct {
-	stop   chan struct{}
-	wg     sync.WaitGroup
-	done   chan struct{} // 收尾完成（对齐子进程退出语义）
-	result bool          // sort/收尾成败（dt6 四态中的 pcap_complete 等价物）
-	fatal  error         // 启动期/运行期致命错误
+	stop     chan struct{}
+	stopOnce sync.Once // close(stop) 必须幂等：并发 dt6 走 select-default 会双关 channel → panic
+	wg       sync.WaitGroup
+	done     chan struct{} // 收尾完成（对齐子进程退出语义）
+	result   bool          // sort/收尾成败（dt6 四态中的 pcap_complete 等价物）
+	fatal    error         // 启动期/运行期致命错误
+	src      pktSource     // stop 超时兜底强关（对齐 Python proc.terminate）
 }
 
 // tcpdumpStart dt5 实现：eth 空 → routeinfo 默认路由网卡（route 失败 → error 冒泡断连，
@@ -63,6 +67,7 @@ type captureEntry struct {
 // 稳定窗 0.5s 查启动期致命错误（复审 P1-4）。
 // 返回 (res, err)：err 非空 = Python RuntimeError 冒泡断连。
 func tcpdumpStart(eth, path, extended string, singleQueue bool) (bool, error) {
+	extended = strings.TrimSpace(extended) // Python capture.py:84 `(extended or "").strip()`
 	if eth == "" {
 		rt, err := routeinfo()
 		if err != nil {
@@ -96,6 +101,7 @@ func tcpdumpStart(eth, path, extended string, singleQueue bool) (bool, error) {
 		log.Printf("配置网卡 %s 为单队列模式（默认开启）", eth)
 		configureSingleQueue(eth, 1) // best-effort：失败仅 warn
 	}
+	offloadOffFn(eth) // GRO/LRO 合并大帧、TSO/GSO 拆帧：抓包比对必关
 
 	var bpfInstrs []bpfInstr
 	if extended != "" {
@@ -106,22 +112,13 @@ func tcpdumpStart(eth, path, extended string, singleQueue bool) (bool, error) {
 			return false, nil // 失败视为启动失败，不静默抓全部
 		}
 	}
-	src, err := openPacketSocketFn(eth)
+	src, err := openPacketSocketFn(eth, bpfInstrs)
 	if err != nil {
 		log.Printf("启动抓包失败 %s -> %s: %v", eth, path, err)
 		return false, nil
 	}
-	if err := attachBPFIfAvailable(src, bpfInstrs); err != nil {
-		log.Printf("BPF 注入失败: %v", err)
-		src.close()
-		return false, nil
-	}
 
-	entry := &captureEntry{stop: make(chan struct{}), done: make(chan struct{})}
-	capturesMu.Lock()
-	captures[path] = entry
-	capturesMu.Unlock()
-
+	entry := &captureEntry{stop: make(chan struct{}), done: make(chan struct{}), src: src}
 	entry.wg.Add(1)
 	go func() {
 		defer entry.wg.Done()
@@ -132,21 +129,27 @@ func tcpdumpStart(eth, path, extended string, singleQueue bool) (bool, error) {
 				log.Printf("抓包 recv panic(已隔离): %v", r)
 			}
 		}()
-		entry.result, entry.fatal = captureRecvLoop(src, path, bpfInstrs, entry.stop)
+		entry.result, entry.fatal = captureRecvLoop(src, path, eth, entry.stop)
 	}()
 	// 稳定窗：0.5s 内查致命错误（网卡 down/文件打不开等 → 启动失败）
 	time.Sleep(500 * time.Millisecond)
 	select {
 	case <-entry.done:
-		capturesMu.Lock()
-		delete(captures, path)
-		capturesMu.Unlock()
+		// Python：0.5s 后线程没活着 → "抓包线程未存活" → res:false（无论有没有 _exc）
 		if entry.fatal != nil {
 			log.Printf("启动抓包失败 %s -> %s: %v", eth, path, entry.fatal)
-			return false, nil
+		} else {
+			log.Printf("抓包线程未存活 %s -> %s", eth, path)
 		}
+		return false, nil
 	default:
 	}
+	// 注册表在「确认存活」之后才写：Python 是子进程回 ready 后才写 _captures
+	// （capture.py:563）。提前写的话，启动窗口内的并发 dt6 会真的停掉这次抓包，
+	// 而 dt5 仍回 true；Python 那边 dt6 是幂等 no-op。
+	capturesMu.Lock()
+	captures[path] = entry
+	capturesMu.Unlock()
 	log.Printf("已开启抓包 %s -> %s（extended=%q, single_queue=%v）", eth, path, extended, singleQueue)
 	return true, nil
 }
@@ -155,11 +158,18 @@ func tcpdumpStart(eth, path, extended string, singleQueue bool) (bool, error) {
 // var 仅为单测可缩短；生产恒 2s。
 var drainMaxDuration = 2 * time.Second
 
+// isEthDownErr 判断 recv 错误是否为 ENETDOWN/ENODEV（Python capture.py:222 的两个 errno）。
+func isEthDownErr(err error) bool {
+	return errors.Is(err, unix.ENETDOWN) || errors.Is(err, unix.ENODEV)
+}
+
+// captureCreateFn 创建 pcap 文件的注入点（测试替换以模拟磁盘满/只读）。
+var captureCreateFn = func(path string) (*os.File, error) { return os.Create(path) }
+
 // captureRecvLoop recv 循环：时间戳解码 → VLAN 还原 → 纳秒落盘；
 // 停止 = 置 stop → drain 完缓冲帧 → stats → close（drain 语义 §3）。
-func captureRecvLoop(src pktSource, path string, bpf []bpfInstr, stop chan struct{}) (bool, error) {
-	_ = bpf // 已在 open 后 attachBPFIfAvailable 注入
-	f, err := os.Create(path)
+func captureRecvLoop(src pktSource, path, eth string, stop chan struct{}) (res bool, fatal error) {
+	f, err := captureCreateFn(path)
 	if err != nil {
 		return false, fmt.Errorf("创建 pcap 失败: %w", err)
 	}
@@ -176,6 +186,22 @@ func captureRecvLoop(src pktSource, path string, bpf []bpfInstr, stop chan struc
 	}
 
 	var pktCount uint64
+	// 写盘失败后续帧无意义（磁盘满），记下错误后停止采集，由 stop 报失败。
+	var writeErr error
+	write := func(data []byte, tsNs uint64) bool {
+		n, err := writePacket(f, data, tsNs)
+		pktCount += n
+		if err != nil {
+			writeErr = err
+			return false
+		}
+		return true
+	}
+	defer func() {
+		if writeErr != nil {
+			res, fatal = false, fmt.Errorf("写 pcap 失败: %w", writeErr)
+		}
+	}()
 	buf := make([]byte, 65535)
 	deadline := time.Now().Add(1 * time.Second)
 	// 停止语义（设计 §3）：置 stop 后必须 drain 完队列剩余帧再退出。
@@ -201,7 +227,12 @@ func captureRecvLoop(src pktSource, path string, bpf []bpfInstr, stop chan struc
 				if err != nil {
 					goto drained
 				}
-				pktCount += writePacket(f, restoreVLAN(buf[:n], oob), decodeTimestampNs(oob))
+				if n == 0 {
+					continue // Python `if not data: break`（空帧不是记录）
+				}
+				if !write(restoreVLAN(buf[:n], oob), decodeTimestampNs(oob)) {
+					goto drained
+				}
 			}
 			goto drained
 		default:
@@ -212,25 +243,42 @@ func captureRecvLoop(src pktSource, path string, bpf []bpfInstr, stop chan struc
 				deadline = time.Now().Add(1 * time.Second)
 				continue
 			}
+			if errors.Is(err, unix.EINTR) {
+				// 被信号打断（Go runtime SIGURG 抢占等）：重试，不是终止条件。
+				// 旧代码把 EINTR 当普通错误 goto drained，真机实测（35 enp94s0f0np0）
+				// 回放 5 秒只抓到前 135 包、时间戳跨度 <1s，而内核 drops=0。
+				continue
+			}
+			// Python capture.py:218-232：只有 ENETDOWN/ENODEV（网卡 down/消失）才置
+			// _exc 让启动稳定窗判失败；其余错误（含 stop 关 socket）静默 break。
+			// 仍走 drained 收尾以关闭 socket（f 由 defer 关）。
+			if isEthDownErr(err) {
+				src.close()
+				return false, fmt.Errorf("抓包网卡不可用（网卡 down 或已拔出）: %w", err)
+			}
 			goto drained
 		}
+		if n == 0 {
+			continue // Python `if not data: break`
+		}
 		deadline = time.Now().Add(1 * time.Second)
-		pktCount += writePacket(f, restoreVLAN(buf[:n], oob), decodeTimestampNs(oob))
+		if !write(restoreVLAN(buf[:n], oob), decodeTimestampNs(oob)) {
+			goto drained
+		}
 	}
 drained:
 	// tpacket_stats 在 close 前读（真实 drops；fake 源无此步）
-	if _, drops := src.stats(); drops > 0 {
+	_, drops := src.stats()
+	src.close()
+	if drops > 0 {
 		log.Printf("抓包 %s 内核丢弃 %d 包", path, drops)
 	}
-	src.close()
-	log.Printf("抓包完成：%d 包", pktCount)
-	if pktCount > 0 {
-		return sortPcapByTimestamp(path), nil
-	}
-	return true, nil
+	// Python 日志带 eth/path/包数/丢弃数（capture.py:390）
+	log.Printf("抓包完成 %s -> %s：%d 包，内核丢弃 %d 包", eth, path, pktCount, drops)
+	return sortPcapByTimestamp(path), nil // 0 包也重排（Python 无条件调用）；writeErr 由上面的 defer 转成失败
 }
 
-func writePacket(f *os.File, data []byte, tsNs uint64) uint64 {
+func writePacket(f *os.File, data []byte, tsNs uint64) (uint64, error) {
 	sec := tsNs / 1e9
 	nsec := tsNs % 1e9
 	hdr := make([]byte, 16)
@@ -238,36 +286,70 @@ func writePacket(f *os.File, data []byte, tsNs uint64) uint64 {
 	binary.LittleEndian.PutUint32(hdr[4:], uint32(nsec))
 	binary.LittleEndian.PutUint32(hdr[8:], uint32(len(data)))
 	binary.LittleEndian.PutUint32(hdr[12:], uint32(len(data)))
-	f.Write(hdr)
-	f.Write(data)
-	return 1
+	// 写盘错误必须冒泡：磁盘满/只读时原实现静默报成功，pcap 静默截断。
+	if _, err := f.Write(hdr); err != nil {
+		return 0, err
+	}
+	if _, err := f.Write(data); err != nil {
+		return 0, err
+	}
+	return 1, nil
 }
 
-// cmsgAlign CMSG_ALIGN（64 位 = 8 字节对齐，复审 P2-7）。
-func cmsgAlign(n int) int { return (n + 7) &^ 7 }
-
-// monotonicNs 单调纳秒（对齐 time.monotonic_ns：不随 NTP 回退，复审 P2-8）。
-var startMono = time.Now()
-
-func monotonicNs() uint64 { return uint64(time.Since(startMono).Nanoseconds()) }
-
-// cmsgIter 逐条遍历 oob（64 位 ABI：len u64@0 / level i32@8 / type i32@12 / data@16）。
-// 返回 (level, type, data)；next 为剩余切片。clen<16 或越界即停（畸形防护，复审 P1-6）。
+// cmsgIter 逐条遍历 oob。布局取内核/平台实际 ABI（unix.Cmsghdr），
+// 不硬编码 64 位：32 位平台 Len 是 u32、对齐 4 字节，写死会全解析错。
+// 返回 (level, type, data)；next 为剩余切片。clen 非法或越界即停（畸形防护）。
 func cmsgIter(oob []byte) (lvl, ctype uint32, data, next []byte, ok bool) {
-	if len(oob) < 16 {
+	hdrLen := unix.CmsgLen(0)
+	if len(oob) < hdrLen {
 		return 0, 0, nil, nil, false
 	}
-	clen := int(binary.LittleEndian.Uint64(oob[:8]))
-	if clen < 16 || clen > len(oob) {
+	h := (*unix.Cmsghdr)(unsafe.Pointer(&oob[0]))
+	clen := int(h.Len)
+	if clen < hdrLen || clen > len(oob) {
 		return 0, 0, nil, nil, false
 	}
-	lvl = binary.LittleEndian.Uint32(oob[8:])
-	ctype = binary.LittleEndian.Uint32(oob[12:])
-	data = oob[16:clen]
-	if a := cmsgAlign(clen); a <= len(oob) {
+	data = oob[hdrLen:clen]
+	if a := unix.CmsgSpace(len(data)); a <= len(oob) {
 		next = oob[a:]
 	} // 尾条无对齐填充时 next=nil（遍历自然结束）
-	return lvl, ctype, data, next, true
+	return uint32(h.Level), uint32(h.Type), data, next, true
+}
+
+// monotonicNs 开机基准的单调纳秒（= Python time.monotonic_ns()）。
+// 不能用 time.Since(进程启动时刻) 代替：那样无 cmsg 时 ts_sec 从 0 起跳，
+// 与同机其它 pcap（含回放读取方）的时间轴对不上。
+func monotonicNs() uint64 {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		return uint64(time.Since(startMono).Nanoseconds()) // 极端兜底
+	}
+	return uint64(ts.Sec)*1e9 + uint64(ts.Nsec)
+}
+
+// startMono 仅在 ClockGettime 不可用时兜底（正常路径永不使用）。
+var startMono = time.Now()
+
+// 时间戳档位（诊断用，见 warnHWDegraded）。
+// hw 档下 ts[0] 为零说明网卡声称支持 PHC 但驱动没填，静默退化成软中断纳秒——
+// Python 在同一处 warn 一次（capture.py:280-287），Go 原先无任何提示。
+const (
+	tsModeUser int32 = iota // 全失败：用户态单调时钟兜底
+	tsModeNS                // SO_TIMESTAMPNS
+	tsModeSW                // SO_TIMESTAMPING 仅 RX_SOFTWARE
+	tsModeHW                // SO_TIMESTAMPING HW+SW+RAW
+)
+
+var (
+	tsModeNow        atomic.Int32
+	hwDegradedWarned atomic.Bool
+)
+
+// warnHWDegraded hw 档但 ts[0] 全零时告警一次（全进程一次，纯诊断）。
+func warnHWDegraded() {
+	if tsModeNow.Load() == tsModeHW && !hwDegradedWarned.Swap(true) {
+		log.Printf("硬件时间戳未生效(ts[0]=0)，退化软中断纳秒；ethtool -T 显示 hardware-receive 但驱动未必填了 PHC")
+	}
 }
 
 // decodeTimestampNs 时间戳四级降级（设计 §3）：
@@ -294,6 +376,7 @@ func decodeTimestampNs(oob []byte) uint64 {
 					return hwSec*1e9 + hwNsec
 				}
 				if swSec != 0 || swNsec != 0 {
+					warnHWDegraded() // hw 档但 ts[0]=0 → 静默退化，与 Python 一样告警一次
 					return swSec*1e9 + swNsec
 				}
 			}
@@ -328,8 +411,11 @@ func restoreVLAN(data, oob []byte) []byte {
 				continue
 			}
 			tpStatus := binary.LittleEndian.Uint32(aux)
-			tci := binary.LittleEndian.Uint16(aux[12:14])
-			tpid := binary.LittleEndian.Uint16(aux[14:16])
+			// struct tpacket_auxdata（/usr/include/linux/if_packet.h:97-105）：
+			// tp_status u32@0 / tp_len u32@4 / tp_snaplen u32@8 / tp_mac u16@12 /
+			// tp_net u16@14 / tp_vlan_tci u16@16 / tp_vlan_tpid u16@18
+			tci := binary.LittleEndian.Uint16(aux[16:18])
+			tpid := binary.LittleEndian.Uint16(aux[18:20])
 			if tci == 0 && tpStatus&0x10 == 0 {
 				return data
 			}
@@ -400,18 +486,11 @@ func sortPcapByTimestamp(path string) bool {
 		return true // 全局头不完整：跳过重排
 	}
 	magic := binary.LittleEndian.Uint32(data[:4])
-	var divisor uint64
 	var endian binary.ByteOrder = binary.LittleEndian
 	switch magic {
-	case 0xA1B2C3D4:
-		divisor = 1e6
-	case 0xD4C3B2A1:
-		divisor = 1e6
-		endian = binary.BigEndian
-	case 0xA1B23C4D:
-		divisor = 1e9
-	case 0x4D3CB2A1:
-		divisor = 1e9
+	case 0xA1B2C3D4, 0xA1B23C4D:
+		// 小端微秒/纳秒
+	case 0xD4C3B2A1, 0x4D3CB2A1:
 		endian = binary.BigEndian
 	default:
 		log.Printf("pcap magic 不识别(%x)，跳过重排：%s", magic, path)
@@ -456,28 +535,69 @@ func sortPcapByTimestamp(path string) bool {
 		out.Write(h[:])
 		out.Write(r.data)
 	}
-	_ = divisor
 	if err := os.WriteFile(tmp, out.Bytes(), 0o644); err != nil {
 		return false
 	}
-	return os.Rename(tmp, path) == nil
+	if err := os.Rename(tmp, path); err != nil {
+		return false
+	}
+	log.Printf("pcap 时间戳重排完成：%s（%d 包）", path, len(records))
+	return true
 }
 
-// stopCaptureEntry 停止单实例：close(stop) 广播 → 30s 超时（对齐 join 30s + terminate 兜底）。
-// 超时返回 false（实例保留可重试）。
+// stopTimeout 停止等待上限（Python proc.join(timeout=30)）。var 仅为单测可缩短。
+var stopTimeout = 30 * time.Second
+
+// stopCaptureEntry 停止单实例：close(stop) 广播 → 超时后强关 socket 兜底
+// （对齐 Python `proc.terminate()`，capture.py:583）。强关后 recv 立刻返回错误、
+// goroutine 退出，再给 5s 收尾。仍超时返回 false（实例保留可重试），但 socket
+// 已释放，不会再长期占着 CAPTURE 锁。
 func stopCaptureEntry(e *captureEntry) bool {
-	select {
-	case <-e.stop:
-	default:
-		close(e.stop)
-	}
+	e.stopOnce.Do(func() { close(e.stop) })
 	select {
 	case <-e.done:
 		return true
-	case <-time.After(30 * time.Second):
-		log.Printf("抓包停止超时(>30s)，保留实例可重试")
+	case <-time.After(stopTimeout):
+	}
+	log.Printf("抓包停止超时(>%v)，强制关闭 socket（本轮 pcap 可能不完整）", stopTimeout)
+	if e.src != nil {
+		e.src.close()
+	}
+	select {
+	case <-e.done:
+		return true // terminate 兜底成功（对齐 Python terminate 后 join 成功）
+	case <-time.After(5 * time.Second):
+		log.Printf("强制关闭后仍未退出，保留实例可重试")
 		return false
 	}
+}
+
+// offloadOffFn 抓包前关 offload 的注入点（测试替换；默认调 ethtool -K）。
+var offloadOffFn = disableOffloads
+
+// disableOffloads 抓包前关 GRO/LRO/TSO/GSO。
+//
+// 为什么必须关：GRO/LRO 把同一流的多段合并成一个超大帧才交给抓包点，
+// 而分流链路另一端若没合并就是原始小帧——业务按包比对时同一个报文在两处
+// 抓到的长度/内容不同，必然判成不一致。TSO/GSO 是反方向：本机发出的"一帧"
+// 到了线上被拆成多段，抓到的与发出的对不上。
+//
+// 实测（35→82 拉 20MB，AF_PACKET，MTU 1500）：
+//
+//	全开            最大帧 21786B，1221/3535 帧 >9000
+//	仅关收侧 GRO    最大帧 2974B，无超 9000 帧
+//	收发两侧全关    最大帧 1514B，无超 MTU 帧
+//	（tx/rx-checksumming 同理：校验和由网卡后填，抓包看到的是未算完的坏包）
+//
+// best-effort：设备不支持（如 eno4 的 lro 是 off [fixed]）或 ethtool 缺失仅 warn，
+// 不阻断抓包。**不随 stop 恢复**——比对窗口内多次抓包必须保持一致；要恢复请手工
+// `ethtool -K <网卡> gro on tso on gso on`。
+func disableOffloads(eth string) {
+	if err := exec.Command("ethtool", "-K", eth, "gro", "off", "lro", "off", "tso", "off", "gso", "off").Run(); err != nil {
+		log.Printf("关闭网卡 %s offload 失败(忽略；抓到的大帧可能与分流点不一致): %v", eth, err)
+		return
+	}
+	log.Printf("已关闭网卡 %s 的 GRO/LRO/TSO/GSO（抓包停止后不自动恢复）", eth)
 }
 
 // tcpdumpStop dt6：幂等（未在抓 res:true）；停止失败/收尾失败 res:false。
@@ -548,15 +668,30 @@ func bindIRQToFreeCPU(eth string, count int) {
 		log.Printf("网卡 %s 无法获取中断号，跳过CPU绑定", eth)
 		return
 	}
-	cpu := pickFreeCPU()
+	cpu := pickFreeCPU(eth)
+	log.Printf("将网卡 %s 的 %d 个中断绑定到 CPU%d", eth, len(irqs), cpu)
 	for _, irq := range irqs {
 		path := fmt.Sprintf("/proc/irq/%d/smp_affinity_list", irq)
-		if _, err := os.Stat(path); err == nil {
-			os.WriteFile(path, []byte(fmt.Sprint(cpu)), 0o644)
+		if _, err := os.Stat(path); err != nil {
+			log.Printf("IRQ %d affinity 路径不存在，跳过", irq)
+			continue
+		}
+		if err := os.WriteFile(path, []byte(fmt.Sprint(cpu)), 0o644); err != nil {
+			log.Printf("IRQ %d -> CPU%d 写失败: %v", irq, cpu, err)
+		} else {
+			log.Printf("IRQ %d -> CPU %d", irq, cpu)
 		}
 	}
 	disableRPSRFS(eth)
 }
+
+// cpuBinding 网卡→CPU 绑定记录（Python 的 _nic_cpu_binding/_allocated_cpus）。
+// 多网卡同时抓包时必须把各自的 IRQ 绑到不同 CPU，否则软中断互抢导致乱序。
+var (
+	cpuBindingMu sync.Mutex
+	cpuBinding   = map[string]int{}
+	allocatedCPU = map[int]bool{}
+)
 
 func irqsViaSysfs(eth string, count int) []int {
 	entries, err := os.ReadDir(fmt.Sprintf("/sys/class/net/%s/device/msi_irqs", eth))
@@ -602,9 +737,24 @@ func irqsViaProcInterrupts(eth string, count int) []int {
 	return irqs
 }
 
-func pickFreeCPU() int {
+// pickFreeCPU 选一个非 0 的空闲 CPU；同一网卡复用它上次绑定的 CPU，
+// 不同网卡分到不同 CPU（Python _pick_target_cpu + _allocated_cpus）。
+func pickFreeCPU(eth string) int {
+	cpuBindingMu.Lock()
+	if c, ok := cpuBinding[eth]; ok {
+		cpuBindingMu.Unlock()
+		log.Printf("网卡 %s 已绑定到 CPU %d，复用现有绑定", eth, c)
+		return c
+	}
+	cpuBindingMu.Unlock()
+
 	data, _ := os.ReadFile("/proc/stat")
 	busy := map[int]bool{0: true}
+	cpuBindingMu.Lock()
+	for c := range allocatedCPU {
+		busy[c] = true
+	}
+	cpuBindingMu.Unlock()
 	for _, line := range strings.Split(string(data), "\n") {
 		if !strings.HasPrefix(line, "cpu") || line == "cpu " || strings.HasPrefix(line, "cpuid") {
 			continue
@@ -621,9 +771,6 @@ func pickFreeCPU() int {
 		}
 	}
 	n := 8
-	if c, err := strconv.Atoi(readFirstLine("/sys/devices/system/cpu/present")); err == nil {
-		_ = c
-	}
 	if cores, err := os.ReadDir("/sys/devices/system/cpu"); err == nil {
 		count := 0
 		for _, e := range cores {
@@ -637,31 +784,31 @@ func pickFreeCPU() int {
 			n = count
 		}
 	}
+	cpu := n - 1
 	for c := 1; c < n; c++ {
 		if !busy[c] {
-			return c
+			cpu = c
+			break
 		}
 	}
-	return n - 1
-}
-
-func readFirstLine(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	if i := strings.IndexByte(string(data), '\n'); i >= 0 {
-		return string(data[:i])
-	}
-	return string(data)
+	cpuBindingMu.Lock()
+	cpuBinding[eth] = cpu
+	allocatedCPU[cpu] = true
+	cpuBindingMu.Unlock()
+	return cpu
 }
 
 func disableRPSRFS(eth string) {
 	for _, name := range []string{"rps_cpus", "rps_flow_cnt"} {
 		p := fmt.Sprintf("/sys/class/net/%s/queues/rx-0/%s", eth, name)
-		if _, err := os.Stat(p); err == nil {
-			os.WriteFile(p, []byte("0"), 0o644)
+		if _, err := os.Stat(p); err != nil {
+			continue // 网卡不支持 RPS/RFS
 		}
+		if err := os.WriteFile(p, []byte("0"), 0o644); err != nil {
+			log.Printf("禁用网卡 %s 的 %s 失败: %v", eth, name, err)
+			continue
+		}
+		log.Printf("已禁用网卡 %s 的 %s", eth, strings.ToUpper(strings.TrimPrefix(name, "rps_")))
 	}
 }
 
@@ -682,13 +829,9 @@ func max(a, b int) int {
 	return b
 }
 
-// attachBPFIfAvailable BPF 注入挂载点（afpacket_linux.go init 覆盖）。
-// 非 Linux 编译时保持 no-op → 抓包本就不可用（openPacketSocketFn 返回错误）。
-var attachBPFIfAvailable = func(src pktSource, bpf []bpfInstr) error { return nil }
-
 // defaultOpenPacketSocket AF_PACKET 真实现挂载点（afpacket_linux.go，Linux-only）。
 // 非构建环境/无权限时返回错误 → dt5 res:false（对齐 Python 无权限场景）。
-var defaultOpenPacketSocket = func(eth string) (pktSource, error) {
+var defaultOpenPacketSocket = func(eth string, bpf []bpfInstr) (pktSource, error) {
 	return nil, errors.New("AF_PACKET 未启用（需 Linux + CAP_NET_RAW，见 afpacket_linux.go）")
 }
 

@@ -90,15 +90,32 @@ func effectiveChromium(payloadPath string) string {
 	return defaultChromiumPath()
 }
 
-// doBoce dt131 入口。
+// doBoce dt131 入口：解析桥给的 timeout_s（可选），有预算就把整次拨测放在
+// 预算内跑，到点关浏览器并回结构化超时（方案 §6.2）。
 func doBoce(payload []byte) ([]byte, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return nil, err
+	}
+	if rawTS, has := raw["timeout_s"]; has && string(rawTS) != "null" {
+		var ts float64
+		if json.Unmarshal(rawTS, &ts) == nil && ts > 0 {
+			return boceWithDeadline(payload, time.Duration(ts*float64(time.Second)))
+		}
+	}
+	return boceExec(payload)
+}
+
+// boceExec 原 doBoce 主体（预检链 + 分派）。
+func boceExec(payload []byte) ([]byte, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return nil, err
 	}
 	// 严格键（Python boce(**data) 未知键/缺 url → TypeError → 冒泡断连）
 	allowed := map[string]bool{"url": true, "count": true, "interval": true,
-		"thread_count": true, "timeout": true, "mode": true, "chromium_path": true}
+		"thread_count": true, "timeout": true, "mode": true, "chromium_path": true,
+		"timeout_s": true} // 桥侧总预算（方案 §6.2），Python 原客户端不发
 	for k := range raw {
 		if !allowed[k] {
 			return nil, fmt.Errorf("boce() got unexpected keyword argument %q", k)
@@ -205,6 +222,35 @@ func doBoce(payload []byte) ([]byte, error) {
 			return nil, errors.New("必须指定 Chromium 可执行文件路径参数 chromium_path")
 		}
 		return boceBrowser(payload, mode, count, timeout) // chromedp 实现（boce_browser.go）
+	}
+}
+
+// boceWithDeadline 跑一次完整拨测（预检+分派），到点关浏览器并回超时回执。
+// verified 只有在内层确实跑完时才为 true；关闭浏览器只能保证杀进程，
+// 不能证明已在途的 HTTP 请求全部停止，故超时一律先按 false 回报。
+func boceWithDeadline(payload []byte, budget time.Duration) ([]byte, error) {
+	type res struct {
+		body []byte
+		err  error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		b, err := boceExec(payload)
+		ch <- res{b, err}
+	}()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return nil, r.err
+		}
+		return r.body, nil
+	case <-time.After(budget):
+		closeBrowser() // 杀掉 chromium 及其子进程
+		body, _ := json.Marshal(map[string]any{
+			"timeout": true, "killed": true, "verified": false,
+			"message": "拨测超时，已关闭浏览器",
+		})
+		return dt131Frame(body), nil
 	}
 }
 

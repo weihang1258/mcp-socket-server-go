@@ -118,12 +118,14 @@ func runAgent(args []string) {
 // 返回 listener 与地址；stop 关闭全部。
 func startAgent(cfg config.Config, testMode bool) (ln interface{}, addr string, stop func()) {
 	if !testMode {
-		setupEnv()
+		setupEnv(cfg.Agent.LogFile)
 	}
 	// :9001 必须先于阻塞的 TCP 主循环（http_port 读 /opt/socket/config；0=关闭）
 	if !testMode {
 		httpPort := readHTTPPort()
-		startHTTPFile(httpPort) // 失败仅 warn，不影响 :9000
+		if _, err := startHTTPFile(httpPort); err != nil {
+			log.Printf("HTTP 文件服务未启动（不影响 :9000）: %v", err)
+		}
 		// chromium 后台预取：默认关闭（内网靶机连不上 npmmirror，无条件预取会让每次
 		// 重启白跑一次 536MB 下载，而 Python 是「用到才触发」）。能上外网的部署在
 		// config.yaml 里设 agent.chromium_prefetch: true，即可消除「首次 boce 被

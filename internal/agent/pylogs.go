@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -19,12 +20,70 @@ func logf(format string, args ...any) { log.Printf(format, args...) }
 // pyReprPayload payload 的 Python repr（dict → 单引号/True/False/空格）。
 // 解析失败退回原始字符串（Python json.loads 失败会抛异常，那时日志本来就只有
 // 「错误：...」，这里不退化为 panic）。
+//
+// 键序按 JSON 原文出现顺序（token 流），**不能**先 Unmarshal 成 map：Go map 迭代
+// 顺序每次随机，同一条日志两次运行键序不同（TestPyReprPayload 实测 30 次跑 3 次
+// 失败），现场 grep 也难以对齐。Python dict 保插入序。
 func pyReprPayload(payload []byte) string {
-	var v any
-	if err := json.Unmarshal(payload, &v); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.UseNumber() // 整数原样：Python repr(9000) 是 "9000"，不是 "9e+03"
+	s, err := pyReprNext(dec)
+	if err != nil {
 		return string(payload)
 	}
-	return pyRepr(v)
+	return s
+}
+
+// pyReprNext 从 token 流读一个值并产出 Python repr（对象按出现序）。
+func pyReprNext(dec *json.Decoder) (string, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return "", err
+	}
+	switch t := tok.(type) {
+	case json.Delim:
+		closer, open, sep := json.Delim(']'), "[", ""
+		if t == '{' {
+			closer, open, sep = '}', "{", ": "
+		}
+		var parts []string
+		for dec.More() {
+			if t == '{' {
+				kt, err := dec.Token() // 键
+				if err != nil {
+					return "", err
+				}
+				k, _ := kt.(string)
+				vs, err := pyReprNext(dec)
+				if err != nil {
+					return "", err
+				}
+				parts = append(parts, "'"+strings.ReplaceAll(k, "'", `\'`)+"'"+sep+vs)
+				continue
+			}
+			vs, err := pyReprNext(dec)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, vs)
+		}
+		if _, err := dec.Token(); err != nil { // 消费 closer
+			return "", err
+		}
+		return open + strings.Join(parts, ", ") + string(closer), nil
+	case string:
+		return "'" + strings.ReplaceAll(t, "'", `\'`) + "'", nil
+	case json.Number:
+		return t.String(), nil
+	case bool:
+		if t {
+			return "True", nil
+		}
+		return "False", nil
+	case nil:
+		return "None", nil
+	}
+	return fmt.Sprint(tok), nil
 }
 
 func pyRepr(v any) string {
@@ -38,6 +97,8 @@ func pyRepr(v any) string {
 		return "False"
 	case string:
 		return "'" + strings.ReplaceAll(x, "'", `\'`) + "'"
+	case json.Number:
+		return x.String()
 	case float64:
 		return strconv.FormatFloat(x, 'g', -1, 64)
 	case []any:

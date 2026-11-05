@@ -32,8 +32,8 @@ func TestToolsHaveInputSchemas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Tools) < 15 {
-		t.Fatalf("want >=15 tools, got %d", len(list.Tools))
+	if len(list.Tools) < 30 {
+		t.Fatalf("want >=30 tools, got %d", len(list.Tools))
 	}
 	for _, tool := range list.Tools {
 		if tool.InputSchema == nil {
@@ -46,17 +46,17 @@ func TestToolsHaveInputSchemas(t *testing.T) {
 		json.Unmarshal(raw, &schema)
 		props := len(schema.Properties)
 		switch tool.Name {
-		case "list_targets":
+		case "target_list":
 			if props > 2 {
-				t.Fatalf("list_targets props %d", props)
+				t.Fatalf("target_list props %d", props)
 			}
-		case "cmd_exec":
+		case "shell_exec":
 			if props < 6 { // targets/args/cwd/env/wait/port/timeout/description
-				t.Fatalf("cmd_exec props %d (schema empty?)", props)
+				t.Fatalf("shell_exec props %d (schema empty?)", props)
 			}
-		case "upgrade_run":
+		case "bridge_upgrade":
 			if props < 4 {
-				t.Fatalf("upgrade_run props %d", props)
+				t.Fatalf("bridge_upgrade props %d", props)
 			}
 		}
 	}

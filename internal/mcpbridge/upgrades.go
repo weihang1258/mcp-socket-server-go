@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -132,6 +133,11 @@ func VersionOK(v string) bool { return versionRe.MatchString(v) }
 // 代理串解析失败时**必须告警**：`url.Parse` 对 "10.12.186.204:7897"（缺
 // scheme）会成功但 Host 为空，对某些畸形串直接报错。静默忽略的结果是
 // "配了代理却裸连"，排查时完全看不出来。
+//
+// 本机地址不走代理：真机验收把升级源指到 127.0.0.1 的本地 HTTP 服务时，
+// 代理会把它当成远端去转，回 502（2026-11-06 三链升级实测）。curl 的
+// NO_PROXY、Go 的 ProxyFromEnvironment、Python requests 的 no_proxy 默认
+// 都让环回直连，这里补上同一语义——否则"本地升级源"这类用法必然失败。
 func httpClient(timeout int, proxy string) *http.Client {
 	t := &http.Transport{}
 	if proxy != "" {
@@ -139,12 +145,32 @@ func httpClient(timeout int, proxy string) *http.Client {
 			log.Printf("代理配置无法解析，本次按直连处理: %q（应为 http://host:port）", proxy)
 			t.Proxy = nil
 		} else {
-			t.Proxy = http.ProxyURL(u)
+			pu := u
+			t.Proxy = func(req *http.Request) (*url.URL, error) {
+				if isLoopbackHost(req.URL.Hostname()) {
+					return nil, nil
+				}
+				return pu, nil
+			}
 		}
 	} else {
 		t.Proxy = http.ProxyFromEnvironment
 	}
 	return &http.Client{Timeout: time.Duration(timeout) * time.Second, Transport: t}
+}
+
+// isLoopbackHost 判定是否本机地址（127.0.0.0/8、::1、localhost）。
+func isLoopbackHost(h string) bool {
+	if h == "" {
+		return false
+	}
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(strings.Trim(h, "[]")); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // FetchLatestVersion 查最新版本；失败 ""（退避日志策略：首败 warning、后续 debug、恢复 info）。

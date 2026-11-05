@@ -36,6 +36,15 @@ func liveE2EGuards(t *testing.T) {
 	}
 }
 
+// pgrepSleep999 真机复核：超时后不得残留本次命令的进程。
+func pgrepSleep999() []string {
+	out, err := exec.Command("pgrep", "-f", "^sleep 999$").Output()
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(string(out))
+}
+
 func mcpCallAny(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any) map[string]any {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -77,53 +86,89 @@ func TestLiveFifteenToolsE2E(t *testing.T) {
 	}
 	defer cs.Close()
 
-	// 1. add_target（探活）
-	out := mcpCallAny(t, cs, "add_target", map[string]any{"host": "127.0.0.1", "port": 9000})
-	if out["ok"] != true {
-		t.Fatalf("add_target: %v", out)
+	// 1. target_add（探活）
+	out := mcpCallAny(t, cs, "target_add", map[string]any{"host": "127.0.0.1", "port": 9000})
+	if out["registered"] != true {
+		t.Fatalf("target_add: %v", out)
 	}
 	t.Cleanup(func() {
 		ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel2()
-		cs.CallTool(ctx2, &mcp.CallToolParams{Name: "remove_target", Arguments: map[string]any{"host": "127.0.0.1", "port": 9000}})
+		cs.CallTool(ctx2, &mcp.CallToolParams{Name: "target_remove", Arguments: map[string]any{"host": "127.0.0.1", "port": 9000}})
 		_ = ctx2
 	})
 
-	// 2. list_targets
-	out = mcpCallAny(t, cs, "list_targets", map[string]any{})
+	// 2. target_list
+	out = mcpCallAny(t, cs, "target_list", map[string]any{})
 	if targets, ok := out["targets"].([]any); !ok || len(targets) == 0 {
-		t.Fatalf("list_targets: %v", out)
+		t.Fatalf("target_list: %v", out)
 	}
 
 	// 3. version
-	out = mcpCallAny(t, cs, "version", map[string]any{"targets": []string{"127.0.0.1"}})
+	out = mcpCallAny(t, cs, "bridge_version", map[string]any{"targets": []string{"127.0.0.1"}})
 	if out["ok"] != float64(1) {
-		t.Fatalf("version: %v", out)
+		t.Fatalf("bridge_version: %v", out)
 	}
 
-	// 4. file_transfer（零网络，纯指引）
-	out = mcpCallAny(t, cs, "file_transfer", map[string]any{"targets": []string{"127.0.0.1"}})
-	cmds, _ := out["commands"].([]any)
-	if len(cmds) == 0 {
-		t.Fatalf("file_transfer: %v", out)
+	// 4. file_transfer_hint（零网络，纯指引）
+	out = mcpCallAny(t, cs, "file_transfer_hint", map[string]any{"targets": []string{"127.0.0.1"}})
+	// 新契约：信封 results[].data.{download,upload}
+	if out["ok"] != float64(1) {
+		t.Fatalf("file_transfer_hint: %v", out)
+	}
+	rs, _ := out["results"].([]any)
+	if len(rs) != 1 {
+		t.Fatalf("file_transfer_hint results: %v", out)
+	}
+	rm, _ := rs[0].(map[string]any)
+	dm, _ := rm["data"].(map[string]any)
+	if s, _ := dm["download"].(string); s == "" {
+		t.Fatalf("file_transfer_hint 缺 download: %v", out)
 	}
 
 	// 5. isfile
-	out = mcpCallAny(t, cs, "isfile", map[string]any{"targets": []string{"127.0.0.1"}, "path": "/etc/hostname"})
+	out = mcpCallAny(t, cs, "file_stat", map[string]any{"targets": []string{"127.0.0.1"}, "path": "/etc/hostname"})
 	if out["ok"] != float64(1) {
-		t.Fatalf("isfile: %v", out)
+		t.Fatalf("file_stat: %v", out)
 	}
 
 	// 6. isdir
-	out = mcpCallAny(t, cs, "isdir", map[string]any{"targets": []string{"127.0.0.1"}, "path": "/tmp"})
+	out = mcpCallAny(t, cs, "file_stat", map[string]any{"targets": []string{"127.0.0.1"}, "path": "/tmp"})
 	if out["ok"] != float64(1) {
-		t.Fatalf("isdir: %v", out)
+		t.Fatalf("file_stat(dir): %v", out)
 	}
 
 	// 7. cmd_exec
-	out = mcpCallAny(t, cs, "cmd_exec", map[string]any{"targets": []string{"127.0.0.1"}, "args": "echo hello_live_e2e"})
+	out = mcpCallAny(t, cs, "shell_exec", map[string]any{"targets": []string{"127.0.0.1"}, "args": "echo hello_live_e2e"})
 	if out["ok"] != float64(1) {
-		t.Fatalf("cmd_exec: %v", out)
+		t.Fatalf("shell_exec: %v", out)
+	}
+
+	// 7b. 超时真停（方案 §6.2 / §12 待实证 2）：到点后设备上不得残留 sleep。
+	// 用独立连接跑，避免把已验证的连接判死；超时失败本身是**预期结果**。
+	out = mcpCallAny(t, cs, "shell_exec", map[string]any{
+		"targets": []string{"127.0.0.1"}, "args": "sleep 999", "timeout": 3})
+	if out["ok"] != float64(0) {
+		t.Fatalf("sleep 999 应超时失败: %v", out)
+	}
+	fl, _ := out["failed"].([]any)
+	if len(fl) != 1 {
+		t.Fatalf("超时未回 failed: %v", out)
+	}
+	fm, _ := fl[0].(map[string]any)
+	if fm["error_type"] != "timeout" {
+		t.Fatalf("error_type=%v，期望 timeout", fm["error_type"])
+	}
+	cu, _ := fm["cleanup"].(map[string]any)
+	if cu == nil || cu["killed"] != true {
+		t.Fatalf("超时回执缺 cleanup.killed: %v", fm)
+	}
+	if cu["verified"] != true {
+		t.Fatalf("cleanup.verified=false（进程组可能还在跑）: %v", cu)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if pids := pgrepSleep999(); len(pids) > 0 {
+		t.Fatalf("超时后靶机仍有 sleep 999: %v", pids)
 	}
 
 	// 8/9. capture_start/stop
@@ -147,15 +192,15 @@ func TestLiveFifteenToolsE2E(t *testing.T) {
 	os.MkdirAll("/tmp/e2e_smoke_flows", 0o755)
 	os.Rename(capPath, "/tmp/e2e_smoke_flows/"+capPath[strings.LastIndex(capPath, "/")+1:])
 	defer os.RemoveAll("/tmp/e2e_smoke_flows")
-	out = mcpCallAny(t, cs, "pcap_flow_extract", map[string]any{
+	out = mcpCallAny(t, cs, "pcap_extract_flows", map[string]any{
 		"targets": []string{"127.0.0.1"}, "pcap_dir": "/tmp/e2e_smoke_flows", "timeout": 60})
 	if out["ok"] != float64(1) {
-		t.Fatalf("pcap_flow_extract: %v", out)
+		t.Fatalf("pcap_extract_flows: %v", out)
 	}
 
 	// 11. boce_run（弹窗恒失败。环境相关：Go/chromedp 正常回统计；live Python 本机
 	// pyppeteer "Browser closed unexpectedly" → do_boce 异常 → EOF 断连——两种都算通过）
-	out = mcpCallAny(t, cs, "boce_run", map[string]any{
+	out = mcpCallAny(t, cs, "probe_visit", map[string]any{
 		"targets": []string{"127.0.0.1"}, "url": "http://127.0.0.1:1", "count": 1,
 		"timeout": 30, "mode": "弹窗"})
 	if out["ok"] != float64(1) {
@@ -166,9 +211,9 @@ func TestLiveFifteenToolsE2E(t *testing.T) {
 			}
 		}
 		if !strings.Contains(reason, "EOF") {
-			t.Fatalf("boce_run: %v", out)
+			t.Fatalf("probe_visit: %v", out)
 		}
-		t.Log("boce_run: live Python chromium 环境性断连（EOF），符合 Python 冒泡语义")
+		t.Log("probe_visit: live Python chromium 环境性断连（EOF），符合 Python 冒泡语义")
 	}
 
 	// 12. replay_run（单臂回放 smoke 捕获的 pcap——已在专用目录）
@@ -179,35 +224,35 @@ func TestLiveFifteenToolsE2E(t *testing.T) {
 		t.Fatalf("replay_run: %v", out)
 	}
 
-	// 13. socket_listen start/fetch/save/clean/stop 全动作
-	out = mcpCallAny(t, cs, "socket_listen", map[string]any{
-		"targets": []string{"127.0.0.1"}, "action": "start", "listen_port": 39021})
+	// 13. listen_start/fetch/save/clean/stop 全动作
+	out = mcpCallAny(t, cs, "listen_start", map[string]any{
+		"targets": []string{"127.0.0.1"}, "listen_port": 39021})
 	if out["ok"] != float64(1) {
-		t.Fatalf("socket_listen start: %v", out)
+		t.Fatalf("listen_start: %v", out)
 	}
-	out = mcpCallAny(t, cs, "socket_listen", map[string]any{"targets": []string{"127.0.0.1"}, "action": "fetch"})
+	out = mcpCallAny(t, cs, "listen_fetch", map[string]any{"targets": []string{"127.0.0.1"}})
 	if out["ok"] != float64(1) {
-		t.Fatalf("socket_listen fetch: %v", out)
+		t.Fatalf("listen_fetch: %v", out)
 	}
-	out = mcpCallAny(t, cs, "socket_listen", map[string]any{
-		"targets": []string{"127.0.0.1"}, "action": "save", "file": "/tmp/e2e_smoke_listen.bin"})
+	out = mcpCallAny(t, cs, "listen_save", map[string]any{
+		"targets": []string{"127.0.0.1"}, "file": "/tmp/e2e_smoke_listen.bin"})
 	if out["ok"] != float64(1) {
-		t.Fatalf("socket_listen save: %v", out)
+		t.Fatalf("listen_save: %v", out)
 	}
-	out = mcpCallAny(t, cs, "socket_listen", map[string]any{"targets": []string{"127.0.0.1"}, "action": "clean"})
+	out = mcpCallAny(t, cs, "listen_clean", map[string]any{"targets": []string{"127.0.0.1"}})
 	if out["ok"] != float64(1) {
-		t.Fatalf("socket_listen clean: %v", out)
+		t.Fatalf("listen_clean: %v", out)
 	}
-	out = mcpCallAny(t, cs, "socket_listen", map[string]any{"targets": []string{"127.0.0.1"}, "action": "stop"})
+	out = mcpCallAny(t, cs, "listen_stop", map[string]any{"targets": []string{"127.0.0.1"}})
 	if out["ok"] != float64(1) {
-		t.Fatalf("socket_listen stop: %v", out)
+		t.Fatalf("listen_stop: %v", out)
 	}
 
-	// 14/15. remove_target（Cleanup 兜底）+ upgrade_run 预检坏版本
-	out = mcpCallAny(t, cs, "upgrade_run", map[string]any{
+	// 14/15. target_remove（Cleanup 兜底）+ bridge_upgrade 预检坏版本
+	out = mcpCallAny(t, cs, "bridge_upgrade", map[string]any{
 		"targets": []string{"127.0.0.1"}, "version": "not-a-version"})
 	if out["ok"] != float64(0) {
-		t.Fatalf("upgrade_run 坏版本须拒绝: %v", out)
+		t.Fatalf("bridge_upgrade 坏版本须拒绝: %v", out)
 	}
-	mcpCallAny(t, cs, "remove_target", map[string]any{"host": "127.0.0.1", "port": 9000})
+	mcpCallAny(t, cs, "target_remove", map[string]any{"host": "127.0.0.1", "port": 9000})
 }

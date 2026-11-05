@@ -29,6 +29,14 @@ func handleConn(conn net.Conn, do DoFunc) {
 	clientConnected()
 	defer clientDisconnected()
 	defer conn.Close()
+	// 兜底：Python 每个 datatype 分支的异常都被顶层 try/except 捕获（protocol.py:133-138
+	// → error 日志 + finally close）。Go 侧任何未预期的 panic 都必须收敛到「断这条连接」，
+	// 否则一个畸形包就能带走整个 agent 进程（真机风险：replayer 短传输层越界曾有此面）。
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("连接处理 panic: %v", r)
+		}
+	}()
 
 	cs := newConnState()
 	readBuf := make([]byte, 64*1024)

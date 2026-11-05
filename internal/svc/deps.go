@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -122,8 +121,7 @@ func runWithTimeout(cmd string, d time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), d)
 	defer cancel()
 	c := exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
-	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	c.Cancel = func() error { return syscall.Kill(-c.Process.Pid, syscall.SIGKILL) }
+	setProcGroup(c) // 平台差异见 deps_unix.go / deps_windows.go
 	c.WaitDelay = 5 * time.Second
 	out, err := c.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {

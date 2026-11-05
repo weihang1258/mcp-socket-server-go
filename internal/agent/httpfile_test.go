@@ -338,3 +338,27 @@ func TestHTTPGETLiteralPercent(t *testing.T) {
 		t.Fatalf("literal %% must be lenient (Python unquote keeps invalid), got %d %s", w.Code, w.Body.String())
 	}
 }
+
+// path 有值但 body 无 file 字段：Python 是 os.replace(None, dest) TypeError → 断连无响应；
+// Go 明确回 500（不模拟断连——运维会误判为网络故障）。绝不能静默 200 + size:0。
+func TestHTTPPOSTPathWithoutFileField(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "nofile.bin")
+	h := FileServerHandler()
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	mw.WriteField("path", dest)
+	mw.Close()
+
+	w := httpPost(t, h, &buf, mw.FormDataContentType())
+	if w.Code == 200 {
+		t.Fatalf("无 file 字段不得回 200（Python 此处 TypeError）: %s", w.Body.String())
+	}
+	if w.Code != 500 {
+		t.Fatalf("want 500, got %d: %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("不得创建目标文件: %v", err)
+	}
+}

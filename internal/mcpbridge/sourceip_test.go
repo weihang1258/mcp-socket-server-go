@@ -73,7 +73,7 @@ func TestAuditSourceIPAwareOfContext(t *testing.T) {
 
 	b := &Bridge{Audit: a}
 	ctx := withSourceIP(context.Background(), "10.12.131.35:54321")
-	b.writeAudit(ctx, "cmd_exec", map[string]any{"args": "id"},
+	b.writeAudit(ctx, "shell_exec", map[string]any{"args": "id"},
 		[]TargetResult{{Target: "t1", Ok: true}}, time.Now())
 
 	got := a.LastEntry()
@@ -95,7 +95,7 @@ func TestAuditSourceIPInternalWhenNoContext(t *testing.T) {
 	defer a.Close()
 
 	b := &Bridge{Audit: a}
-	b.writeAudit(context.Background(), "cmd_exec", map[string]any{"args": "id"},
+	b.writeAudit(context.Background(), "shell_exec", map[string]any{"args": "id"},
 		[]TargetResult{{Target: "t1", Ok: true}}, time.Now())
 
 	if got := a.LastEntry(); got == nil || got.SourceIP != "internal" {
@@ -159,14 +159,14 @@ func TestSourceIPReachesAuditThroughRealSDK(t *testing.T) {
 	defer cs.Close()
 
 	res, err := cs.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "cmd_exec",
+		Name:      "shell_exec",
 		Arguments: map[string]any{"targets": []string{m.Addr}, "args": "id", "port": portOf(m.Addr)},
 	})
 	if err != nil {
-		t.Fatalf("cmd_exec 调用失败: %v", err)
+		t.Fatalf("shell_exec 调用失败: %v", err)
 	}
 	if res.IsError {
-		t.Fatalf("cmd_exec 返回错误: %+v", res.Content)
+		t.Fatalf("shell_exec 返回错误: %+v", res.Content)
 	}
 
 	got := b.Audit.LastEntry()
@@ -191,7 +191,7 @@ func TestUpgradeRunAuditCarriesFailureReason(t *testing.T) {
 	}
 	defer a.Close()
 
-	a.Write("upgrade_run", map[string]any{"version": "1.9.5"},
+	a.Write("bridge_upgrade", map[string]any{"version": "1.9.5"},
 		[]map[string]any{{"target": "10.0.0.1", "ok": false, "error": "推包失败: connection reset"}},
 		0, 1, 47, "10.12.131.35")
 

@@ -124,8 +124,8 @@ func ioctlMTU(eth string, mtu int, set bool) (int, error) {
 
 // ethtoolChannels struct ethtool_channels（uapi/linux/ethtool.h）。
 type ethtoolChannels struct {
-	cmd                             uint32
-	maxRx, maxTx, maxOther, maxCombined uint32
+	cmd                                         uint32
+	maxRx, maxTx, maxOther, maxCombined         uint32
 	rxCount, txCount, otherCount, combinedCount uint32
 }
 

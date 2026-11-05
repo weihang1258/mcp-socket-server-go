@@ -50,14 +50,15 @@ func SetupLogging(explicit string) {
 // 第一步 setup_logging()）。运维排障看的是 /var/log/socket_server.log；
 // 不接这一步，Go 版日志只进 journald，文件停在上一任进程的最后一行。
 // 独立成函数便于单测——SetupEnvironment 其余步骤有系统副作用。
-func setupFileLogging() { setupLoggingFn("") }
+func setupFileLogging(explicit string) { setupLoggingFn(explicit) }
 
 // setupLoggingFn 注入点：测试用它确认 SetupEnvironment 真的接了文件日志。
 var setupLoggingFn = SetupLogging
 
 // SetupEnvironment 完整环境初始化（testMode 跳过系统副作用）。
-func SetupEnvironment() {
-	setupFileLogging()
+// logFile 来自配置 agent.log_file（空 = 走 SOCKET_SERVER_LOG / 默认路径）。
+func SetupEnvironment(logFile string) {
+	setupFileLogging(logFile)
 	log.Printf("version:%s", Version)
 	setupMachineEffects()
 }

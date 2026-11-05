@@ -16,6 +16,25 @@ import (
 // 3 份足够回滚（当前 + 前两个），再往前靠中央重新下发即可。
 const keepVersions = 3
 
+// currentLinkTarget 返回 current 软链指向的版本号（"1.8.3"）；无软链/解析失败 → ""。
+//
+// 为什么按软链而不是按 running Version 判存活：回滚后 current 指向旧版本，而
+// 启动清理的是**正在跑的新代码**，Version 与软链目标不同。2026-11-02 本机实测：
+// current → 1.8.3（回滚用的 Python 版），起一个 v1.9.24 的 agent 做验收，启动清理
+// 按 Version 保留最近 3 个，把 1.8.3 目录整个删掉——软链悬空，下次重启服务起不来
+// （二进制是从仍在运行的进程 /proc/<pid>/exe 里捞回来的）。
+func currentLinkTarget() string {
+	fi, err := os.Lstat(filepath.Join(versionsDir(), "current"))
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		return ""
+	}
+	target, err := os.Readlink(filepath.Join(versionsDir(), "current"))
+	if err != nil {
+		return ""
+	}
+	return filepath.Base(target)
+}
+
 // pruneOldVersions 删除除 current 与最近 keep 个之外的版本目录。
 // 按版本号排序（不是按 mtime：推送升级可能补装旧版本）。
 func pruneOldVersions(current string, keep int) error {
@@ -26,6 +45,10 @@ func pruneOldVersions(current string, keep int) error {
 			return nil
 		}
 		return err
+	}
+	protected := map[string]bool{current: true}
+	if t := currentLinkTarget(); t != "" {
+		protected[t] = true // 回滚中：current 指向的不是正在跑的版本，同样不能删
 	}
 	var vers []string
 	for _, e := range entries {
@@ -42,7 +65,7 @@ func pruneOldVersions(current string, keep int) error {
 		keepFrom = 0
 	}
 	for i, v := range vers {
-		if i >= keepFrom || v == current {
+		if i >= keepFrom || protected[v] {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(root, v)); err != nil {

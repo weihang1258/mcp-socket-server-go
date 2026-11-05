@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -98,7 +99,7 @@ func cmdExec(payload []byte) ([]byte, error) {
 	}
 	for k := range raw1 {
 		switch k {
-		case "args", "cwd", "env", "wait", "shell", "stdout", "stderr", "encoding", "use_run":
+		case "args", "cwd", "env", "wait", "shell", "stdout", "stderr", "encoding", "use_run", "timeout_s":
 		default:
 			return nil, fmt.Errorf("exec_cmd_subprocess() got unexpected keyword argument %q", k)
 		}
@@ -194,10 +195,24 @@ func cmdExec(payload []byte) ([]byte, error) {
 		argv = append([]string{"sh", "-c", argv[0]}, argv[1:]...)
 	}
 
+	// timeout_s：桥侧可选字段（Python 原客户端不发）；<=0 = 不限时
+	timeoutS := 0
+	if r, ok := raw1["timeout_s"]; ok && string(r) != "null" {
+		var f float64
+		if err := json.Unmarshal(r, &f); err != nil {
+			return badType("timeout_s: expected int, got " + jsonTypeName(r))
+		}
+		timeoutS = int(f)
+	}
+
 	var code int
 	var stdout, stderr string
 	if wait {
-		code, stdout, stderr = execArgvWait(argv, cwd, env)
+		var tr *timeoutResult
+		code, stdout, stderr, tr = execArgvWaitTimed(argv, cwd, env, timeoutS)
+		if tr != nil && tr.TimedOut {
+			return timeoutGzipFrame(tr), nil
+		}
 		return errGzipFrame(code, stdout, stderr)
 	}
 	// 异步：Start 不等（Python Popen 不 communicate → 返回 None）；
@@ -210,23 +225,65 @@ func cmdExec(payload []byte) ([]byte, error) {
 
 // execArgvWait execCmdArgs 带工作目录/环境的 argv 变体（dt1 shell=false 路径）。
 func execArgvWait(argv []string, cwd string, env []string) (int, string, string) {
+	code, so, se, _ := execArgvWaitTimed(argv, cwd, env, 0)
+	return code, so, se
+}
+
+// syncWriter 并发安全的输出缓冲。超时兜底返回时 Wait 可能还没回，os/exec 的
+// copy goroutine 仍在写——裸 bytes.Buffer 会数据竞争甚至 panic（评审 P2-5）。
+type syncWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *syncWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
+// execArgvWaitTimed 同 execArgvWait，timeoutS>0 时到点杀进程组（方案 §6.2）。
+func execArgvWaitTimed(argv []string, cwd string, env []string, timeoutS int) (int, string, string, *timeoutResult) {
 	c := argvCmd(argv)
 	c.Dir = cwd
 	c.Env = env
-	var stdoutBuf, stderrBuf bytes.Buffer
+	var stdoutBuf, stderrBuf syncWriter
 	c.Stdout = &stdoutBuf
 	c.Stderr = &stderrBuf
-	err := c.Run()
-	code := 0
+	code, tr, err := runWithTimeout(c, timeoutS)
+	if tr != nil && tr.TimedOut {
+		return -1, stdoutBuf.String(), stderrBuf.String(), tr
+	}
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			code = processExitCode(ee)
 		} else {
-			return -1, "", err.Error()
+			return -1, "", err.Error(), nil
 		}
 	}
-	return code, stdoutBuf.String(), stderrBuf.String()
+	return code, stdoutBuf.String(), stderrBuf.String(), nil
+}
+
+// timeoutGzipFrame 超时回执：code=-1 + timeout/killed/verified/pgid（方案 §6.2 第 3 条）。
+// 桥据 timeout=true 归到 error_type=timeout 并回报 cleanup。
+func timeoutGzipFrame(tr *timeoutResult) []byte {
+	body, _ := json.Marshal(struct {
+		Code     int    `json:"code"`
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
+		Timeout  bool   `json:"timeout"`
+		Killed   bool   `json:"killed"`
+		Verified bool   `json:"verified"`
+		PGID     int    `json:"pgid"`
+	}{-1, "", "命令超时，已杀进程组", tr.TimedOut, tr.Killed, tr.Verified, tr.PGID})
+	return gzipFrame(body)
 }
 
 // execArgvStart Popen 语义：只 Start 不等；失败 = Python Popen 异常 → {code:-1,stderr}。
@@ -271,8 +328,15 @@ func envMapToSlice(m map[string]string) []string {
 	return out
 }
 
-// execCmdWith execCmd 的 cwd/env/wait 全参版（dt1 用）。
+// execCmdWith execCmd 的 cwd/env/wait 全参版（dt1 用）；不限时（旧路径）。
 func execCmdWith(cmd, cwd string, env []string, wait bool) (int, string, string) {
+	code, so, se, _ := execCmdTimed(cmd, cwd, env, wait, 0)
+	return code, so, se
+}
+
+// execCmdTimed 同 execCmdWith，timeoutS>0 时到点杀整个进程组并返回结构化
+// 超时结果（方案 §6.2）；timeoutS<=0 = 不限时，与旧行为逐字节一致。
+func execCmdTimed(cmd, cwd string, env []string, wait bool, timeoutS int) (int, string, string, *timeoutResult) {
 	c := shellCmd(cmd, env)
 	if cwd != "" {
 		c.Dir = cwd
@@ -281,24 +345,24 @@ func execCmdWith(cmd, cwd string, env []string, wait bool) (int, string, string)
 		c.Stdout = io.Discard // Python PIPE：输出进管道被丢弃，不进 agent 日志
 		c.Stderr = io.Discard
 		if err := c.Start(); err != nil {
-			return -1, "", err.Error()
+			return -1, "", err.Error(), nil
 		}
 		go func() { c.Wait() }() // 防僵尸；语义对齐 Popen 不等待
-		return 0, "", ""
+		return 0, "", "", nil
 	}
-	var so, se bytes.Buffer
+	var so, se syncWriter
 	c.Stdout = &so
 	c.Stderr = &se
-	err := c.Run()
-	code := 0
+	code, tr, err := runWithTimeout(c, timeoutS)
 	if err != nil {
-		if ee, ok := err.(*execExitError); ok {
+		var ee *execExitError
+		if errors.As(err, &ee) {
 			code = processExitCode(ee) // 信号死亡 → -signum（Python subprocess 语义）
 		} else {
-			return -1, "", err.Error()
+			return -1, "", err.Error(), nil
 		}
 	}
-	return code, so.String(), se.String()
+	return code, so.String(), se.String(), tr
 }
 
 // gzipFrame [4B i][gzip body]（dt1 响应形态）。
@@ -321,9 +385,10 @@ func unzipCmd(payload []byte) ([]byte, error) {
 		return nil, err
 	}
 	var p struct {
-		File   string `json:"file"`
-		Outdir string `json:"outdir"`
-		Passwd string `json:"passwd"`
+		File     string `json:"file"`
+		Outdir   string `json:"outdir"`
+		Passwd   string `json:"passwd"`
+		TimeoutS int    `json:"timeout_s"` // 桥侧可选（方案 §6.2）；老桥不发 = 不限时
 	}
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, err
@@ -352,6 +417,13 @@ func unzipCmd(payload []byte) ([]byte, error) {
 	if dir := filepath.Dir(p.File); dir != "" && dir != "." {
 		c.Dir = dir
 	}
-	c.Run()
+	// 到点必须真停：加密大包解压能跑很久，桥断了设备还在啃 CPU/磁盘，
+	// 重试时与它抢同一个 outdir（评审 P2-8）。
+	_, tr, _ := runWithTimeout(c, p.TimeoutS)
+	if tr != nil && tr.TimedOut {
+		// dt15 的既有语义是恒回 "ok"（Python netutils.py:234-250）。超时若也回 ok，
+		// 桥只能靠"产物为空"猜失败。这里回结构化超时，桥侧把它归 timeout + cleanup。
+		return timeoutGzipFrame(tr), nil
+	}
 	return []byte("ok"), nil
 }

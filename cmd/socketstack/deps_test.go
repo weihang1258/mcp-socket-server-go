@@ -6,9 +6,11 @@ import (
 )
 
 // deps 子命令严格解析（与 install/uninstall 同约定）：
-//   deps install-browser  → 执行安装；成功静默，失败 exit 1
-//   -h/--help/help        → 用法，exit 0
-//   其它                  → 用法，exit 2
+//
+//	deps install-browser  → 执行安装；成功静默，失败 exit 1
+//	-h/--help/help        → 用法，exit 0
+//	其它                  → 用法，exit 2
+//
 // 全程不触碰 install/uninstall 路径。
 func TestRunDeps(t *testing.T) {
 	prevFn, prevExit := installBrowserDepsFn, exitFn

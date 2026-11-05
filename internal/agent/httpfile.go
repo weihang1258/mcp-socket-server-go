@@ -449,7 +449,14 @@ func handleFilePOST(w http.ResponseWriter, r *http.Request) {
 		}
 		partPath = ""
 	}
-	_ = fileSeen // Python 仅记录 file_seen；成功判定只看 path 字段（size=0 亦 200）
+	if !fileSeen {
+		// Python http_file.py:346-360：path 有值但 body 里没有 file 字段 →
+		// up["temp"]/up["part"] 均为 None → os.replace(None, dest) 抛 TypeError，
+		// 不是 OSError，逃出 except → 连接被丢、无响应。
+		// Go 侧不模拟「无响应」（运维会误判为网络故障），改回显式 500；差异已登记。
+		sendErrorJSON(w, 500, "write failed: multipart 缺少 file 字段（Python 原版此处 TypeError 断连）")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
 	fmt.Fprintf(w, `{"ok":true,"path":%q,"size":%d}`, dest, size)
@@ -507,6 +514,8 @@ func StartHTTPFileServer(port int) (stop func(), err error) {
 	srv := &http.Server{Handler: FileServerHandler(), Addr: fmt.Sprintf(":%d", port)}
 	ln4, err := net.Listen("tcp4", fmt.Sprintf("0.0.0.0:%d", port))
 	if err != nil {
+		// Python http_file.py:419-421 是 logger.warning 后返回（不试 v6，不抛）。
+		log.Printf("HTTP 文件服务 IPv4 监听失败:%v,服务未启动（:9000 主服务不受影响）", err)
 		return noop, fmt.Errorf("HTTP 文件服务 IPv4 监听失败: %w", err)
 	}
 	go srv.Serve(ln4)

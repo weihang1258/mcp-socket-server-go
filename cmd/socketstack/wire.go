@@ -39,6 +39,7 @@ func runMCPServe(cfg config.Config) {
 		LogLevel: cfg.MCP.LogLevel, AuditDays: cfg.MCP.AuditRetentionDays,
 		Whitelist:      cfg.MCP.CmdExecWhitelist,
 		DefaultTimeout: cfg.MCP.DefaultTimeout,
+		FTPUser:        cfg.MCP.FTPUser, FTPPassword: cfg.MCP.FTPPassword,
 	})
 	if err := mcpbridge.RunStreamableHTTP(context.Background(), b, cfg.MCP.Bind.Host, cfg.MCP.Bind.Port); err != nil {
 		fmt.Fprintln(os.Stderr, "mcp serve 失败:", err)
@@ -55,6 +56,7 @@ func runMCPStdio() {
 		UpgradeRepo: cfg.MCP.UpgradeRepo, UpgradeMirror: cfg.MCP.UpgradeMirror,
 		LogLevel: cfg.MCP.LogLevel, AuditDays: cfg.MCP.AuditRetentionDays,
 		Whitelist: cfg.MCP.CmdExecWhitelist, DefaultTimeout: cfg.MCP.DefaultTimeout,
+		FTPUser: cfg.MCP.FTPUser, FTPPassword: cfg.MCP.FTPPassword,
 	})
 	if err := mcpbridge.RunStdio(context.Background(), b); err != nil {
 		fmt.Fprintln(os.Stderr, "mcp 失败:", err)
@@ -303,11 +305,11 @@ var (
 	svcMCPRestartFn   = svc.MCPRestart
 	svcMCPDisable     = svc.MCPDisable
 	svcMCPActive      = svc.MCPActive
-	installLogrotate = svc.WriteLogrotate
+	installLogrotate  = svc.WriteLogrotate
 
 	// deps 子命令安装动作（测试注入点）。
 	installBrowserDepsFn = svc.InstallBrowserDeps
-	svcLogrotatePath  = svc.LogrotateConfigPath
+	svcLogrotatePath     = svc.LogrotateConfigPath
 	// exePathFn 取自身可执行文件路径（测试替换，避免依赖真实的 /proc/self/exe）。
 	exePathFn = func() (string, error) { return os.Executable() }
 )

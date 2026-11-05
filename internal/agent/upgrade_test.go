@@ -29,7 +29,11 @@ func setUpgradeRestart(t *testing.T, called *atomic.Bool) {
 	t.Cleanup(func() { restartServiceFn = prev })
 }
 
-func setUpgradeClients(n int64) { overrideClients.Store(n) }
+func setUpgradeClients(t *testing.T, n int64) {
+	t.Helper()
+	overrideClients.Store(n)
+	t.Cleanup(func() { overrideClients.Store(-1) })
+}
 
 // finalize：staging sha 校验 → chmod 755 → 原子 replace → 清 staging
 func TestUpgradeFinalizeHappy(t *testing.T) {
@@ -97,7 +101,7 @@ func TestDT20Happy(t *testing.T) {
 	sha := fmt.Sprintf("%x", sha256.Sum256([]byte("NB")))
 	var restarted atomic.Bool
 	setUpgradeRestart(t, &restarted)
-	setUpgradeClients(1) // 仅 dt20 自身连接
+	setUpgradeClients(t, 1) // 仅 dt20 自身连接
 
 	payload, _ := json.Marshal(map[string]any{"version": "v1.9.1", "sha256": sha, "force": true})
 	resp, err := runDT(t, 20, payload)
@@ -138,7 +142,7 @@ func TestDT20Rejections(t *testing.T) {
 	sha := fmt.Sprintf("%x", sha256.Sum256([]byte("NB")))
 
 	// 其他客户端 >1 且非 force
-	setUpgradeClients(3)
+	setUpgradeClients(t, 3)
 	resp, _ := runDT(t, 20, mustJSON(t, map[string]any{"version": "1.9.1", "sha256": sha}))
 	var m map[string]string
 	json.Unmarshal(resp, &m)
@@ -146,7 +150,7 @@ func TestDT20Rejections(t *testing.T) {
 		t.Fatalf("busy reject: %q", resp)
 	}
 	// force 可过客户端检查（到 autoupgrade 分支）
-	setUpgradeClients(1)
+	setUpgradeClients(t, 1)
 	// sha 非法
 	resp, _ = runDT(t, 20, mustJSON(t, map[string]any{"version": "1.9.1", "sha256": "xyz"}))
 	json.Unmarshal(resp, &m)
@@ -202,5 +206,22 @@ func TestAutoupgradeConfig(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(root, "config"))
 	if !strings.Contains(string(data), "http_port=9001") || !strings.Contains(string(data), "autoupgrade=off") {
 		t.Fatalf("other keys must survive: %q", data)
+	}
+}
+
+// activeClientsNow 默认必须走真实 Clients()（-1 哨兵），否则「还有其他客户端连接」
+// 的拒绝逻辑永不触发。
+func TestActiveClientsDefaultUsesRealClients(t *testing.T) {
+	overrideClients.Store(-1)
+	if n := activeClientsNow(); n != Clients() {
+		t.Fatalf("默认应返回真实 Clients()=%d，实际 %d", Clients(), n)
+	}
+}
+
+// dt20 畸形 JSON → 断连无响应（Python json.loads 抛异常冒泡）。
+func TestDT20MalformedJSONDisconnects(t *testing.T) {
+	setUpgradeRoot(t)
+	if _, err := runDT(t, 20, []byte("{not json")); err == nil {
+		t.Fatal("畸形 JSON 应触发断连（Python json.loads 异常）")
 	}
 }

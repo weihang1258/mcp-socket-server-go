@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // ---- 测试用 fake 包源 ----
@@ -43,7 +45,11 @@ func (f *fakeSource) recvFrame(b []byte, deadline time.Time) (int, []byte, error
 			oob := f.oobs[0]
 			f.oobs = f.oobs[1:]
 			f.reads++
+			hook := f.onRead
 			f.mu.Unlock()
+			if hook != nil {
+				hook() // 在 recv goroutine 里执行：用于观测「启动窗口内」的状态
+			}
 			n := copy(b, fr)
 			return n, oob, nil
 		}
@@ -93,8 +99,8 @@ func cmsgAuxdata(tci uint16) []byte {
 	binary.LittleEndian.PutUint32(b[12:], 8)  // PACKET_AUXDATA
 	// tp_status: VLAN_VALID(0x10) 置位
 	binary.LittleEndian.PutUint32(b[16:], 0x10)
-	// tp_vlan_tci @ offset 16+12
-	binary.LittleEndian.PutUint16(b[16+12:], tci)
+	// tp_vlan_tci @ auxdata 偏移 16（= cmsg 头 16 + 12 是 tp_mac，不是 tci）
+	binary.LittleEndian.PutUint16(b[16+16:], tci)
 	return b
 }
 
@@ -112,7 +118,7 @@ func testEthPayload() []byte {
 func captureTestStart(t *testing.T, src *fakeSource, path string) (bool, error) {
 	t.Helper()
 	prev := openPacketSocketFn
-	openPacketSocketFn = func(eth string) (pktSource, error) { return src, nil }
+	openPacketSocketFn = func(eth string, bpf []bpfInstr) (pktSource, error) { return src, nil }
 	t.Cleanup(func() { openPacketSocketFn = prev })
 	return tcpdumpStart("eth0", path, "", true)
 }
@@ -161,7 +167,7 @@ func TestCaptureRestartSamePath(t *testing.T) {
 	}
 	src2 := newFakeSource()
 	prev := openPacketSocketFn
-	openPacketSocketFn = func(string) (pktSource, error) { return src2, nil }
+	openPacketSocketFn = func(string, []bpfInstr) (pktSource, error) { return src2, nil }
 	if ok, _ := tcpdumpStart("eth0", path, "", true); !ok {
 		t.Fatal("second start")
 	}
@@ -178,7 +184,7 @@ func TestCaptureRestartSamePath(t *testing.T) {
 func TestCaptureStartFail(t *testing.T) {
 	resetCapture(t)
 	prev := openPacketSocketFn
-	openPacketSocketFn = func(string) (pktSource, error) { return nil, errors.New("permission denied") }
+	openPacketSocketFn = func(string, []bpfInstr) (pktSource, error) { return nil, errors.New("permission denied") }
 	t.Cleanup(func() { openPacketSocketFn = prev })
 	resp, err := runDT(t, 5, mustJSON(t, map[string]string{"eth": "eth0", "path": "/tmp/x.pcap"}))
 	if err != nil {
@@ -195,7 +201,7 @@ func TestCaptureBPFUnavailableFails(t *testing.T) {
 	fake := t.TempDir()
 	t.Setenv("PATH", fake) // 无 tcpdump
 	prev := openPacketSocketFn
-	openPacketSocketFn = func(string) (pktSource, error) { return newFakeSource(), nil }
+	openPacketSocketFn = func(string, []bpfInstr) (pktSource, error) { return newFakeSource(), nil }
 	t.Cleanup(func() { openPacketSocketFn = prev })
 	resp, err := runDT(t, 5, mustJSON(t, map[string]string{"eth": "eth0", "path": "/tmp/y.pcap", "extended": "port 80"}))
 	if err != nil {
@@ -218,7 +224,7 @@ func TestCaptureBPFParsed(t *testing.T) {
 	prev := openPacketSocketFn
 	var gotBPF []bpfInstr
 	setBPFCapture(func(ins []bpfInstr) { gotBPF = ins }) // compileBPF 先于 open socket
-	openPacketSocketFn = func(string) (pktSource, error) { return src, nil }
+	openPacketSocketFn = func(_ string, bpf []bpfInstr) (pktSource, error) { gotBPF = bpf; return src, nil }
 	t.Cleanup(func() { openPacketSocketFn = prev; setBPFCapture(nil) })
 	if ok, _ := tcpdumpStart("eth0", filepath.Join(t.TempDir(), "z.pcap"), "port 80", true); !ok {
 		t.Fatal("start with BPF")
@@ -294,6 +300,233 @@ func TestCaptureTimestampDecode(t *testing.T) {
 	}
 }
 
+// 无 cmsg 时兜底必须是**开机基准**（Python time.monotonic_ns）：进程启动基准会让
+// ts_sec 从 0 起跳，与同机其它 pcap 时间轴对不上。
+func TestCaptureMonotonicFallbackIsBootBase(t *testing.T) {
+	got := decodeTimestampNs(nil)
+	// 机器开机至少 60s（CI 不会在启动后 60s 内跑测试）；进程启动基准必然 < 60s。
+	if got < 60*1e9 {
+		t.Fatalf("monotonic 兜底不是开机基准（%ds），应接近 /proc/uptime", got/1e9)
+	}
+	up, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		t.Skip("无 /proc/uptime")
+	}
+	var upSec float64
+	fmt.Sscanf(string(up), "%f", &upSec)
+	diff := float64(got)/1e9 - upSec
+	if diff < -5 || diff > 5 {
+		t.Fatalf("与 /proc/uptime 偏差 %.0fs，不是开机基准", diff)
+	}
+}
+
+// dt5 抓包前必须关 GRO/LRO/TSO/GSO：不关则同一报文在分流两端抓到不同长度
+// （实测 GRO 开最大 21786B vs 全关 1514B），业务按包比对必判不一致。
+func TestCaptureDisablesOffloads(t *testing.T) {
+	resetCapture(t)
+	calls := stubOffloadOff(t) // 再 stub 一次拿干净记录（resetCapture 已 stub 过）
+	path := filepath.Join(t.TempDir(), "off.pcap")
+	src := newFakeSource()
+	prev := openPacketSocketFn
+	openPacketSocketFn = func(string, []bpfInstr) (pktSource, error) { return src, nil }
+	t.Cleanup(func() { openPacketSocketFn = prev })
+	if ok, _ := tcpdumpStart("eth0", path, "", false); !ok {
+		t.Fatal("start")
+	}
+	if len(*calls) != 1 || (*calls)[0] != "eth0" {
+		t.Fatalf("抓包前未关 offload: %v", *calls)
+	}
+}
+
+// 默认网卡（eth 空）也要关 offload，且要在 routeinfo 选出网卡之后。
+func TestCaptureDisablesOffloadsOnDefaultIface(t *testing.T) {
+	resetCapture(t)
+	calls := stubOffloadOff(t)
+	fixture := "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT   \n" +
+		"ens19\t00000000\t0100000A\t0003\t0\t0\t0\t00000000\t0\t0\t0    \n"
+	p := filepath.Join(t.TempDir(), "route")
+	os.WriteFile(p, []byte(fixture), 0o644)
+	prevProc := routeTablePath
+	routeTablePath = p
+	t.Cleanup(func() { routeTablePath = prevProc })
+	src := newFakeSource()
+	prev := openPacketSocketFn
+	openPacketSocketFn = func(string, []bpfInstr) (pktSource, error) { return src, nil }
+	t.Cleanup(func() { openPacketSocketFn = prev })
+	if ok, _ := tcpdumpStart("", filepath.Join(t.TempDir(), "d.pcap"), "", false); !ok {
+		t.Fatal("start")
+	}
+	if len(*calls) != 1 || (*calls)[0] != "ens19" {
+		t.Fatalf("默认网卡未关 offload: %v", *calls)
+	}
+}
+
+// 注册表必须在「确认线程存活」之后才写（Python 子进程回 ready 后才写 _captures）。
+// 提前写会让启动窗口内的并发 dt6 真停掉抓包，而 dt5 仍回 true。
+// 判别点：recv goroutine 已在跑（稳定窗内）时，注册表里还不该有它。
+func TestCaptureRegisterAfterStable(t *testing.T) {
+	resetCapture(t)
+	path := filepath.Join(t.TempDir(), "reg.pcap")
+	src := newFakeSource()
+	prev := openPacketSocketFn
+	openPacketSocketFn = func(string, []bpfInstr) (pktSource, error) { return src, nil }
+	t.Cleanup(func() { openPacketSocketFn = prev })
+
+	var registeredDuringStartup bool
+	var once sync.Once
+	src.onRead = func() {
+		once.Do(func() {
+			capturesMu.Lock()
+			_, registeredDuringStartup = captures[path]
+			capturesMu.Unlock()
+		})
+	}
+	src.push(testEthPayload(), nil)
+	if ok, _ := tcpdumpStart("eth0", path, "", false); !ok {
+		t.Fatal("start")
+	}
+	if registeredDuringStartup {
+		t.Fatal("稳定窗内就注册了：并发 dt6 会真停掉这次抓包（Python 是 ready 后才写表）")
+	}
+	capturesMu.Lock()
+	_, registered := captures[path]
+	capturesMu.Unlock()
+	if !registered {
+		t.Fatal("启动成功后必须注册")
+	}
+	runDT(t, 6, mustJSON(t, map[string]string{"path": path}))
+}
+
+// 写盘失败必须返回错误（原实现 f.Write 返回值全丢 → 磁盘满仍报成功、pcap 静默截断）。
+// 用 /dev/full：每次 write 都返回 ENOSPC，不依赖权限或磁盘容量。
+func TestWritePacketSurfacesError(t *testing.T) {
+	full, err := os.OpenFile("/dev/full", os.O_WRONLY, 0)
+	if err != nil {
+		t.Skip("/dev/full 不可用")
+	}
+	defer full.Close()
+	if n, err := writePacket(full, testEthPayload(), 1e9); err == nil {
+		t.Fatalf("写 /dev/full 必须报错，实际 n=%d err=nil（pcap 会静默截断）", n)
+	}
+}
+
+// 全局头写失败 → 启动即 res:false，且不在注册表留残骸。
+func TestCaptureCreateFailNotRegistered(t *testing.T) {
+	resetCapture(t)
+	path := filepath.Join(t.TempDir(), "werr.pcap")
+	prevCreate := captureCreateFn
+	captureCreateFn = func(string) (*os.File, error) { return nil, errors.New("磁盘满") }
+	t.Cleanup(func() { captureCreateFn = prevCreate })
+	src := newFakeSource()
+	prevOpen := openPacketSocketFn
+	openPacketSocketFn = func(string, []bpfInstr) (pktSource, error) { return src, nil }
+	t.Cleanup(func() { openPacketSocketFn = prevOpen })
+
+	if ok, _ := tcpdumpStart("eth0", path, "", false); ok {
+		t.Fatal("文件创建失败必须 res:false")
+	}
+	capturesMu.Lock()
+	_, registered := captures[path]
+	capturesMu.Unlock()
+	if registered {
+		t.Fatal("启动失败的实例不得残留在注册表")
+	}
+}
+
+// 多网卡抓包必须分到不同 CPU（Python _allocated_cpus）：同 CPU 会让两个网卡的
+// 软中断互抢，收包序被打乱，抓包无法按线序重排。
+func TestPickFreeCPUDistinctPerIface(t *testing.T) {
+	cpuBindingMu.Lock()
+	oldBind, oldAlloc := cpuBinding, allocatedCPU
+	cpuBinding = map[string]int{}
+	allocatedCPU = map[int]bool{}
+	cpuBindingMu.Unlock()
+	t.Cleanup(func() {
+		cpuBindingMu.Lock()
+		cpuBinding, allocatedCPU = oldBind, oldAlloc
+		cpuBindingMu.Unlock()
+	})
+
+	a := pickFreeCPU("eth-a")
+	b := pickFreeCPU("eth-b")
+	if a == b {
+		t.Fatalf("两个网卡分到了同一 CPU%d（软中断互抢会乱序）", a)
+	}
+	if a == 0 || b == 0 {
+		t.Fatalf("不得绑到 CPU0（系统中断/定时器所在）：a=%d b=%d", a, b)
+	}
+	if got := pickFreeCPU("eth-a"); got != a {
+		t.Fatalf("同网卡应复用绑定：want %d got %d", a, got)
+	}
+	if got := pickFreeCPU("eth-b"); got != b {
+		t.Fatalf("同网卡应复用绑定：want %d got %d", b, got)
+	}
+}
+
+// EINTR 必须重试而不是退出循环。真机实测（35 enp94s0f0np0）：Go runtime 的 SIGURG
+// 抢占会打断 recvmsg，unix.Recvmsg 直接返回 EINTR；旧代码把它当非超时错误
+// goto drained，抓包线程只跑到回放的前 135 包（时间戳跨度 <1s）就收工，
+// 而内核 drops=0（包根本没被读完，不是丢弃）。Python 的 socket.recvmsg 内部重试，
+// 所以原版无此问题。
+func TestCaptureRecvRetriesEINTR(t *testing.T) {
+	resetCapture(t)
+	path := filepath.Join(t.TempDir(), "eintr.pcap")
+	src := &eintrSource{fakeSource: newFakeSource(), eintrEvery: 1}
+	prev := openPacketSocketFn
+	openPacketSocketFn = func(string, []bpfInstr) (pktSource, error) { return src, nil }
+	t.Cleanup(func() { openPacketSocketFn = prev })
+	if ok, _ := tcpdumpStart("eth0", path, "", false); !ok {
+		t.Fatal("start")
+	}
+	for i := 0; i < 5; i++ {
+		src.push(testEthPayload(), nil)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if resp, _ := runDT(t, 6, mustJSON(t, map[string]string{"path": path})); string(resp) != `{"res":true}` {
+		t.Fatalf("stop: %q", resp)
+	}
+	data, _ := os.ReadFile(path)
+	n := (len(data) - 24) / (16 + 60)
+	if n != 5 {
+		t.Fatalf("EINTR 后必须继续收包：want 5 包 got %d（旧代码在第 1 次 EINTR 就退出）", n)
+	}
+}
+
+// eintrSource 每收到一次真帧前先抛 EINTR（模拟 Go runtime SIGURG 抢占）。
+type eintrSource struct {
+	*fakeSource
+	eintrEvery int
+	calls      int
+}
+
+func (s *eintrSource) recvFrame(b []byte, deadline time.Time) (int, []byte, error) {
+	s.calls++
+	if s.calls%s.eintrEvery == 0 && s.calls%2 == 0 {
+		return 0, nil, fmt.Errorf("recvmsg: %w", unix.EINTR)
+	}
+	return s.fakeSource.recvFrame(b, deadline)
+}
+
+// 空帧（len 0）不产生 pcap 记录（Python `if not data: break`）。
+func TestCaptureEmptyFrameSkipped(t *testing.T) {
+	resetCapture(t)
+	path := filepath.Join(t.TempDir(), "empty.pcap")
+	src := newFakeSource()
+	if ok, _ := captureTestStart(t, src, path); !ok {
+		t.Fatal("start")
+	}
+	src.push([]byte{}, nil)
+	src.push(testEthPayload(), nil)
+	time.Sleep(200 * time.Millisecond)
+	if resp, _ := runDT(t, 6, mustJSON(t, map[string]string{"path": path})); string(resp) != `{"res":true}` {
+		t.Fatalf("stop: %q", resp)
+	}
+	data, _ := os.ReadFile(path)
+	if n := len(data) - 24; n != 16+60 {
+		t.Fatalf("空帧被写进了 pcap：记录区 %d 字节，应为 16 头+60 帧", n)
+	}
+}
+
 // 无 auxdata：帧原样（无 VLAN 插入）
 func TestCaptureNoAuxdataUntouched(t *testing.T) {
 	resetCapture(t)
@@ -327,7 +560,7 @@ func TestCaptureDefaultIface(t *testing.T) {
 	var gotEth string
 	src := newFakeSource()
 	prev := openPacketSocketFn
-	openPacketSocketFn = func(eth string) (pktSource, error) { gotEth = eth; return src, nil }
+	openPacketSocketFn = func(eth string, bpf []bpfInstr) (pktSource, error) { gotEth = eth; return src, nil }
 	t.Cleanup(func() { openPacketSocketFn = prev })
 	if ok, _ := tcpdumpStart("", filepath.Join(t.TempDir(), "d.pcap"), "", true); !ok {
 		t.Fatal("start")
@@ -372,7 +605,7 @@ func TestCaptureSingleQueueBestEffort(t *testing.T) {
 	queueSleepFn = func(time.Duration) {}
 	src := newFakeSource()
 	prev := openPacketSocketFn
-	openPacketSocketFn = func(string) (pktSource, error) { return src, nil }
+	openPacketSocketFn = func(string, []bpfInstr) (pktSource, error) { return src, nil }
 	t.Cleanup(func() { openPacketSocketFn = prev })
 	// single_queue=true：单队列配置执行（失败也继续）
 	if ok, _ := tcpdumpStart("eth0", filepath.Join(t.TempDir(), "sq.pcap"), "", true); !ok {
@@ -443,11 +676,23 @@ func TestConfigureSingleQueueReadFailNoop(t *testing.T) {
 	}
 }
 
-// resetCapture 清空抓包注册表（capturesReset 已删——逐实例停）
+// resetCapture 清空抓包注册表（capturesReset 已删——逐实例停），并拦掉真实
+// ethtool -K：单测绝不能改跑测试这台机器的网卡 offload。
 func resetCapture(t *testing.T) {
 	t.Helper()
 	stopAllCapturesForTest()
 	t.Cleanup(func() { stopAllCapturesForTest() })
+	stubOffloadOff(t)
+}
+
+// stubOffloadOff 拦掉真实 ethtool -K，返回调用记录（网卡名序列）。
+func stubOffloadOff(t *testing.T) *[]string {
+	t.Helper()
+	var calls []string
+	prev := offloadOffFn
+	offloadOffFn = func(eth string) { calls = append(calls, eth) }
+	t.Cleanup(func() { offloadOffFn = prev })
+	return &calls
 }
 
 var _ = json.Marshal
@@ -487,6 +732,70 @@ func TestCaptureStopWithSustainedTraffic(t *testing.T) {
 	if elapsed > 10*time.Second {
 		t.Fatalf("stop 耗时 %v，drain 需要硬上限", elapsed)
 	}
+}
+
+// stop 超时必须强关 socket 让 goroutine 退出（对齐 Python proc.terminate）。
+// 用一个永不返回的 recvFrame 模拟卡死的抓包线程：没有 terminate 兜底时
+// goroutine 会永久持着 socket，只有重启服务才能恢复。
+func TestStopCaptureEntryTerminatesStuckLoop(t *testing.T) {
+	prev := drainMaxDuration
+	drainMaxDuration = 10 * time.Millisecond
+	t.Cleanup(func() { drainMaxDuration = prev })
+	prevStop := stopTimeout
+	stopTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { stopTimeout = prevStop })
+
+	stuck := make(chan struct{})
+	src := &stuckSource{closed: stuck}
+	entry := &captureEntry{stop: make(chan struct{}), done: make(chan struct{}), src: src}
+	go func() {
+		defer close(entry.done)
+		entry.result, entry.fatal = captureRecvLoop(src, filepath.Join(t.TempDir(), "stuck.pcap"), "eth0", entry.stop)
+	}()
+	time.Sleep(100 * time.Millisecond) // 让它进入 recv
+
+	done := make(chan bool, 1)
+	go func() { done <- stopCaptureEntry(entry) }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("强关 socket 后 stop 应成功")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("stop 卡死：超时后没有 terminate 兜底")
+	}
+	if !src.wasClosed() {
+		t.Fatal("超时后必须强制关闭 socket（Python 调 proc.terminate）")
+	}
+}
+
+// stuckSource recvFrame 阻塞到 close 为止（模拟卡死的收包线程）。
+type stuckSource struct {
+	closed   chan struct{}
+	closeOne sync.Once
+	mu       sync.Mutex
+	closedFl bool
+}
+
+func (s *stuckSource) recvFrame([]byte, time.Time) (int, []byte, error) {
+	<-s.closed
+	return 0, nil, errors.New("socket closed")
+}
+
+func (s *stuckSource) close() error {
+	s.mu.Lock()
+	s.closedFl = true
+	s.mu.Unlock()
+	s.closeOne.Do(func() { close(s.closed) })
+	return nil
+}
+
+func (s *stuckSource) stats() (uint64, uint64) { return 0, 0 }
+
+func (s *stuckSource) wasClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closedFl
 }
 
 // 持续流量下 stop 成功后，实例必须从注册表移除、pcap 可正常读回。

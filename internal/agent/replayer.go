@@ -63,6 +63,8 @@ type replayer struct {
 	upPackets, upBytes       int
 	downPackets, downBytes   int
 	startTime, endTime       float64
+	deadline                 time.Time // 零值 = 不限时（方案 §6.2 timeout_s）
+	replayTimedOut           bool      // 包循环内到点：真停并让 replayFiles 回 timeout
 }
 
 type tuple5Key struct {
@@ -247,14 +249,8 @@ func buildModifiedPacket(ethBytes []byte, modSrc, modDst *string, modSport, modD
 			copy(ipHdr[16:20], net.ParseIP(*modDst).To4())
 		}
 		if proto == 6 || proto == 17 || proto == 132 {
-			if (modSport != nil || modDport != nil) && len(trans) < 2 {
+			if !rewritePorts(trans, modSport, modDport) {
 				return nil // Python IndexError → 整包原样
-			}
-			if modSport != nil {
-				binary.BigEndian.PutUint16(trans, *modSport)
-			}
-			if modDport != nil {
-				binary.BigEndian.PutUint16(trans[2:], *modDport)
 			}
 		}
 		if proto == 6 || proto == 17 {
@@ -314,6 +310,12 @@ func buildModifiedPacket(ethBytes []byte, modSrc, modDst *string, modSport, modD
 			copy(v4[16:20], dst4FromMapped(payload[24:40]))
 		}
 		if nh == 6 || nh == 17 {
+			if len(trans) < 4 {
+				// 有意偏离：Python bytearray 切片赋值会自动扩展，短段也能"成功"，
+				// 但产出的是补零后的畸形段（端口写进去、后续校验和按扩展长度算）。
+				// 回放原包比发畸形包安全，可观察差异仅在畸形 pcap 上。
+				return nil
+			}
 			binary.BigEndian.PutUint16(trans, sport)
 			binary.BigEndian.PutUint16(trans[2:], dport)
 			off := 16
@@ -367,6 +369,9 @@ func buildModifiedPacket(ethBytes []byte, modSrc, modDst *string, modSport, modD
 			copy(v6[24:40], mappedFrom4(payload[16:20]))
 		}
 		if proto == 6 || proto == 17 {
+			if len(trans) < 4 {
+				return nil // 同 v6→v4：短段不产出畸形包，原样回放
+			}
 			binary.BigEndian.PutUint16(trans, sport)
 			binary.BigEndian.PutUint16(trans[2:], dport)
 			off := 16
@@ -391,14 +396,8 @@ func buildModifiedPacket(ethBytes []byte, modSrc, modDst *string, modSport, modD
 			copy(ipHdr[24:40], net.ParseIP(*modDst).To16())
 		}
 		if nh == 6 || nh == 17 || nh == 132 {
-			if (modSport != nil || modDport != nil) && len(trans) < 2 {
+			if !rewritePorts(trans, modSport, modDport) {
 				return nil
-			}
-			if modSport != nil {
-				binary.BigEndian.PutUint16(trans, *modSport)
-			}
-			if modDport != nil {
-				binary.BigEndian.PutUint16(trans[2:], *modDport)
 			}
 			off := 16
 			if nh == 17 {
@@ -415,6 +414,30 @@ func buildModifiedPacket(ethBytes []byte, modSrc, modDst *string, modSport, modD
 		return append(append([]byte{}, ethBytes[:14]...), append(ipHdr, trans...)...)
 	}
 	return nil // v4↔v6 互转需对侧地址族全指定；未满足场景原样（半成品分支少用，照抄语义从简）
+}
+
+// rewritePorts 改写传输层前 4 字节的源/目的端口。
+// 返回 false = 传输层过短，调用方原样返回整包（对齐 Python 整段 try/except → eth_bytes）。
+// Python 用 bytearray 切片赋值，短包会自动扩展字节串；这里不扩展——返回 nil 走原包，
+// 与 Python `except Exception → return eth_bytes` 的可观察结果一致。
+func rewritePorts(trans []byte, modSport, modDport *uint16) bool {
+	need := 0
+	if modSport != nil {
+		need = 2
+	}
+	if modDport != nil {
+		need = 4
+	}
+	if len(trans) < need {
+		return false
+	}
+	if modSport != nil {
+		binary.BigEndian.PutUint16(trans, *modSport)
+	}
+	if modDport != nil {
+		binary.BigEndian.PutUint16(trans[2:], *modDport)
+	}
+	return true
 }
 
 // src4FromMapped/mappedFrom4 跨族缺省地址（Python 用 force 值或失败原样；此处尽力映射）。
@@ -482,6 +505,7 @@ func replayFiles(payload []byte) ([]byte, error) {
 		"force_ip_src": true, "force_ip_dst": true, "force_sport": true, "force_dport": true,
 		"force_build_flow": true, "client_ip_hint": true, "server_ip_hint": true,
 		"enable_pcap_cache": true, "pcap_cache_dir": true, "verbose": true,
+		"timeout_s": true, // 桥侧可选（方案 §6.2）：到点回 timeout 回执，Python 原客户端不发
 	}
 	for k := range raw {
 		if !allowed[k] {
@@ -522,15 +546,31 @@ func replayFiles(payload []byte) ([]byte, error) {
 		forceBuildFlow: req.ForceBuild, clientHint: req.ClientHint, serverHint: req.ServerHint,
 		flowTable: map[tuple5Key]*flowInfo5{},
 	}
+	// timeout_s>0：到点停止回放并回结构化超时（方案 §6.2 第 3 条）。
+	// 回放是 Go 进程内的循环，没有子进程可杀，停循环即"真停"。
+	if rawTimeout, has := raw["timeout_s"]; has && string(rawTimeout) != "null" {
+		var ts float64
+		if json.Unmarshal(rawTimeout, &ts) == nil && ts > 0 {
+			r.deadline = time.Now().Add(time.Duration(ts) * time.Second)
+		}
+	}
 	if err := replayPrepareFn(req.UpIface, req.DownIface); err != nil {
 		return dt0Error(err), nil // 对应 Python _setup_sockets() 异常 → except → error JSON
 	}
 	r.startTime = nowSec()
 	var totalBytesSent int
 	for _, f := range req.Pcaps {
+		if deadlineExpiredAt(r.deadline) {
+			return dt0Timeout(statsSoFar(r)), nil
+		}
 		pkts, _, ferr := r.replayFile(f)
 		if ferr != nil {
 			return dt0Error(ferr), nil
+		}
+		if r.replayTimedOut {
+			r.totalFiles++
+			r.totalPackets += pkts
+			return dt0Timeout(statsSoFar(r)), nil
 		}
 		r.totalFiles++
 		r.totalPackets += pkts
@@ -581,6 +621,35 @@ func sign(f float64) float64 {
 		return -1
 	}
 	return 1
+}
+
+// dt0Timeout 回放超时回执：status=timeout + 已发统计 + killed/verified。
+func dt0Timeout(stats replayStats) []byte {
+	out, _ := json.Marshal(map[string]any{
+		"status": "timeout", "message": "回放超时，已停止发包",
+		"timeout": true, "killed": true, "verified": true, "stats": stats,
+	})
+	return out
+}
+
+// deadlineExpiredAt 零值 deadline = 不限时。
+func deadlineExpiredAt(d time.Time) bool {
+	return !d.IsZero() && time.Now().After(d)
+}
+
+func statsSoFar(r *replayer) replayStats {
+	dur := nowSec() - r.startTime
+	actual := 0.0
+	if dur > 0 {
+		actual = float64(r.totalBytes) * 8 / 1e6 / dur
+	}
+	return replayStats{
+		TotalFiles: r.totalFiles, TotalPackets: r.totalPackets, TotalBytes: r.totalBytes,
+		UplinkPackets: r.upPackets, UplinkBytes: r.upBytes,
+		DownlinkPackets: r.downPackets, DownlinkBytes: r.downBytes,
+		FlowCount: r.flowCount, DurationSeconds: round2(dur),
+		TargetMbps: r.mbps, ActualMbps: round2(actual),
+	}
 }
 
 // dt0Error {"status":"error","message":str(e)}（Python dt0 try/except 语义）。
@@ -706,6 +775,12 @@ func (r *replayer) replayFile(path string) (int, int, error) {
 			r.downBytes += bytesInc
 		}
 		r.totalBytes += bytesInc
+
+		// 到点真停：包循环中途也要立刻停，而不是等整个 pcap 发完（方案 §6.2）
+		if deadlineExpiredAt(r.deadline) {
+			r.replayTimedOut = true
+			return packets, r.totalBytes, nil
+		}
 
 		// 每包限速（对齐 replay_file：delay=incl*8/bps）
 		if r.mbps > 0 {
