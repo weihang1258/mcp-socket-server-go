@@ -66,7 +66,7 @@ type dpiSwitchModeIn struct {
 	Mode          string         `json:"mode" jsonschema:"目标模式，如 com_cmcc_is；同模式同配置时自动跳过"`
 	Args          []string       `json:"args,omitempty" jsonschema:"切换命令的附加参数，缺省 [idc31]"`
 	ModifiedParam map[string]any `json:"modified_param,omitempty" jsonschema:"切换前修改 mod_switch.sh 的开关，如 {\"wlan_switch\": \"1\"}"`
-	Force         bool           `json:"force,omitempty" jsonschema:"true = 强制切换（即使模式相同），缺省 false"`
+	Force         bool           `json:"force,omitempty" jsonschema:"true 表示 强制切换（即使模式相同），缺省 false"`
 	PciCfg        map[string]any `json:"pcicfg,omitempty" jsonschema:"PCI 配置（pci_list/raw_port/src_mac/dst_mac），变化时先写 pci.cfg 再切"`
 	AliveTimeout  int            `json:"alive_timeout,omitempty" jsonschema:"等 DPI 启动的秒数，缺省 600"`
 }
@@ -79,15 +79,15 @@ type dpiPolicyGetIn struct {
 type dpiPolicyPutIn struct {
 	BaseIn
 	ResourceID string   `json:"resource_id" jsonschema:"策略/配置资产名，同 dpi_policy_get"`
-	Rules      []string `json:"rules" jsonschema:"策略行（整文件覆盖；空数组 = 清空策略）"`
-	MD5Check   bool     `json:"md5check,omitempty" jsonschema:"true = 内容 md5 相同时跳过写入，缺省 false"`
+	Rules      []string `json:"rules" jsonschema:"策略行数组，每项一行文本；整文件覆盖，空数组表示清空策略"`
+	MD5Check   bool     `json:"md5check,omitempty" jsonschema:"true 表示 内容 md5 相同时跳过写入，缺省 false"`
 }
 
 type dpiPolicyWaitIn struct {
 	BaseIn
-	Kind     string `json:"kind" jsonschema:"action = 等策略加载条数 | adms = 等 ADMS 任务 adms_allrule_num"`
+	Kind     string `json:"kind" jsonschema:"action 为 等策略加载条数 | adms 为 等 ADMS 任务 adms_allrule_num"`
 	Action   string `json:"action,omitempty" jsonschema:"仅 kind 为 action 时用：eu_plc | pcapdump | mirr | vpn_block"`
-	Expected int    `json:"expected" jsonschema:"预期条数"`
+	Expected int    `json:"expected" jsonschema:"预期条数；0 表示等策略被清空"`
 	EveryS   int    `json:"every_s,omitempty" jsonschema:"轮询间隔秒，缺省 2"`
 	WaitS    int    `json:"wait_s,omitempty" jsonschema:"最长等待秒数，缺省 60"`
 }
@@ -105,17 +105,17 @@ type dpiPreparePackageIn struct {
 	LocalPath    string `json:"local_path,omitempty" jsonschema:"桥本地已有安装包路径，给了就跳过下载"`
 	PackagePath  string `json:"package_path,omitempty" jsonschema:"靶机上安装包已存在的路径，给了就跳过下载与上传"`
 	ExtractDir   string `json:"extract_dir,omitempty" jsonschema:"靶机解压根目录，缺省 /home/tmp/dpi_pkg"`
-	ScanExisting *bool  `json:"scan_existing,omitempty" jsonschema:"true = 已解压目录存在时跳过重解（缺省 true）"`
+	ScanExisting *bool  `json:"scan_existing,omitempty" jsonschema:"true 表示 已解压目录存在时跳过重解（缺省 true）"`
 }
 
 type dpiInstallIn struct {
 	BaseIn
-	InstallScript string         `json:"install_script" jsonschema:"靶机上 install.sh 的绝对路径（由 dpi_prepare_package 返回）"`
+	InstallScript string         `json:"install_script" jsonschema:"靶机上 install.sh 的绝对路径，如 /home/tmp/pkg/install.sh（由 dpi_prepare_package 返回）"`
 	BackupPath    string         `json:"backup_path,omitempty" jsonschema:"备份根目录，缺省 /home/dpibak"`
 	Mode          string         `json:"mode,omitempty" jsonschema:"装完要切到的模式，如 com_cmcc_is；留空不切"`
 	Args          []string       `json:"args,omitempty" jsonschema:"模式切换附加参数，缺省 [idc31]"`
-	SwitchParams  map[string]any `json:"switch_params,omitempty" jsonschema:"模式切换前的开关修改"`
-	PciCfg        map[string]any `json:"pcicfg,omitempty" jsonschema:"PCI 配置"`
+	SwitchParams  map[string]any `json:"switch_params,omitempty" jsonschema:"模式切换前的开关修改，如 {\"wlan_switch\": \"1\"}"`
+	PciCfg        map[string]any `json:"pcicfg,omitempty" jsonschema:"PCI 配置键值，如 {\"pci_list\": \"1,2\", \"raw_port\": \"1\"}"`
 	AliveTimeout  int            `json:"alive_timeout,omitempty" jsonschema:"等 DPI 启动秒数，缺省 600"`
 }
 
@@ -123,7 +123,7 @@ type dpiUpgradeIn struct {
 	BaseIn
 	UpgradeScript    string         `json:"upgrade_script" jsonschema:"靶机上升级脚本的绝对路径（由 dpi_prepare_package 返回）"`
 	TargetVersion    string         `json:"target_version" jsonschema:"目标版本号，升级后核对"`
-	UseUpgradeSystem bool           `json:"use_upgrade_system,omitempty" jsonschema:"true = 交给升级系统接管（upms），缺省 false = 本地升级"`
+	UseUpgradeSystem bool           `json:"use_upgrade_system,omitempty" jsonschema:"true 表示 交给升级系统接管（upms），缺省 false 表示 本地升级"`
 	XsaExpect        map[string]any `json:"xsa_expect,omitempty" jsonschema:"升级后应满足的 xsa.json 配置（按点号路径核对）"`
 	StartTimeout     int            `json:"start_timeout,omitempty" jsonschema:"升级脚本启动等待秒数，缺省 300"`
 	CompleteTimeout  int            `json:"complete_timeout,omitempty" jsonschema:"升级完成等待秒数，缺省 1200"`
@@ -133,109 +133,109 @@ type dpiUpgradeIn struct {
 type dpiBackupIn struct {
 	BaseIn
 	BackupRoot string `json:"backup_root,omitempty" jsonschema:"备份根目录，缺省 /home/dpibak"`
-	Force      bool   `json:"force,omitempty" jsonschema:"true = 同名备份存在也重新备份（带时间戳），缺省 false"`
+	Force      bool   `json:"force,omitempty" jsonschema:"true 表示 同名备份存在也重新备份（带时间戳），缺省 false"`
 }
 
 // ---- 出参 ----
 
 type dpiInfoData struct {
-	Version       string         `json:"version"`
-	Mode          string         `json:"mode"`
-	PCI           map[string]any `json:"pci"`
-	SystemVersion string         `json:"system_version"`
+	Version       string         `json:"version" jsonschema:"DPI 版本号；未安装时为空字符串"`
+	Mode          string         `json:"mode" jsonschema:"当前模式，如 com_cmcc_is；未安装时为空"`
+	PCI           map[string]any `json:"pci" jsonschema:"PCI 配置键值"`
+	SystemVersion string         `json:"system_version" jsonschema:"设备系统版本"`
 }
 
 type dpiConfigData struct {
-	Kind   string         `json:"kind"`
-	File   string         `json:"file"`
-	Values map[string]any `json:"values"`
+	Kind   string         `json:"kind" jsonschema:"配置种类"`
+	File   string         `json:"file" jsonschema:"配置文件路径"`
+	Values map[string]any `json:"values" jsonschema:"配置键值对"`
 }
 
 type dpiApplyConfigData struct {
-	Changes   []string `json:"changes"`
-	Restarted bool     `json:"restarted"`
-	Alive     bool     `json:"alive"`
+	Changes   []string `json:"changes" jsonschema:"本次实际发生的改动列表；空表示配置本来就一致"`
+	Restarted bool     `json:"restarted" jsonschema:"true 表示 有改动并重启了 DPI"`
+	Alive     bool     `json:"alive" jsonschema:"true 表示 重启后 DPI 确认存活"`
 }
 
 type dpiServiceData struct {
-	OK        bool   `json:"ok"`
-	Component string `json:"component"`
-	Action    string `json:"action"`
-	Running   bool   `json:"running"`
+	OK        bool   `json:"ok" jsonschema:"true 表示动作执行成功"`
+	Component string `json:"component" jsonschema:"操作的组件"`
+	Action    string `json:"action" jsonschema:"执行的动作"`
+	Running   bool   `json:"running" jsonschema:"复查结果：true 表示 进程确实在运行"`
 }
 
 type dpiAgentServiceData struct {
-	OK      bool `json:"ok"`
-	Running bool `json:"running"`
+	OK      bool `json:"ok" jsonschema:"true 表示动作执行成功"`
+	Running bool `json:"running" jsonschema:"复查结果：true 表示 agent 进程在运行"`
 }
 
 type dpiSwitchData struct {
-	Changed       bool     `json:"changed"`
-	VersionBefore string   `json:"version_before"`
-	VersionAfter  string   `json:"version_after"`
-	ModeBefore    string   `json:"mode_before"`
-	ModeAfter     string   `json:"mode_after"`
-	Marks         []string `json:"marks"`
+	Changed       bool     `json:"changed" jsonschema:"true 表示本次确实执行了切换；false 表示模式与配置都没变已跳过"`
+	VersionBefore string   `json:"version_before" jsonschema:"切换前版本"`
+	VersionAfter  string   `json:"version_after" jsonschema:"切换后版本"`
+	ModeBefore    string   `json:"mode_before" jsonschema:"切换前模式"`
+	ModeAfter     string   `json:"mode_after" jsonschema:"切换后模式"`
+	Marks         []string `json:"marks" jsonschema:"过程标记，如「无需切换dpi模式」"`
 }
 
 type dpiPolicyData struct {
-	ResourceID string   `json:"resource_id"`
-	File       string   `json:"file"`
-	Rules      []string `json:"rules"`
-	SHA256     string   `json:"sha256"`
-	RuleCount  int      `json:"rule_count"`
+	ResourceID string   `json:"resource_id" jsonschema:"资产名"`
+	File       string   `json:"file" jsonschema:"策略文件路径"`
+	Rules      []string `json:"rules" jsonschema:"策略行内容"`
+	SHA256     string   `json:"sha256" jsonschema:"当前内容哈希"`
+	RuleCount  int      `json:"rule_count" jsonschema:"规则条数"`
 }
 
 type dpiPolicyPutData struct {
-	Changed      bool   `json:"changed"`
-	BeforeSHA256 string `json:"before_sha256"`
-	AfterSHA256  string `json:"after_sha256"`
-	RuleCount    int    `json:"rule_count"`
+	Changed      bool   `json:"changed" jsonschema:"true 表示内容变化并已写入；false 表示 md5 相同已跳过"`
+	BeforeSHA256 string `json:"before_sha256" jsonschema:"写入前哈希"`
+	AfterSHA256  string `json:"after_sha256" jsonschema:"写入后哈希"`
+	RuleCount    int    `json:"rule_count" jsonschema:"写入后规则条数"`
 }
 
 type dpiPolicyWaitData struct {
-	Ready    bool    `json:"ready"`
-	Actual   string  `json:"actual"`
-	Expected int     `json:"expected"`
-	Samples  int     `json:"samples"`
-	ElapsedS float64 `json:"elapsed_s"`
-	TimedOut bool    `json:"timed_out,omitempty"`
+	Ready    bool    `json:"ready" jsonschema:"true 表示已达到预期条数"`
+	Actual   string  `json:"actual" jsonschema:"实际观测到的值"`
+	Expected int     `json:"expected" jsonschema:"预期条数（0 表示等清空）"`
+	Samples  int     `json:"samples" jsonschema:"轮询采样次数"`
+	ElapsedS float64 `json:"elapsed_s" jsonschema:"耗时秒数"`
+	TimedOut bool    `json:"timed_out,omitempty" jsonschema:"true 表示 等待超时仍未达到预期"`
 }
 
 type dpiPolicyWriteData struct {
-	Changed bool   `json:"changed"`
-	SHA256  string `json:"sha256"`
-	File    string `json:"file"`
+	Changed bool   `json:"changed" jsonschema:"true 表示内容变化并已写入"`
+	SHA256  string `json:"sha256" jsonschema:"写入后哈希"`
+	File    string `json:"file" jsonschema:"写入的文件路径"`
 }
 
 type dpiPackageData struct {
-	PackageFile   string `json:"package_file"`
-	ExtractDir    string `json:"extract_dir"`
-	InstallScript string `json:"install_script"`
-	UpgradeScript string `json:"upgrade_script"`
+	PackageFile   string `json:"package_file" jsonschema:"安装包文件路径"`
+	ExtractDir    string `json:"extract_dir" jsonschema:"解包后的目录"`
+	InstallScript string `json:"install_script" jsonschema:"install.sh 路径，供 dpi_install 使用"`
+	UpgradeScript string `json:"upgrade_script" jsonschema:"升级脚本路径，供 dpi_upgrade 使用"`
 }
 
 type dpiInstallData struct {
-	OK         bool     `json:"ok"`
-	BackupPath string   `json:"backup_path"`
-	Version    string   `json:"version"`
-	Mode       string   `json:"mode"`
-	Marks      []string `json:"marks"`
+	OK         bool     `json:"ok" jsonschema:"true 表示安装完成且核对通过"`
+	BackupPath string   `json:"backup_path" jsonschema:"安装前的备份路径"`
+	Version    string   `json:"version" jsonschema:"安装后的 DPI 版本"`
+	Mode       string   `json:"mode" jsonschema:"安装后切换到的模式"`
+	Marks      []string `json:"marks" jsonschema:"过程标记；非空通常表示有异常需要关注"`
 }
 
 type dpiUpgradeData struct {
-	OK                bool     `json:"ok"`
-	Version           string   `json:"version"`
-	Mode              string   `json:"mode"`
-	ConfigDifferences []string `json:"config_differences"`
-	Marks             []string `json:"marks"`
+	OK                bool     `json:"ok" jsonschema:"true 表示升级完成且核对通过"`
+	Version           string   `json:"version" jsonschema:"升级后的 DPI 版本"`
+	Mode              string   `json:"mode" jsonschema:"升级后的模式"`
+	ConfigDifferences []string `json:"config_differences" jsonschema:"升级后与预期配置的差异；非空表示核对不通过"`
+	Marks             []string `json:"marks" jsonschema:"过程标记"`
 }
 
 type dpiBackupData struct {
-	BackupPath string `json:"backup_path"`
-	Skipped    bool   `json:"skipped"`
-	Version    string `json:"version"`
-	Mode       string `json:"mode"`
+	BackupPath string `json:"backup_path" jsonschema:"备份落盘路径"`
+	Skipped    bool   `json:"skipped" jsonschema:"true 表示 同名备份已存在并跳过"`
+	Version    string `json:"version" jsonschema:"备份时的 DPI 版本"`
+	Mode       string `json:"mode" jsonschema:"备份时的模式"`
 }
 
 // ---- 设备小命令 ----
@@ -463,7 +463,8 @@ func dpiStartAll(c *Client, timeoutS int) (ok bool, budget int) {
 
 func (b *Bridge) registerDpiDeviceTools(s *mcp.Server) {
 	addTyped(s, ro("dpi_get_info",
-		"读 DPI 版本、当前模式、PCI 配置和系统版本（只读，四次查询）。装前装后核验用。注意：这不是 socket_server 版本，桥版本用 bridge_version。超时缺省 15 秒。"),
+		"读 DPI 版本/模式/PCI",
+		"读 DPI 版本、当前模式、PCI 配置和系统版本，装前装后核验用。什么时候用：确认 DPI 是否已安装、装的什么版本、当前什么模式时。注意：这不是 socket_server 版本，桥版本用 bridge_version。未安装时各字段为空（不是错误）。返回 data{version,mode,pci,system_version}。"),
 		func(ctx context.Context, a BaseIn) Envelope[dpiInfoData] {
 			return runEnvelope[dpiInfoData](b, ctx, a, "dpi_get_info", map[string]any{}, LkNone, "", true,
 				func(c *Client) (any, error) {
@@ -481,7 +482,8 @@ func (b *Bridge) registerDpiDeviceTools(s *mcp.Server) {
 		})
 
 	addTyped(s, ro("dpi_get_config",
-		"读 DPI 配置：kind=xsa 读 xsaconf/xsa.json，kind=mod_cfg 读当前模块配置，kind=xdr_template 读 xdrconf/rule/xdr_template.json。改之前先看现值。超时缺省 15 秒。"),
+		"读 DPI 配置文件",
+		"读 DPI 配置文件内容。什么时候用：改配置前先看现值，避免覆盖错；与 dpi_apply_config 配对使用。kind 取 xsa（xsaconf/xsa.json）| mod_cfg（模块配置文件）| xdr_template（xdrconf/rule/xdr_template.json）。返回 data{kind,file,values}。"),
 		func(ctx context.Context, a dpiConfigIn) Envelope[dpiConfigData] {
 			file := map[string]string{
 				"xsa":          dpiPath + "/xsaconf/xsa.json",
@@ -522,7 +524,8 @@ func (b *Bridge) registerDpiDeviceTools(s *mcp.Server) {
 		})
 
 	addTyped(s, destructive("dpi_apply_config",
-		"改 DPI 配置：新增缺失项、跳过相同项、修改不同项；只有真的改动时才重启 DPI（restart 后等存活）。超时缺省 1230 秒，依据：停 600 + 起 600 + 余量 30。"),
+		"改 DPI 配置并重启",
+		"改 DPI 配置：新增缺失项、跳过相同项、修改不同项，只有真的改动时才重启 DPI。什么时候用：要改 xsa.json / 模块开关 / xdr 模板时；非策略类独立资产（IP 段、common.ini 等）请用 dpi_policy_write。xsa 用点号表示嵌套路径，如 {\"devinfo.province_id\": 117}；mod_cfg 如 {\"httpproto\": 1}。返回 data{changes,restarted,alive}。"),
 		func(ctx context.Context, a dpiApplyConfigIn) Envelope[dpiApplyConfigData] {
 			restartTimeout := orDefault(a.RestartTimeout, 600)
 			return runEnvelope[dpiApplyConfigData](b, ctx, a.BaseIn, "dpi_apply_config",
@@ -619,7 +622,8 @@ func (b *Bridge) registerDpiDeviceTools(s *mcp.Server) {
 		})
 
 	addTyped(s, destructive("dpi_service",
-		"启停 DPI 主程序（xsa）或辅助进程（dpi_monitor / policyserver）。下发后会复查进程是否真在/真没，不靠异步返回。主程序超时缺省 1230 秒（restart 最坏 600+600+30）；辅助进程 30 秒。"),
+		"启停 DPI 进程",
+		"启停 DPI 主程序（xsa）或辅助进程（dpi_monitor / policyserver）。什么时候用：需要重启 DPI 让配置生效、或 DPI 卡死要重启时。下发后会复查进程是否真在/真没，不靠异步返回。component 取 xsa|dpi_monitor|policyserver；action 取 start|stop|restart（辅助进程只支持 start/stop）。返回 data{component,action,ok,running}。"),
 		func(ctx context.Context, a dpiServiceIn) Envelope[dpiServiceData] {
 			comp := a.Component
 			act := a.Action
@@ -677,7 +681,8 @@ func (b *Bridge) registerDpiDeviceTools(s *mcp.Server) {
 		})
 
 	addTyped(s, destructive("dpi_agent_service",
-		"启停升级系统的 agent 进程（安装/升级前会先停它）。start/stop 各自带轮询确认，stop 超时会强制 pkill。返回 {ok,running}。超时缺省 60 秒，依据：原 start/stop 各 30 秒并带轮询。"),
+		"启停升级 agent",
+		"启停升级系统的 agent 进程。什么时候用：安装或升级 DPI 前需要先停它；升级完再启回来。action 取 start|stop，各自带轮询确认，stop 超时会强制 pkill。返回 data{ok,running}。"),
 		func(ctx context.Context, a dpiAgentServiceIn) Envelope[dpiAgentServiceData] {
 			act := orDefaultStr(a.Action, "start")
 			return runEnvelope[dpiAgentServiceData](b, ctx, a.BaseIn, "dpi_agent_service",
@@ -707,7 +712,8 @@ func (b *Bridge) registerDpiDeviceTools(s *mcp.Server) {
 		})
 
 	addTyped(s, destructive("dpi_switch_mode",
-		"切换 DPI 模式：必要时写 pci.cfg、改 mod_switch.sh 开关、执行切换脚本并等 DPI 存活；模式与配置都没变化时自动跳过。返回切换前后的版本/模式与过程标记。超时缺省 930 秒，依据：业务传 mod_switch(timeout=900) + 30。"),
+		"切换 DPI 模式",
+		"切换 DPI 模式：必要时写 pci.cfg、改 mod_switch.sh 开关、执行切换脚本并等 DPI 存活。什么时候用：要把 DPI 切到另一个工作模式（如 com_cmcc_is）时。mode 格式为 aaa_bbb_ccc；args 缺省 [idc31]；modified_param 改切换脚本开关，如 {\"wlan_switch\": \"1\"}；pcicfg 变更时先写 pci.cfg 再切。模式与配置都没变化时自动跳过。返回 data{changed,mode_before,mode_after,version_before,version_after,marks}。"),
 		func(ctx context.Context, a dpiSwitchModeIn) Envelope[dpiSwitchData] {
 			aliveTimeout := orDefault(a.AliveTimeout, 600)
 			return runEnvelope[dpiSwitchData](b, ctx, a.BaseIn, "dpi_switch_mode",
@@ -720,7 +726,8 @@ func (b *Bridge) registerDpiDeviceTools(s *mcp.Server) {
 
 func (b *Bridge) registerDpiPolicyTools(s *mcp.Server) {
 	addTyped(s, ro("dpi_policy_get",
-		"读指定策略/配置资产的行与 sha256（覆盖前快照）。resource_id 只能取白名单键。超时缺省 15 秒。"),
+		"读策略资产快照",
+		"读指定策略或配置资产的行内容与 sha256，覆盖前先取快照。什么时候用：改策略前留底、或核对当前策略内容时。resource_id 只能取白名单键（如 eu_plc|pcapdump|mirr|vpn_block）。返回 data{resource_id,file,rules[],rule_count,sha256}。"),
 		func(ctx context.Context, a dpiPolicyGetIn) Envelope[dpiPolicyData] {
 			file, ok := policyFiles[a.ResourceID]
 			if !ok {
@@ -739,7 +746,8 @@ func (b *Bridge) registerDpiPolicyTools(s *mcp.Server) {
 		})
 
 	addTyped(s, write("dpi_policy_put",
-		"整体覆盖策略文件；md5check=true 且内容不变时跳过写入。rules 为空 = 清空策略。返回改前/改后 sha256 与条数。超时缺省 15 秒。"),
+		"覆盖策略文件",
+		"整体覆盖策略文件。什么时候用：要替换某份策略的全部规则时；写非策略类资产请用 dpi_policy_write。resource_id 同 dpi_policy_get；rules 为策略行数组，空数组 = 清空策略；md5check=true 且内容未变时跳过写入。返回 data{changed,before_sha256,after_sha256,rule_count}。"),
 		func(ctx context.Context, a dpiPolicyPutIn) Envelope[dpiPolicyPutData] {
 			file, ok := policyFiles[a.ResourceID]
 			if !ok {
@@ -767,7 +775,8 @@ func (b *Bridge) registerDpiPolicyTools(s *mcp.Server) {
 		})
 
 	addTyped(s, ro("dpi_policy_wait",
-		"等策略或 ADMS 任务加载到预期条数。kind=action 时轮询指定 marex 文件的 policy.total；kind=adms 时轮询 adms_idc_debug.stat 的 adms_allrule_num。到点未达标返回 ready=false。超时缺省 60 秒。"),
+		"等策略加载到预期条数",
+		"等策略或 ADMS 任务加载到预期条数。什么时候用：下发策略后要确认它真的生效（而不是写完就报成功）时。kind=action 时轮询指定 marex 文件的 policy.total；kind=adms 时等 ADMS 任务完成。expected 为目标条数（0 表示等清空）；wait_s 最长等待，every_s 轮询间隔。返回 data{ready,actual,expected,timed_out,elapsed_s,samples}。"),
 		func(ctx context.Context, a dpiPolicyWaitIn) Envelope[dpiPolicyWaitData] {
 			every := orDefault(a.EveryS, 2)
 			wait := orDefault(a.WaitS, 60)
@@ -819,7 +828,8 @@ func (b *Bridge) registerDpiPolicyTools(s *mcp.Server) {
 		})
 
 	addTyped(s, write("dpi_policy_write",
-		"写非策略类配置资产（house/pcip/oversea IP 段、common.ini、access_log、xdr_filter、bzip ipsegs）。mode=replace 覆盖，put_if_absent 文件已存在则不动。超时缺省 15 秒。"),
+		"写非策略类配置资产",
+		"写非策略类配置资产：house/pcip/oversea IP 段、common.ini、access_log、xdr_filter、bzip ipsegs。什么时候用：要改这些独立配置资产时；改 xsa.json/模块开关请用 dpi_apply_config，改策略规则请用 dpi_policy_put。mode=replace 覆盖，put_if_absent 时文件已存在则不动。返回 data{changed,file,sha256}。"),
 		func(ctx context.Context, a dpiPolicyWriteIn) Envelope[dpiPolicyWriteData] {
 			file, ok := policyFiles[a.ResourceID]
 			if !ok {
@@ -844,7 +854,8 @@ func (b *Bridge) registerDpiPolicyTools(s *mcp.Server) {
 
 func (b *Bridge) registerDpiInstallTools(s *mcp.Server) {
 	addTyped(s, write("dpi_prepare_package",
-		"校验/下载 DPI 安装包并按 ACT-DPI-EU（两层 tar）/ ACT-DPI-ISE|NSE|DSE（三层 unzip+tar）规则解压，返回 install.sh 与 upms_install.sh 路径。FTP 密码由桥侧持有并直接下载后上传，不出现在靶机进程列表。超时缺省 600 秒（初值，原实现无总 deadline）。"),
+		"准备 DPI 安装包",
+		"校验或下载 DPI 安装包，并按包类型分层解包。什么时候用：dpi_install / dpi_upgrade 的第一步——拿到 install_script 或 upgrade_script 路径后才能装/升。支持 ACT-DPI-EU（两层 tar）与 ACT-DPI-ISE|NSE|DSE（三层 unzip+tar）。package_path 填已有的包路径，或 local_path 指定桥本地包由本工具上传。返回 data{package_file,extract_dir,install_script,upgrade_script}。"),
 		func(ctx context.Context, a dpiPreparePackageIn) Envelope[dpiPackageData] {
 			return runEnvelope[dpiPackageData](b, ctx, a.BaseIn, "dpi_prepare_package",
 				map[string]any{"ftp_ref": a.FTPRef, "local_path": a.LocalPath, "package_path": a.PackagePath},
@@ -854,7 +865,8 @@ func (b *Bridge) registerDpiInstallTools(s *mcp.Server) {
 		})
 
 	addTyped(s, destructive("dpi_install",
-		"全新安装 DPI：备份旧程序、停旧程序、执行 install.sh、切到目标模式。**最多 1 台靶机**，多台请分批。超时缺省 930 秒，依据：mod_switch 900 + 30。"),
+		"全新安装 DPI",
+		"全新安装 DPI：备份旧程序、停旧程序、执行 install.sh、切到目标模式。什么时候用：机器上还没有 DPI、或要完全重装时；已有 DPI 要升版本请用 dpi_upgrade。前置：先用 dpi_prepare_package 拿到 install_script。最多 1 台靶机，多台请分批。install_script 填靶机上 install.sh 绝对路径；mode 留空则不切模式。返回 data{ok,version,mode,backup_path,marks}。"),
 		func(ctx context.Context, a dpiInstallIn) Envelope[dpiInstallData] {
 			// 必须先按 @tag 展开再判：len(a.Targets)==1 可能展开成 N 台（评审 P1-5），
 			// 而这是会删 /opt/dpi 的不可逆操作。
@@ -870,7 +882,8 @@ func (b *Bridge) registerDpiInstallTools(s *mcp.Server) {
 		})
 
 	addTyped(s, destructive("dpi_upgrade",
-		"升级 DPI 固件（不是 socket_server，那个用 bridge_upgrade）：备份后执行本地升级，或交给升级系统接管，最后核对版本/模式/配置。**最多 1 台靶机**。超时缺省 1500 秒，依据：启动 300 + 完成 1200。"),
+		"升级 DPI 固件",
+		"升级 DPI 固件，不是 socket_server（那个用 bridge_upgrade）。什么时候用：靶机上已有 DPI、要换固件版本时。前置：先用 dpi_prepare_package 拿到 upgrade_script。备份后执行本地升级，或 use_upgrade_system=true 交给升级系统接管，最后核对版本/模式/配置。最多 1 台靶机。返回 data{ok,version,mode,config_differences,marks}。"),
 		func(ctx context.Context, a dpiUpgradeIn) Envelope[dpiUpgradeData] {
 			if resolved := b.resolve(a.Targets); len(resolved) > 1 {
 				return allFailedEnvelope[dpiUpgradeData](resolved, "dpi_upgrade 一次只能升 1 台，请分批", ErrBusiness)
@@ -885,7 +898,8 @@ func (b *Bridge) registerDpiInstallTools(s *mcp.Server) {
 		})
 
 	addTyped(s, write("dpi_backup",
-		"按版本和模式备份 /opt/dpi 到备份根目录；同名备份已存在时跳过（force=true 带时间戳重备）。超时缺省 300 秒（初值，原实现无总超时，待规模校准）。"),
+		"备份 DPI 程序目录",
+		"把 /opt/dpi 按版本和模式备份到备份根目录。什么时候用：安装或升级 DPI 前留退路；同名备份已存在时跳过，force=true 带时间戳重备。返回 data{backup_path,skipped,version,mode}。"),
 		func(ctx context.Context, a dpiBackupIn) Envelope[dpiBackupData] {
 			root := orDefaultStr(a.BackupRoot, "/home/dpibak")
 			return runEnvelope[dpiBackupData](b, ctx, a.BaseIn, "dpi_backup",

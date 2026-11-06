@@ -73,11 +73,11 @@ type StatRow struct {
 // StatData 状态读取统一形状（23 种 kind 共用）。源文件有多少字段就返回多少，
 // 值一律按字符串——源文件本身是文本，数值口径由调用方解释。
 type StatData struct {
-	Kind      string    `json:"kind"`
-	File      string    `json:"file"`
-	Rows      []StatRow `json:"rows"`
-	Count     int       `json:"count"`
-	Truncated bool      `json:"truncated,omitempty"`
+	Kind      string    `json:"kind" jsonschema:"状态种类"`
+	File      string    `json:"file" jsonschema:"源文件路径"`
+	Rows      []StatRow `json:"rows" jsonschema:"解析出的行"`
+	Count     int       `json:"count" jsonschema:"行数"`
+	Truncated bool      `json:"truncated,omitempty" jsonschema:"true 表示 行数过多已截断"`
 }
 
 // 危险级别（方案 §5.2 danger_level）：仅标识与审计，不拦截。
@@ -268,22 +268,25 @@ func indexOf(s, sub string) int {
 	return -1
 }
 
-// 工具构造器：Annotations 与 _meta 在这里统一补齐，注册处只写名字和描述。
+// 工具构造器：Annotations 与 _meta 在这里统一补齐，注册处只写名字、标题和描述。
 func boolPtr(b bool) *bool { return &b }
 
-func ro(name, desc string) *mcp.Tool {
-	return &mcp.Tool{Name: name, Description: desc,
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}
+// tool 组装一个工具：title 是给人看的一句话短标题（模型列表里优先显示），
+// desc 是给模型的完整说明。annotations 由调用方按危险级别选。
+func tool(name, title, desc string, ann *mcp.ToolAnnotations) *mcp.Tool {
+	return &mcp.Tool{Name: name, Title: title, Description: desc, Annotations: ann}
 }
 
-func write(name, desc string) *mcp.Tool {
-	return &mcp.Tool{Name: name, Description: desc,
-		Annotations: &mcp.ToolAnnotations{DestructiveHint: boolPtr(false), OpenWorldHint: boolPtr(true)}}
+func ro(name, title, desc string) *mcp.Tool {
+	return tool(name, title, desc, &mcp.ToolAnnotations{ReadOnlyHint: true})
 }
 
-func destructive(name, desc string) *mcp.Tool {
-	return &mcp.Tool{Name: name, Description: desc,
-		Annotations: &mcp.ToolAnnotations{DestructiveHint: boolPtr(true), OpenWorldHint: boolPtr(true)}}
+func write(name, title, desc string) *mcp.Tool {
+	return tool(name, title, desc, &mcp.ToolAnnotations{DestructiveHint: boolPtr(false), OpenWorldHint: boolPtr(true)})
+}
+
+func destructive(name, title, desc string) *mcp.Tool {
+	return tool(name, title, desc, &mcp.ToolAnnotations{DestructiveHint: boolPtr(true), OpenWorldHint: boolPtr(true)})
 }
 
 // addTyped 注册带 outputSchema（由 Out 推导）与 _meta 的工具。

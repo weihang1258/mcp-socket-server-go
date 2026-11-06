@@ -37,7 +37,7 @@ type fileListIn struct {
 	Path       string `json:"path" jsonschema:"靶机上的目录绝对路径"`
 	NameFilter string `json:"name_filter,omitempty" jsonschema:"find -name 过滤表达式，如 '*.tar.gz'（缺省不过滤）"`
 	MaxDepth   int    `json:"max_depth,omitempty" jsonschema:"目录深度上限，缺省 1（只列一层）；要更深显式加大"`
-	Sorted     bool   `json:"sorted,omitempty" jsonschema:"true = 按版本排序（sort -V），缺省 false"`
+	Sorted     bool   `json:"sorted,omitempty" jsonschema:"true 表示 按版本排序（sort -V），缺省 false"`
 }
 
 type fileRemoveIn struct {
@@ -86,62 +86,63 @@ type netSetTimeIn struct {
 // ---- 出参 ----
 
 type FileData struct {
-	Name      string `json:"name"`
-	SizeBytes int64  `json:"size_bytes"`
-	SHA256    string `json:"sha256,omitempty"`
+	Name      string `json:"name" jsonschema:"文件名（不含目录）"`
+	SizeBytes int64  `json:"size_bytes" jsonschema:"文件字节数"`
+	SHA256    string `json:"sha256,omitempty" jsonschema:"文件内容的 sha256 十六进制；用于校验传输完整性"`
 }
 
 type fileStatData struct {
-	Exists    bool  `json:"exists"`
-	IsDir     bool  `json:"is_dir"`
-	SizeBytes int64 `json:"size_bytes"`
+	Exists    bool  `json:"exists" jsonschema:"true 表示路径存在。注意不存在是正常结果不是错误"`
+	IsDir     bool  `json:"is_dir" jsonschema:"true 表示 是目录；false 表示 是文件（Exists=false 时无意义）"`
+	SizeBytes int64 `json:"size_bytes" jsonschema:"文件字节数（目录时为 0）"`
 }
 
 type fileListData struct {
-	Entries []string `json:"entries"`
-	Count   int      `json:"count"`
+	Entries []string `json:"entries" jsonschema:"目录条目名称列表"`
+	Count   int      `json:"count" jsonschema:"条目数"`
 }
 
 type fileOpData struct {
-	OK   bool   `json:"ok"`
-	Path string `json:"path"`
+	OK   bool   `json:"ok" jsonschema:"true 表示操作成功"`
+	Path string `json:"path" jsonschema:"被操作的目标路径"`
 }
 
 type fileUnzipData struct {
-	OK         bool   `json:"ok"`
-	Outdir     string `json:"outdir"`
-	VerifiedBy string `json:"verified_by"`
-	EntryCount int64  `json:"entry_count"`
-	NewEntries int    `json:"new_entries"`
+	OK         bool   `json:"ok" jsonschema:"true 表示解压成功且已复核出文件"`
+	Outdir     string `json:"outdir" jsonschema:"解压目标目录"`
+	VerifiedBy string `json:"verified_by" jsonschema:"复核方式，通常为 file_list"`
+	EntryCount int64  `json:"entry_count" jsonschema:"解压后目录内条目总数"`
+	NewEntries int    `json:"new_entries" jsonschema:"本次解压新增的条目数；为 0 会判失败（设备回 ok 但实际没解出东西）"`
 }
 
 type fileTransferHintData struct {
-	Download string `json:"download"`
-	Upload   string `json:"upload"`
-	Target   string `json:"target"`
+	Download string `json:"download" jsonschema:"下载命令模板（curl）"`
+	Upload   string `json:"upload" jsonschema:"上传命令模板（curl -F）"`
+	Target   string `json:"target" jsonschema:"该命令对应的靶机"`
 }
 
 type netRouteData struct {
-	Routes map[string]any `json:"routes"`
+	Routes map[string]any `json:"routes" jsonschema:"路由表，含默认路由与网卡名"`
 }
 
 type netMTUData struct {
-	Changed bool   `json:"changed"`
-	Iface   string `json:"iface"`
-	Current string `json:"current"`
+	Changed bool   `json:"changed" jsonschema:"true 表示 MTU 确实被改动；false 表示原本就是该值"`
+	Iface   string `json:"iface" jsonschema:"网卡名"`
+	Current string `json:"current" jsonschema:"设置后读回的 MTU；与请求值不一致会判业务失败"`
 }
 
 type netTimeData struct {
-	Set     string `json:"set"`
-	Verify  string `json:"verify"`
-	Match   bool   `json:"match"`
-	Warning string `json:"warning,omitempty"` // 例如容器里 hwclock 不可用（系统时间已生效）
+	Set     string `json:"set" jsonschema:"已设置的时间"`
+	Verify  string `json:"verify" jsonschema:"从设备读回的时间"`
+	Match   bool   `json:"match" jsonschema:"true 表示 设置值与读回值一致"`
+	Warning string `json:"warning,omitempty" jsonschema:"非致命告警，如容器/VM 无 RTC 导致写硬件时钟失败（系统时间已生效）"` // 例如容器里 hwclock 不可用（系统时间已生效）
 }
 
 func (b *Bridge) registerFileTools(s *mcp.Server) {
 	// file_stat：一次返回存在性、是否目录、字节数（原 isfile + isdir + getsize 三次调用）。
 	addTyped(s, ro("file_stat",
-		"查靶机上一个路径的存在性、是否目录、字节数（一次调用替代原 isfile+isdir+getsize）。不存在 = 成功结果 exists=false，不是失败。超时缺省 15 秒，依据：dt7/dt8/dt11 三次轻查询。"),
+		"查远程路径状态",
+		"查靶机上一个路径是否存在、是否目录、有多少字节。什么时候用：操作远程文件前先确认状态，避免盲删盲建。一次调用替代「是否存在+是否目录+多大」三件事。关键语义：不存在 = 成功结果 exists=false，不是失败。返回 exists/is_dir/size_bytes。"),
 		func(ctx context.Context, a filePathIn) Envelope[fileStatData] {
 			return runEnvelope[fileStatData](b, ctx, a.BaseIn, "file_stat", map[string]any{"path": a.Path},
 				LkNone, "", true, func(c *Client) (any, error) {
@@ -167,7 +168,8 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 		})
 
 	addTyped(s, ro("file_list",
-		"列靶机目录（底层 find）。可按 name_filter 过滤、max_depth 限制深度、sorted 按版本排序。返回 entries[]（相对目录的路径）与 count。目录不存在 = 业务失败（find 非 0 退出）。超时缺省 30 秒，依据：底层 find，原实现无超时。"),
+		"列远程目录",
+		"列靶机目录内容。什么时候用：浏览远程目录、找安装包或 pcap 时；本地目录请用 Glob。path 填靶机绝对路径；name_filter 按名字过滤；max_depth 限制递归深度（缺省 1）；sorted=true 按版本排序（用于挑最新安装包）。返回 entries[]。"),
 		func(ctx context.Context, a fileListIn) Envelope[fileListData] {
 			depth := orDefault(a.MaxDepth, 1)
 			if depth < 1 {
@@ -203,7 +205,8 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 		})
 
 	addTyped(s, write("file_mkdir",
-		"在靶机递归创建目录。目录已存在时设备返回失败（Python os.makedirs 语义）。超时缺省 15 秒，依据：dt9 单次操作。"),
+		"创建远程目录",
+		"在靶机递归创建目录。什么时候用：上传文件或解压前要确保目标目录存在时。目录已存在时设备会返回失败（Python os.makedirs 语义，不幂等）——需要幂等请先用 file_stat 判断。path 填靶机绝对路径。"),
 		func(ctx context.Context, a filePathIn) Envelope[fileOpData] {
 			return runEnvelope[fileOpData](b, ctx, a.BaseIn, "file_mkdir", map[string]any{"path": a.Path},
 				LkNone, "", false, func(c *Client) (any, error) {
@@ -212,7 +215,8 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 		})
 
 	addTyped(s, destructive("file_remove",
-		"删除靶机上的文件或目录（recursive=true 时 rm -rf）。不可恢复。超时缺省 60 秒，依据：大目录删除可能耗时，原实现无超时。"),
+		"删除远程文件/目录",
+		"删除靶机上的文件或目录，recursive=true 时递归删除。什么时候用：清理临时文件、安装包、旧备份时。不可恢复，删目录务必确认路径。path 填靶机绝对路径。"),
 		func(ctx context.Context, a fileRemoveIn) Envelope[fileOpData] {
 			// 缺省 true：与 schema 描述、方案 §4.10 一致。`rm -f <dir>` 必然非零退出，
 			// 模型按描述省略参数来删目录会直接失败。
@@ -239,7 +243,8 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 		})
 
 	addTyped(s, ro("file_get",
-		"把靶机文件经 :9001 流式下载到桥的下载目录（pcap、日志、安装包回传都用它）。local_name 只能拼在桥的下载目录下，禁止绝对路径。返回 {name,size_bytes,sha256}。超时缺省 120 秒，依据：实测 367 MB 耗时 3.1 秒，2 GB 约 17 秒。"),
+		"下载远程文件到桥",
+		"把靶机上的文件下载到桥的下载目录。什么时候用：文件在远程靶机上、本地读不到时（pcap、日志、安装包回传）；本地文件请用 Read。remote_path 填靶机绝对路径；local_name 只能填文件名，会拼在桥的下载目录下，禁止绝对路径。返回 {name,size_bytes,sha256}。"),
 		func(ctx context.Context, a fileGetIn) Envelope[FileData] {
 			name := a.LocalName
 			if name == "" {
@@ -262,7 +267,8 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 		})
 
 	addTyped(s, write("file_put",
-		"把桥本地文件经 :9001 上传到靶机指定绝对路径。返回 {name,size_bytes,sha256}。上传后需要执行权限的接 shell_exec chmod +x。超时缺省 300 秒（初值，待最大安装包实测校准）。"),
+		"上传本地文件到靶机",
+		"把桥本地文件上传到靶机指定路径。什么时候用：要在靶机上执行脚本、或把 pcap 交给 replay_run 前。local_path 填桥上的路径；remote_path 填靶机绝对路径。返回 {name,size_bytes,sha256}。上传后需要执行权限的，接 shell_exec chmod +x。"),
 		func(ctx context.Context, a filePutIn) Envelope[FileData] {
 			if _, err := os.Stat(a.LocalPath); err != nil {
 				return allFailedEnvelope[FileData](a.Targets, "桥本地文件不存在: "+a.LocalPath, ErrBusiness)
@@ -280,7 +286,8 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 		})
 
 	addTyped(s, write("file_unzip",
-		"解压靶机上的 zip（dt15）。设备侧解压失败常仍回 ok，因此解压后用 file_list 复核目标目录非空，为空则判 business 失败。超时缺省 600 秒（初值，原实现无 deadline）。"),
+		"解压远程 zip",
+		"解压靶机上的 zip 文件。什么时候用：安装包或日志包需要展开时。关键语义：设备侧解压失败常仍返回 ok，因此本工具会在解压后用 file_list 复核目标目录非空，为空则判 business 失败——调用方看到失败不代表命令没跑，可能只是包损坏。password_ref 传密码引用（密码只在桥内存，不出现在参数里）。"),
 		func(ctx context.Context, a fileUnzipIn) Envelope[fileUnzipData] {
 			passwd, ok := resolvePasswordRef(a.PasswordRef)
 			if !ok {
@@ -326,7 +333,8 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 		})
 
 	addTyped(s, ro("file_transfer_hint",
-		"返回桥与靶机之间点对点传文件的 curl 命令（零网络调用，不执行传输）。file_get/file_put 已能直接传，本工具用于需要人工在别处执行 curl 的场合。上传后需执行权限接 shell_exec chmod +x。9001 拒绝连接 = 靶机 http_port=0（配置关闭）或版本 <1.7.0，先 bridge_upgrade。超时缺省 5 秒，依据：零网络调用。"),
+		"生成传文件 curl 命令",
+		"生成桥与靶机之间点对点传文件的 curl 命令，零网络调用、不执行传输。什么时候用：需要在别处（如另一台机器）人工执行 curl 时；直接传文件请用 file_get/file_put。返回每个靶机的 download/upload 命令模板。"),
 		func(ctx context.Context, a fileTransferHintIn) Envelope[fileTransferHintData] {
 			out := Envelope[fileTransferHintData]{Results: []Result[fileTransferHintData]{}, Failed: []Failure{}}
 			resolved := b.resolve(a.Targets)
@@ -353,7 +361,8 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 
 func (b *Bridge) registerNetTools(s *mcp.Server) {
 	addTyped(s, ro("net_route",
-		"查靶机默认路由与网卡名（dt4）。抓包/回放前确认网卡时用。返回 routes{}。超时缺省 15 秒，依据：dt4 一次查询。"),
+		"查默认路由与网卡",
+		"查靶机默认路由与网卡名。什么时候用：抓包或回放前确认该用哪个网卡时。返回 routes{}，含默认路由与网卡。"),
 		func(ctx context.Context, a BaseIn) Envelope[netRouteData] {
 			return runEnvelope[netRouteData](b, ctx, a, "net_route", map[string]any{}, LkNone, "", true,
 				func(c *Client) (any, error) {
@@ -366,7 +375,8 @@ func (b *Bridge) registerNetTools(s *mcp.Server) {
 		})
 
 	addTyped(s, destructive("net_set_mtu",
-		"设置靶机网卡 MTU（dt10；设备侧改完会等 5 秒）。回放前常把网卡改成 2000。返回 {changed,iface,current}。超时缺省 30 秒，依据：dt10 内含 5 秒等待。"),
+		"设置网卡 MTU",
+		"设置靶机网卡 MTU。什么时候用：回放前常需要把网卡 MTU 调大（如 2000）以承载大包；改完设备侧会等 5 秒。iface 填网卡名（如 \"eth0\"），mtu 填目标值。返回 {changed,iface,current}，读回不一致会判业务失败。"),
 		func(ctx context.Context, a netSetMTUIn) Envelope[netMTUData] {
 			mtu := orDefault(a.MTU, 2000)
 			return runEnvelope[netMTUData](b, ctx, a.BaseIn, "net_set_mtu",
@@ -393,7 +403,8 @@ func (b *Bridge) registerNetTools(s *mcp.Server) {
 		})
 
 	addTyped(s, destructive("net_set_time",
-		"把靶机系统时间设为指定值并写入硬件时钟（date -s + hwclock -w），随后读回核对。用于抓包时间戳对齐、多机同源。time 缺省取桥当前时间。返回 {set,verify,match}。超时缺省 30 秒，依据：两条命令 + 读回核对。"),
+		"设置靶机系统时间",
+		"把靶机系统时间设为指定值并写入硬件时钟，随后读回核对。什么时候用：抓包时间戳需要对齐、或要多机同源时。time 留空取桥当前时间；格式如 \"2026-11-06 15:30:00\"。返回 {set,verify,match}。注意：无 RTC 的容器/虚拟机上写硬件时钟会失败，此时只记 warning，系统时间已生效。"),
 		func(ctx context.Context, a netSetTimeIn) Envelope[netTimeData] {
 			want := a.Time
 			if strings.TrimSpace(want) == "" {
@@ -739,25 +750,26 @@ func intOf2(s string) int64 {
 
 type shellExecIn struct {
 	BaseIn
-	Args string            `json:"args" jsonschema:"要执行的命令及参数（白名单非空时须命中前缀）"`
-	Cwd  string            `json:"cwd,omitempty" jsonschema:"命令工作目录（留空 = 默认）"`
+	Args string            `json:"args" jsonschema:"要执行的命令字符串，如 systemctl status xsa；不是数组（白名单非空时须命中前缀）"`
+	Cwd  string            `json:"cwd,omitempty" jsonschema:"命令工作目录；留空用靶机登录用户的默认目录"`
 	Env  map[string]string `json:"env,omitempty" jsonschema:"命令环境变量键值对（整替换子进程环境）。禁止传密码/Token——凭据由桥本地配置读取"`
-	Wait *bool             `json:"wait,omitempty" jsonschema:"true = 等命令结束返回结果（缺省）；false = 立即返回无回显"`
+	Wait *bool             `json:"wait,omitempty" jsonschema:"true 表示 等命令结束返回结果（缺省）；false 表示 立即返回无回显"`
 }
 
 type shellExecData struct {
-	Code            int      `json:"code"`
-	Stdout          string   `json:"stdout"`
-	Stderr          string   `json:"stderr"`
-	StdoutTruncated bool     `json:"stdout_truncated,omitempty"`
-	Note            string   `json:"note,omitempty"`
-	Timeout         bool     `json:"timeout,omitempty"`
-	Cleanup         *Cleanup `json:"cleanup,omitempty"`
+	Code            int      `json:"code" jsonschema:"命令退出码；0 为成功；-1 表示 agent 侧超时并已杀进程组"`
+	Stdout          string   `json:"stdout" jsonschema:"标准输出；超 64KB 会截断（见 stdout_truncated）"`
+	Stderr          string   `json:"stderr" jsonschema:"标准错误"`
+	StdoutTruncated bool     `json:"stdout_truncated,omitempty" jsonschema:"true 表示 stdout 已截断，内容不完整"`
+	Note            string   `json:"note,omitempty" jsonschema:"补充说明，如 wait=false 时提示未返回回显"`
+	Timeout         bool     `json:"timeout,omitempty" jsonschema:"true 表示 agent 到点终止了命令（配合 cleanup 看进程是否真停）"`
+	Cleanup         *Cleanup `json:"cleanup,omitempty" jsonschema:"超时后的清理回执；verified 为 false 表示无法确认进程已退出"`
 }
 
 func (b *Bridge) registerShellTools(s *mcp.Server) {
 	addTyped(s, destructive("shell_exec",
-		"在靶机执行一条命令（dt1，SHELL/DANGER，白名单非空时先校验前缀）。返回 {code,stdout,stderr}；stdout 超 64KB 截断并带 stdout_truncated。wait=false 为异步执行不返回回显。把脚本/大段内容放到靶机请用 file_put，不要经命令内嵌。env 禁止传密码。超时缺省 60 秒；wait=false 时上限 15 秒。"),
+		"在靶机执行命令",
+		"在靶机执行一条命令。什么时候用：操作远程靶机；本地命令请用 Bash。args 填完整命令字符串，如 \"systemctl status xsa\"（不是数组）。返回 results[].data{code,stdout,stderr}；stdout 超 64KB 截断并带 stdout_truncated=true。wait=false 为异步执行不返回回显。大段脚本或文件请先用 file_put 上传再执行，不要经命令内嵌。env 禁止传密码或 Token——凭据由桥本地配置读取。"),
 		func(ctx context.Context, a shellExecIn) Envelope[shellExecData] {
 			wait := true
 			if a.Wait != nil {

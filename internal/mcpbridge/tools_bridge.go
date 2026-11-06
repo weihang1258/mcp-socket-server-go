@@ -19,23 +19,24 @@ type bridgeVersionIn struct {
 
 type bridgeUpgradeIn struct {
 	BaseIn
-	Version string `json:"version,omitempty" jsonschema:"目标版本号如 1.9.1；留空 = 自动查 GitHub 最新版（失败可显式指定重试）"`
-	Force   bool   `json:"force,omitempty" jsonschema:"true = 靶机有其它客户端连接时强制升级（会带着连接重启），缺省 false = 拒绝"`
+	Version string `json:"version,omitempty" jsonschema:"目标版本号如 1.9.1；留空 为 自动查 GitHub 最新版（失败可显式指定重试）"`
+	Force   bool   `json:"force,omitempty" jsonschema:"true 表示 靶机有其它客户端连接时强制升级（会带着连接重启），缺省 false 表示 拒绝"`
 }
 
 type bridgeVersionData struct {
-	Version string `json:"version"`
+	Version string `json:"version" jsonschema:"靶机上 socket_server 的版本号，如 1.9.27"`
 }
 
 type bridgeUpgradeData struct {
-	Upgraded    bool   `json:"upgraded"`
-	Version     string `json:"version"`
-	FromVersion string `json:"from_version,omitempty"`
+	Upgraded    bool   `json:"upgraded" jsonschema:"true 表示本次确实升级了；false 表示已是目标版本或未变更"`
+	Version     string `json:"version" jsonschema:"升级后（或当前）的版本号"`
+	FromVersion string `json:"from_version,omitempty" jsonschema:"升级前的版本号；首次安装或无法读取时为空"`
 }
 
 func (b *Bridge) registerBridgeTools(s *mcp.Server) {
 	addTyped(s, ro("bridge_version",
-		"查靶机上 socket_server（桥的服务端）的版本号（dt14，只读）。升级前先确认各靶机现版本。注意：这不是 DPI 固件版本，DPI 版本用 dpi_get_info。超时缺省 15 秒。"),
+		"查桥/靶机 socket_server 版本",
+		"查靶机上 socket_server（本工具的服务端）的版本号。什么时候用：升级桥之前先确认各靶机现版本；排查版本不一致时。与 DPI 固件版本无关（那个用 dpi_get_info）。返回 results[].data.version 为版本字符串。"),
 		func(ctx context.Context, a bridgeVersionIn) Envelope[bridgeVersionData] {
 			return runEnvelope[bridgeVersionData](b, ctx, a.BaseIn, "bridge_version", map[string]any{},
 				LkNone, "", true, func(c *Client) (any, error) {
@@ -48,7 +49,8 @@ func (b *Bridge) registerBridgeTools(s *mcp.Server) {
 		})
 
 	addTyped(s, destructive("bridge_upgrade",
-		"升级靶机上的 socket_server 自身（不是 DPI 固件，DPI 升级用 dpi_upgrade）。流程：确定版本（指定则零查询/留空查最新）→ 中央下载 → 经 :9001 推包 → dt20 校验落盘 → 后台重启 → 轮询 dt14 确认。升级期间靶机服务重启约 5-15 秒不可用；非 force 且靶机有其它客户端连接时靶机拒绝。需靶机 1.8.0+，更旧的先用 install.sh。超时缺省 60 秒。"),
+		"升级靶机 socket_server",
+		"升级靶机上的 socket_server 自身，不是 DPI 固件（DPI 升级用 dpi_upgrade）。什么时候用：需要给靶机换 socket_server 版本时。流程：定版本（指定则零查询，留空查最新）→ 中央下载 → 推包 → 校验落盘 → 重启 → 轮询确认。升级期间服务中断 5-15 秒；非 force 且靶机有其它客户端连接时靶机会拒绝。需靶机 1.8.0+，更旧的先用 install.sh。返回 results[].data{version,from_version,upgraded}。"),
 		func(ctx context.Context, a bridgeUpgradeIn) Envelope[bridgeUpgradeData] {
 			return b.runBridgeUpgrade(ctx, a)
 		})

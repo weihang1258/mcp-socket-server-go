@@ -74,14 +74,14 @@ var marexResource = map[string]string{
 type dpiReadStatIn struct {
 	BaseIn
 	Kind     string `json:"kind" jsonschema:"状态种类：xrt|xrtinfo|port_for_snmp|httpxdr|xdrtxtlog|xdrtxtlog2|eublock|proto_app|flow|eu_urlnode|eu_restore|eu_policy|adms_idc_debug|eu_output|mirrorvlan|pcapdump|uploadfile|msgtask|datarpt|datarpt_conn|commem|marex|time_main"`
-	Resource string `json:"resource,omitempty" jsonschema:"仅 kind=marex 用：eu_plc | pcapdump | mirr | vpn_block"`
+	Resource string `json:"resource,omitempty" jsonschema:"仅 kind 为 marex 用：eu_plc | pcapdump | mirr | vpn_block"`
 	Path     string `json:"path,omitempty" jsonschema:"覆盖默认文件路径（缺省取 kind 对应的 /dev/shm/xsa/*.stat）"`
 }
 
 type dpiWaitStatIn struct {
 	BaseIn
 	Kind     string `json:"kind" jsonschema:"状态种类，同 dpi_read_stat"`
-	Resource string `json:"resource,omitempty" jsonschema:"仅 kind=marex 用"`
+	Resource string `json:"resource,omitempty" jsonschema:"仅 kind 为 marex 用"`
 	Path     string `json:"path,omitempty" jsonschema:"覆盖默认文件路径"`
 	Field    string `json:"field" jsonschema:"要轮询的指标：row 名,或 row.字段名（如 all.fopen_ok）"`
 	Operator string `json:"operator,omitempty" jsonschema:"比较方式：eq（缺省）| ne | gte | lte"`
@@ -93,7 +93,7 @@ type dpiWaitStatIn struct {
 type dpiWaitFileIn struct {
 	BaseIn
 	Source string `json:"source" jsonschema:"xdrtxtlog（看 fopen_ok 与 fclose_cnt）| datarpt（看 proc_logfile_open_succ 与 proc_upload_file_close）"`
-	Mode   string `json:"mode" jsonschema:"open = 等开始写（两计数不等）| close = 等写完（两计数相等）"`
+	Mode   string `json:"mode" jsonschema:"open 为 等开始写（两计数不等）| close 为 等写完（两计数相等）"`
 	EveryS int    `json:"every_s,omitempty" jsonschema:"轮询间隔秒，缺省 2"`
 	WaitS  int    `json:"wait_s,omitempty" jsonschema:"最长等待秒数，缺省 600"`
 }
@@ -105,29 +105,29 @@ type dpiCheckStalledIn struct {
 }
 
 type dpiWaitStatData struct {
-	Ready     bool    `json:"ready"`
-	LastValue string  `json:"last_value"`
-	Field     string  `json:"field"`
-	Samples   int     `json:"samples"`
-	ElapsedS  float64 `json:"elapsed_s"`
-	TimedOut  bool    `json:"timed_out,omitempty"`
+	Ready     bool    `json:"ready" jsonschema:"true 表示指标已达到目标值"`
+	LastValue string  `json:"last_value" jsonschema:"最近一次采到的值"`
+	Field     string  `json:"field" jsonschema:"观测的字段名"`
+	Samples   int     `json:"samples" jsonschema:"采样次数"`
+	ElapsedS  float64 `json:"elapsed_s" jsonschema:"耗时秒数"`
+	TimedOut  bool    `json:"timed_out,omitempty" jsonschema:"true 表示 超时未达到"`
 }
 
 type dpiWaitFileData struct {
-	Ready    bool    `json:"ready"`
-	Left     string  `json:"left"`
-	Right    string  `json:"right"`
-	Samples  int     `json:"samples"`
-	ElapsedS float64 `json:"elapsed_s"`
-	TimedOut bool    `json:"timed_out,omitempty"`
+	Ready    bool    `json:"ready" jsonschema:"true 表示文件已开始或结束写（取决于 mode）"`
+	Left     string  `json:"left" jsonschema:"左计数实际值"`
+	Right    string  `json:"right" jsonschema:"右计数实际值"`
+	Samples  int     `json:"samples" jsonschema:"轮询采样次数"`
+	ElapsedS float64 `json:"elapsed_s" jsonschema:"耗时秒数"`
+	TimedOut bool    `json:"timed_out,omitempty" jsonschema:"true 表示 超时未达成"`
 }
 
 type dpiStalledData struct {
-	Stalled   bool     `json:"stalled"`
-	WorstLagS int64    `json:"worst_lag_s"`
-	DeviceNow int64    `json:"device_now"`
-	Samples   []string `json:"samples"`
-	Threshold int      `json:"threshold_s"`
+	Stalled   bool     `json:"stalled" jsonschema:"true 表示判定为卡死"`
+	WorstLagS int64    `json:"worst_lag_s" jsonschema:"最落后的线程滞后秒数"`
+	DeviceNow int64    `json:"device_now" jsonschema:"设备当前时间"`
+	Samples   []string `json:"samples" jsonschema:"采样到的线程数"`
+	Threshold int      `json:"threshold_s" jsonschema:"判定卡死的滞后阈值（秒）"`
 }
 
 // ---- 解析 ----
@@ -549,7 +549,8 @@ func compareValues(actual, want, op string) bool {
 
 func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 	addTyped(s, ro("dpi_read_stat",
-		"按 kind 读 /dev/shm/xsa/*.stat 并解析成统一行结构（23 种 kind，见 kind 参数）。只读、不判定。kind=marex 需配 resource，且内含固定 4 秒刷新等待。超时缺省 15 秒；kind=marex / eu_output 给 30 秒。"),
+		"读 DPI 状态文件",
+		"按 kind 读 DPI 状态文件并解析成统一行结构，只读不判定。什么时候用：要看当前值（一次性快照）时用它；要等某个值变化到目标请用 dpi_wait_stat。kind 可选 23 种（见参数说明），如 \"all\"、\"detail\"、\"rule\"。返回 data{kind,file,rows[],count,truncated}，rows 每项含 name 与 fields。"),
 		func(ctx context.Context, a dpiReadStatIn) Envelope[StatData] {
 			// 方案 §7：marex（固定 touch + sleep 4）与 eu_output（grep 后解析）给 30 秒
 			if a.Timeout == 0 && (a.Kind == "marex" || a.Kind == "eu_output") {
@@ -563,7 +564,8 @@ func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 		})
 
 	addTyped(s, ro("dpi_wait_stat",
-		"轮询单个指标直到达到目标值。field 支持 row 名或 row.字段名（如 all.fopen_ok）。operator: eq/ne/gte/lte。到点未达标返回 ready=false（不是失败）。超时缺省 60 秒，依据：原 wait_until 默认 60。"),
+		"等 DPI 指标到目标值",
+		"轮询单个 DPI 指标直到达到目标值。什么时候用：下发策略或起停 DPI 后，要确认某指标确实变了（而不是立刻读一次碰运气）时。与 dpi_read_stat 的区别：read 读一次，wait 轮询到满足条件或超时。field 支持 row 名或 row.字段名（如 \"all.fopen_ok\"）；operator 取 eq/ne/gt/ge/lt/le；value 为目标值，wait_s 为最长等待，every_s 为轮询间隔。"),
 		func(ctx context.Context, a dpiWaitStatIn) Envelope[dpiWaitStatData] {
 			every := orDefault(a.EveryS, 2)
 			wait := orDefault(a.WaitS, 60)
@@ -598,7 +600,8 @@ func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 		})
 
 	addTyped(s, ro("dpi_wait_file",
-		"等 DPI 开始或结束写文件：比较两个计数（跨字段判断）。source=xdrtxtlog 看 fopen_ok 与 fclose_cnt；source=datarpt 看 proc_logfile_open_succ 与 proc_upload_file_close。mode=open 等两者不等，mode=close 等两者相等。到点未达成返回 ready=false。超时缺省 600 秒，依据：原 wait_fclose 默认 600，业务常显式传 60/100。"),
+		"等 DPI 文件写完",
+		"等 DPI 开始或结束写某个文件，通过比较两个计数跨字段判断。什么时候用：要确认 DPI 已经真的开始处理流量（文件在长大）或已经收尾（写完了）时。source=xdrtxtlog 看 fopen_ok 与 fclose_cnt；mode 决定等「开始」还是「结束」。"),
 		func(ctx context.Context, a dpiWaitFileIn) Envelope[dpiWaitFileData] {
 			every := orDefault(a.EveryS, 2)
 			wait := orDefault(a.WaitS, 600)
@@ -663,7 +666,8 @@ func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 		})
 
 	addTyped(s, ro("dpi_check_stalled",
-		"判断 DPI 线程是否卡死：读 time_main.stat 里各线程时间戳，与设备当前时间比较，超过 max_lag_s（缺省 10 秒）即判卡死。只做判定，读原始数据用 dpi_read_stat(kind=time_main)。超时缺省 30 秒，依据：一次 cat + 一次 date +%s。"),
+		"查 DPI 线程卡死",
+		"检查 DPI 线程是否卡死：读取各线程的时间戳，与设备当前时间比对，落后超过 max_lag_s 秒判为卡死。什么时候用：怀疑 DPI 无响应、流量不处理时，先跑这个确认。返回 data{stalled,samples,threshold_s,worst_lag_s,device_now}。"),
 		func(ctx context.Context, a dpiCheckStalledIn) Envelope[dpiStalledData] {
 			threshold := orDefault(a.MaxLagS, 10)
 			return runEnvelope[dpiStalledData](b, ctx, a.BaseIn, "dpi_check_stalled",

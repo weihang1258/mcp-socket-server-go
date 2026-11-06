@@ -12,10 +12,42 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// ServerInstructions 服务级说明：客户端在 initialize 时拿到，作为独立的
+// MCP instructions 块交给模型。这是「这组工具管什么、和内置工具怎么分工」
+// 的唯一服务级入口——45 个子工具描述装不下整体认知，没有它模型只知道
+// 有一堆 file_get/shell_exec，不知道该在什么场景想起来。
+const ServerInstructions = `这组工具用于操作**远程靶机**（通过 socket_server 协议连接），不是本地机器。
+
+【与内置工具的分工】
+- 本地文件：用内置 Read / Write / Glob / Grep，不要用 file_get / file_put。
+- 本地命令：用内置 Bash，不要用 shell_exec。
+- 远程靶机上的文件与命令：用本组工具（file_* / shell_exec）。
+- 判据：路径或命令要在另一台机器上执行时，才用本组工具。
+
+【典型调用序列】
+- 第一次接触靶机：target_list 看有哪些 → target_add 登记新机器（会先探活）。
+- 执行远程命令：shell_exec（args 是完整命令字符串）。
+- 传文件：file_put 上传 → shell_exec chmod +x → 执行；回传用 file_get。
+- 抓包分析：net_route 确认网卡 → capture_start → 跑业务流量 → capture_stop → file_get 取回 pcap。
+- 回放对比：file_put 传 pcap → replay_run；要同时抓包请用另一台靶机（同机互斥）。
+- 端口收流：listen_start → 业务流量 → listen_fetch（回桥侧）或 listen_save（留靶机）→ listen_stop。
+- DPI 设备：dpi_get_info 看现状 → dpi_prepare_package → dpi_install / dpi_upgrade → dpi_get_info 复核。
+
+【结果约定】
+所有工具返回统一信封：{ok, total, results[], failed[]}。
+- results[].data 是该工具的具体结果，字段含义见各工具 outputSchema。
+- failed[] 每项含 target / reason / error_type（network | timeout | business）。
+- error_type=timeout 时可能带 cleanup{killed,verified}；verified 为 false 表示
+  无法确认靶机上的进程已退出，不要假定环境已释放。
+
+【注意】
+- 工具名不带服务前缀，但都属于本服务；多台靶机用 targets 传数组，或 @tag 按标签批量选。
+- 涉及不可逆操作（file_remove / dpi_install / dpi_upgrade）时，先确认路径和目标。`
+
 // NewServer 构建 mcp.Server（serverInfo.version = 桥版本 0.4.0，与 dt14 分离）。
 func NewServer(b *Bridge) *mcp.Server {
 	impl := &mcp.Implementation{Name: "mcp-socket-server", Version: BridgeVersion}
-	s := mcp.NewServer(impl, nil)
+	s := mcp.NewServer(impl, &mcp.ServerOptions{Instructions: ServerInstructions})
 	b.RegisterTools(s)
 	return s
 }
