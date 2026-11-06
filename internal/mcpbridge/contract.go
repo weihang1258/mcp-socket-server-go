@@ -225,16 +225,6 @@ var toolDefaultTimeout = map[string]int{
 	"bridge_upgrade":      60,
 }
 
-// enrichTimeout 把 _meta.default_timeout_s 灌进缺省的 timeout 参数，
-// 让「不传 timeout」与「传工具缺省值」走同一条路径（含日志与审计口径）。
-func enrichTimeout[T any](in *T, get func(*T) int, set func(*T, int), tool string) {
-	if get(in) == 0 {
-		if d, ok := toolDefaultTimeout[tool]; ok {
-			set(in, d)
-		}
-	}
-}
-
 // classifyErr 把一次失败归到 error_type 三类之一。
 // 判定顺序：超时 → network（连接类文案）→ business。
 func classifyErr(err error) string {

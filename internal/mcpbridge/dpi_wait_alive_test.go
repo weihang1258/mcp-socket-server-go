@@ -51,7 +51,7 @@ func TestWaitDPIAliveIgnoresKilledSamples(t *testing.T) {
 	c, _ := dialClient(t, m)
 
 	start := time.Now()
-	if waitDPIAlive(c, 5) {
+	if alive, _ := waitDPIAlive(c, 5); alive {
 		t.Fatalf("有基线、后续采样全被杀却判定 DPI 存活（耗时 %v）", time.Since(start))
 	}
 	if n < 2 {
@@ -70,8 +70,34 @@ func TestWaitDPIAliveNoBaselineIsFalse(t *testing.T) {
 		}
 	})
 	c, _ := dialClient(t, m)
-	if waitDPIAlive(c, 3) {
+	if alive, _ := waitDPIAlive(c, 3); alive {
 		t.Fatal("连基线都采不到却判定 DPI 存活")
+	}
+}
+
+// 预算被外层压缩时必须如实返回实际值：调用方拿它拼失败文案。
+// 真机场景：dpi_switch_mode 传 alive_timeout=600，但外层 timeout 快耗尽，
+// 实际只等了几秒——文案若写 600s 会把排查引向"设备起得慢"。
+func TestWaitDPIAliveReportsActualBudget(t *testing.T) {
+	m := newMockServer(t, func(dt int32, payload []byte, w *mockConnIO) {
+		switch dt {
+		case 14:
+			w.text(`"1.9.27"`)
+		case 1:
+			cmdReply(w, 0, "aaaa\n", "") // 值始终不变 → 等到预算耗尽
+		}
+	})
+	c, _ := dialClient(t, m)
+	c.BudgetEnd = time.Now().Add(2 * time.Second) // 外层只剩 2 秒
+	alive, budget := waitDPIAlive(c, 600)
+	if alive {
+		t.Fatal("值没变却判存活")
+	}
+	if budget >= 600 {
+		t.Fatalf("预算被外层压缩时应返回实际值，实际 %d（传的是 600）", budget)
+	}
+	if budget <= 0 {
+		t.Fatalf("实际预算必须为正: %d", budget)
 	}
 }
 
@@ -98,7 +124,7 @@ func TestWaitDPIAliveDetectsChange(t *testing.T) {
 		}
 	})
 	c, _ := dialClient(t, m)
-	if !waitDPIAlive(c, 10) {
+	if alive, _ := waitDPIAlive(c, 10); !alive {
 		t.Fatal("md5 变了却没判存活")
 	}
 }

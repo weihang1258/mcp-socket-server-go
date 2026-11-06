@@ -315,8 +315,8 @@ func switchMode(c *Client, a dpiSwitchModeIn, aliveTimeout int) (any, error) {
 	}
 	res["stdout"] = truncateRunes(fmt.Sprint(res["stdout"]), 4096)
 
-	if !waitDPIAlive(c, aliveTimeout) {
-		return switchFail(out, fmt.Sprintf("DPI 启动等待 %ds 超时失败", aliveTimeout)), nil
+	if alive, b := waitDPIAlive(c, aliveTimeout); !alive {
+		return switchFail(out, fmt.Sprintf("DPI 启动等待超时失败（实际等待 %ds，alive_timeout=%ds）", b, aliveTimeout)), nil
 	}
 	out.Changed = true
 
@@ -548,8 +548,8 @@ func upgradeDPI(c *Client, a dpiUpgradeIn, startTO, completeTO int) (any, error)
 			return failOf(err, func(r string) map[string]any { return upgradeFail(out, r) },
 				"升级脚本执行失败: "+err.Error())
 		}
-		if !waitDPIAlive(c, startTO) {
-			return upgradeFail(out, fmt.Sprintf("升级后 DPI 在 %ds 内未启动", startTO)), nil
+		if alive, b := waitDPIAlive(c, startTO); !alive {
+			return upgradeFail(out, fmt.Sprintf("升级后 DPI 未在预算内启动（实际等待 %ds，start_timeout=%ds）", b, startTO)), nil
 		}
 	}
 	// 升完读不到版本 = 无法核对，必须失败（空串会让 TargetVersion 核对"看起来通过"）

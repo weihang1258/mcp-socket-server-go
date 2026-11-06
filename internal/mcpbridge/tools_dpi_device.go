@@ -366,12 +366,16 @@ func dpiProcCount(c *Client, pattern string) (int, bool) {
 // 与基线不等 → 误判"DPI 活了"。所以只比较**正常结束**的采样，被杀/断连的
 // 那轮直接跳过；基线也用第一次正常采样建立。预算取 min(aliveTimeout, 剩余预算)，
 // 剩余预算耗尽时没有拿到有效变化就判失败。
-func waitDPIAlive(c *Client, timeoutS int) bool {
+//
+// 返回实际使用的预算：外层总预算可能比 aliveTimeout 小，此时真实等待时间远
+// 短于调用方传入的值。失败文案必须报实际值，否则"等待 600s 超时失败"却只等
+// 了 3 秒，会把排查引向"设备起得慢"。
+func waitDPIAlive(c *Client, timeoutS int) (alive bool, budget int) {
 	statPath := shmXsa + "time_main_io.stat"
 	cmd := "md5sum " + statPath + " 2>/dev/null | awk '{print $1}'"
 	shell(c, "rm -f "+statPath)
 
-	budget := timeoutS
+	budget = timeoutS
 	if rem := c.agentTimeoutS(); rem > 0 && rem < budget {
 		budget = rem
 	}
@@ -385,7 +389,7 @@ func waitDPIAlive(c *Client, timeoutS int) bool {
 			break
 		}
 		if time.Now().After(deadline) {
-			return false // 连基线都采不到（全是被杀的命令）：无法证明存活
+			return false, budget // 连基线都采不到（全是被杀的命令）：无法证明存活
 		}
 		time.Sleep(time.Second)
 	}
@@ -397,10 +401,10 @@ func waitDPIAlive(c *Client, timeoutS int) bool {
 			continue // 本轮命令被杀/断连：不是一次有效观测
 		}
 		if v != base {
-			return true
+			return true, budget
 		}
 	}
-	return false
+	return false, budget
 }
 
 // md5Sample 取一次 md5；ok=false 表示命令没正常跑完（超时被杀/连接异常），
@@ -418,11 +422,17 @@ func md5Sample(c *Client, cmd string) (string, bool) {
 
 // dpiStopAll 停 DPI 主程序并等进程归零（dpi.py:97）。
 // 只有**测到 0 个进程**才算停；测不到继续等，到点判失败。
+// 预算取 min(timeoutS, 剩余预算)：外层总预算耗尽后，子命令会被 agent 逐条杀掉，
+// 内层再等下去只是空转（结果同样是失败，但白占几十秒到几分钟）。
 func dpiStopAll(c *Client, timeoutS int) bool {
 	if _, err := shell(c, "cd "+dpiPath+" && sh dpikill.sh"); err != nil {
 		return false
 	}
-	deadline := time.Now().Add(time.Duration(timeoutS) * time.Second)
+	budget := timeoutS
+	if rem := c.agentTimeoutS(); rem > 0 && rem < budget {
+		budget = rem
+	}
+	deadline := time.Now().Add(time.Duration(budget) * time.Second)
 	for time.Now().Before(deadline) {
 		if n, ok := dpiProcCount(c, "/opt/dpi/xsa$"); ok && n == 0 {
 			time.Sleep(2 * time.Second)
@@ -434,18 +444,19 @@ func dpiStopAll(c *Client, timeoutS int) bool {
 }
 
 // dpiStartAll 启 DPI 主程序并等存活（dpi.py:115）。
-func dpiStartAll(c *Client, timeoutS int) bool {
-	if n, ok := dpiProcCount(c, "/opt/dpi/xsa$"); !ok || n != 0 {
+func dpiStartAll(c *Client, timeoutS int) (ok bool, budget int) {
+	if n, ok2 := dpiProcCount(c, "/opt/dpi/xsa$"); !ok2 || n != 0 {
 		return waitDPIAlive(c, timeoutS)
 	}
 	if _, err := shell(c, "cd "+dpiPath+" && sh dpirun.sh"); err != nil {
-		return false
+		return false, timeoutS
 	}
-	if !waitDPIAlive(c, timeoutS) {
-		return false
+	alive, b := waitDPIAlive(c, timeoutS)
+	if !alive {
+		return false, b
 	}
 	time.Sleep(10 * time.Second)
-	return true
+	return true, b
 }
 
 // ---- 工具 ----
@@ -599,8 +610,8 @@ func (b *Bridge) registerDpiDeviceTools(s *mcp.Server) {
 					if !dpiStopAll(c, restartTimeout) {
 						return map[string]any{"_error": "停止 DPI 失败，未完成重启"}, nil
 					}
-					if !dpiStartAll(c, restartTimeout) {
-						return map[string]any{"_error": "改完配置后 DPI 启动失败"}, nil
+					if ok, b := dpiStartAll(c, restartTimeout); !ok {
+						return map[string]any{"_error": fmt.Sprintf("改完配置后 DPI 启动失败（实际等待 %ds，restart_timeout=%ds）", b, restartTimeout)}, nil
 					}
 					time.Sleep(5 * time.Second)
 					return dpiApplyConfigData{Changes: changes, Restarted: true, Alive: true}, nil
@@ -627,16 +638,19 @@ func (b *Bridge) registerDpiDeviceTools(s *mcp.Server) {
 					case "xsa":
 						switch act {
 						case "start":
-							if !dpiStartAll(c, in.Timeout) {
-								return map[string]any{"_error": "DPI 启动失败或超时"}, nil
+							if ok, b := dpiStartAll(c, in.Timeout); !ok {
+								return map[string]any{"_error": fmt.Sprintf("DPI 启动失败或超时（实际等待 %ds，预算 %ds）", b, in.Timeout)}, nil
 							}
 						case "stop":
 							if !dpiStopAll(c, in.Timeout) {
 								return map[string]any{"_error": "DPI 停止失败或超时"}, nil
 							}
 						case "restart":
-							if !dpiStopAll(c, in.Timeout) || !dpiStartAll(c, in.Timeout) {
-								return map[string]any{"_error": "DPI 重启失败或超时"}, nil
+							if !dpiStopAll(c, in.Timeout) {
+								return map[string]any{"_error": "DPI 重启失败或超时（停止阶段）"}, nil
+							}
+							if ok, b := dpiStartAll(c, in.Timeout); !ok {
+								return map[string]any{"_error": fmt.Sprintf("DPI 重启失败或超时（启动阶段实际等待 %ds，预算 %ds）", b, in.Timeout)}, nil
 							}
 						default:
 							return map[string]any{"_error": "action 只能是 start | stop | restart"}, nil
