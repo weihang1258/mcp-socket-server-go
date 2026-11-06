@@ -169,7 +169,7 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 
 	addTyped(s, ro("file_list",
 		"列远程目录",
-		"列靶机目录内容。什么时候用：浏览远程目录、找安装包或 pcap 时；本地目录请用 Glob。path 填靶机绝对路径；name_filter 按名字过滤；max_depth 限制递归深度（缺省 1）；sorted=true 按版本排序（用于挑最新安装包）。返回 entries[]。"),
+		"列靶机目录内容。什么时候用：浏览远程目录、找安装包或 pcap 时。path 填靶机绝对路径；name_filter 按名字过滤；max_depth 限制递归深度（缺省 1）；sorted=true 按版本排序（用于挑最新安装包）。返回 entries[]。"),
 		func(ctx context.Context, a fileListIn) Envelope[fileListData] {
 			depth := orDefault(a.MaxDepth, 1)
 			if depth < 1 {
@@ -244,7 +244,7 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 
 	addTyped(s, ro("file_get",
 		"下载远程文件到桥",
-		"把靶机上的文件下载到桥的下载目录。什么时候用：文件在远程靶机上、本地读不到时（pcap、日志、安装包回传）；本地文件请用 Read。remote_path 填靶机绝对路径；local_name 只能填文件名，会拼在桥的下载目录下，禁止绝对路径。返回 {name,size_bytes,sha256}。"),
+		"把靶机上的文件下载到桥的下载目录。什么时候用：文件在远程靶机上、本地读不到时（pcap、日志、安装包回传）。remote_path 填靶机绝对路径；local_name 只能填文件名，会拼在桥的下载目录下，禁止绝对路径。返回 {name,size_bytes,sha256}。"),
 		func(ctx context.Context, a fileGetIn) Envelope[FileData] {
 			name := a.LocalName
 			if name == "" {
@@ -769,7 +769,7 @@ type shellExecData struct {
 func (b *Bridge) registerShellTools(s *mcp.Server) {
 	addTyped(s, destructive("shell_exec",
 		"在靶机执行命令",
-		"在靶机执行一条命令。什么时候用：操作远程靶机；本地命令请用 Bash。args 填完整命令字符串，如 \"systemctl status xsa\"（不是数组）。返回 results[].data{code,stdout,stderr}；stdout 超 64KB 截断并带 stdout_truncated=true。wait=false 为异步执行不返回回显。大段脚本或文件请先用 file_put 上传再执行，不要经命令内嵌。env 禁止传密码或 Token——凭据由桥本地配置读取。"),
+		"在靶机执行一条命令。什么时候用：要在被连接的那台机器上执行命令时。args 填完整命令字符串，如 \"systemctl status xsa\"（不是数组）。返回 results[].data{code,stdout,stderr}；stdout 超 64KB 截断并带 stdout_truncated=true。wait=false 为异步执行不返回回显。大段脚本或文件请先用 file_put 上传再执行，不要经命令内嵌。env 禁止传密码或 Token——凭据由桥本地配置读取。"),
 		func(ctx context.Context, a shellExecIn) Envelope[shellExecData] {
 			wait := true
 			if a.Wait != nil {

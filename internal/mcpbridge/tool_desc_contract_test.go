@@ -128,10 +128,19 @@ func TestServerInstructionsExist(t *testing.T) {
 
 // TestServerInstructionsDontDictateOtherTools 只说明自己是远程工具，不指导
 // 宿主的内置工具怎么用——harness 各不相同，工具集不在本服务管辖范围内。
+// 子工具描述同样适用（2026-11-06 用户第二遍指出 file_get/file_list/shell_exec）。
 func TestServerInstructionsDontDictateOtherTools(t *testing.T) {
-	for _, bad := range []string{"内置工具", "内置 Read", "内置 Bash", "与内置", "不要用 file_"} {
+	banned := []string{"内置工具", "内置 Read", "内置 Bash", "与内置", "不要用 file_", "请用 Bash", "请用 Read", "请用 Glob"}
+	for _, bad := range banned {
 		if strings.Contains(ServerInstructions, bad) {
 			t.Errorf("ServerInstructions 越界指导宿主工具：出现 %q", bad)
+		}
+	}
+	for _, tl := range listAllTools(t) {
+		for _, bad := range banned {
+			if strings.Contains(tl.Description, bad) {
+				t.Errorf("%s: 描述越界指导宿主工具：出现 %q", tl.Name, bad)
+			}
 		}
 	}
 }
