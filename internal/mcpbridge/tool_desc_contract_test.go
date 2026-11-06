@@ -107,11 +107,31 @@ func TestInputFieldsHaveDescriptions(t *testing.T) {
 	}
 }
 
-// TestServerInstructionsExist 服务级说明是「这组工具管什么」的唯一入口。
+// TestServerInstructionsExist 服务级说明是「这组工具管什么」的唯一入口：
+// 模型在 ToolSearch 里按字面量找工具，说明里漏掉一个名字，那个能力就等于不存在。
 func TestServerInstructionsExist(t *testing.T) {
-	for _, want := range []string{"远程靶机", "内置", "target_list", "shell_exec"} {
+	for _, want := range []string{"远程主机", "靶机", "抓包", "回放", "DPI", "target_list", "shell_exec"} {
 		if !strings.Contains(ServerInstructions, want) {
-			t.Errorf("ServerInstructions 缺关键内容 %q：模型无法区分本组工具与内置工具", want)
+			t.Errorf("ServerInstructions 缺关键内容 %q", want)
+		}
+	}
+	var missing []string
+	for _, tl := range listAllTools(t) {
+		if !strings.Contains(ServerInstructions, tl.Name) {
+			missing = append(missing, tl.Name)
+		}
+	}
+	if len(missing) > 0 {
+		t.Errorf("ServerInstructions 未点名这些工具（模型搜不到就不会用）：%s", strings.Join(missing, ", "))
+	}
+}
+
+// TestServerInstructionsDontDictateOtherTools 只说明自己是远程工具，不指导
+// 宿主的内置工具怎么用——harness 各不相同，工具集不在本服务管辖范围内。
+func TestServerInstructionsDontDictateOtherTools(t *testing.T) {
+	for _, bad := range []string{"内置工具", "内置 Read", "内置 Bash", "与内置", "不要用 file_"} {
+		if strings.Contains(ServerInstructions, bad) {
+			t.Errorf("ServerInstructions 越界指导宿主工具：出现 %q", bad)
 		}
 	}
 }
