@@ -91,7 +91,11 @@ func tcpdumpStart(eth, path, extended string, singleQueue bool) (bool, error) {
 	if old, ok := captures[path]; ok {
 		log.Printf("path %s 已有抓包在运行，先停止旧实例", path)
 		capturesMu.Unlock()
-		stopCaptureEntry(old)
+		// 停止失败（超时且强关无效）时保留登记可重试（stopCaptureEntry 契约）；
+		// 此时新实例也不该在旧 socket 仍占网卡时启动——直接报错（评审 A8）。
+		if !stopCaptureEntry(old) {
+			return false, fmt.Errorf("旧抓包 %s 无法停止（实例已保留），请稍后重试 capture_stop", path)
+		}
 		capturesMu.Lock()
 		delete(captures, path)
 	}

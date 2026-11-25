@@ -76,6 +76,10 @@ type flowJSON struct {
 	ProtoType string `json:"protoType"`
 }
 
+// maxPcapFlowEntries 流条目上限（评审 A10）：超限早停并记日志，
+// 响应里按已有条目截断（桥侧另有 1000 条展示截断）。30000 ≈ 半日 10pps 现场量。
+const maxPcapFlowEntries = 30000
+
 func extractPcapFlowFiveTuples(pcapDir string) []flowJSON {
 	results := []flowJSON{}
 	var pcaps []string
@@ -90,6 +94,11 @@ func extractPcapFlowFiveTuples(pcapDir string) []flowJSON {
 	})
 
 	for _, pcapPath := range pcaps {
+		if len(results) >= maxPcapFlowEntries {
+			log.Printf("extract_pcap_flow_five_tuples 条目达上限 %d，提前停止（目录含 %d 个 pcap）",
+				maxPcapFlowEntries, len(pcaps))
+			break
+		}
 		pcapName := filepath.Base(pcapPath)
 		flows := map[string]*pcapFlow{}
 		var flowOrder []*pcapFlow
@@ -120,6 +129,9 @@ func extractPcapFlowFiveTuples(pcapDir string) []flowJSON {
 			}
 		}()
 		for _, flow := range flowOrder { // Python dict 插入序（首现顺序），输出确定
+			if len(results) >= maxPcapFlowEntries {
+				break
+			}
 			src, dst := flow.firstSrc, flow.firstDst
 			if flow.client != flow.firstSrc {
 				src, dst = flow.firstDst, flow.firstSrc

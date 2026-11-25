@@ -22,9 +22,11 @@ import (
 
 // afpacketSource pktSource 的 Linux 实现统计信息承载。
 type afpacketSource struct {
-	fd      int
-	eth     string
-	ifindex int
+	fd        int
+	eth       string
+	ifindex   int
+	closeOnce sync.Once // 三路径并发 close（recv 循环收尾 / 网卡 down / stop 兜底强关）只关一次（评审 A9）
+	closeErr  error
 }
 
 var _ pktSource = (*afpacketSource)(nil)
@@ -162,8 +164,10 @@ func (s *afpacketSource) recvFrame(buf []byte, deadline time.Time) (int, []byte,
 }
 
 func (s *afpacketSource) close() error {
-	// tpacket_stats 由 captureRecvLoop 在 close 前经 stats() 读取
-	return unix.Close(s.fd)
+	// tpacket_stats 由 captureRecvLoop 在 close 前经 stats() 读取。
+	// 幂等：重复关同一 fd 可能关掉刚好复用该编号的新 fd（评审 A9）。
+	s.closeOnce.Do(func() { s.closeErr = unix.Close(s.fd) })
+	return s.closeErr
 }
 
 func deadlineFor(t time.Time) (unix.Timeval, error) {

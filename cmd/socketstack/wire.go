@@ -39,7 +39,13 @@ func runMCPServe(cfg config.Config) {
 		LogLevel: cfg.MCP.LogLevel, AuditDays: cfg.MCP.AuditRetentionDays,
 		Whitelist:      cfg.MCP.CmdExecWhitelist,
 		DefaultTimeout: cfg.MCP.DefaultTimeout,
-		FTPUser:        cfg.MCP.FTPUser, FTPPassword: cfg.MCP.FTPPassword,
+		FTPUser: cfg.MCP.FTPUser, FTPPassword: cfg.MCP.FTPPassword,
+		Pool: mcpbridge.PoolLimits{
+			MaxConnPerTarget:     cfg.MCP.Pool.MaxConnPerTarget,
+			IdleTimeout:          cfg.MCP.Pool.IdleTimeout,
+			BorrowTimeout:        cfg.MCP.Pool.BorrowTimeout,
+			MaxGlobalConcurrency: cfg.MCP.Pool.MaxGlobalConcurrency,
+		},
 	})
 	if err := mcpbridge.RunStreamableHTTP(context.Background(), b, cfg.MCP.Bind.Host, cfg.MCP.Bind.Port); err != nil {
 		fmt.Fprintln(os.Stderr, "mcp serve 失败:", err)
@@ -57,6 +63,12 @@ func runMCPStdio() {
 		LogLevel: cfg.MCP.LogLevel, AuditDays: cfg.MCP.AuditRetentionDays,
 		Whitelist: cfg.MCP.CmdExecWhitelist, DefaultTimeout: cfg.MCP.DefaultTimeout,
 		FTPUser: cfg.MCP.FTPUser, FTPPassword: cfg.MCP.FTPPassword,
+		Pool: mcpbridge.PoolLimits{
+			MaxConnPerTarget:     cfg.MCP.Pool.MaxConnPerTarget,
+			IdleTimeout:          cfg.MCP.Pool.IdleTimeout,
+			BorrowTimeout:        cfg.MCP.Pool.BorrowTimeout,
+			MaxGlobalConcurrency: cfg.MCP.Pool.MaxGlobalConcurrency,
+		},
 	})
 	if err := mcpbridge.RunStdio(context.Background(), b); err != nil {
 		fmt.Fprintln(os.Stderr, "mcp 失败:", err)

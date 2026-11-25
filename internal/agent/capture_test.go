@@ -19,6 +19,8 @@ import (
 // ---- 测试用 fake 包源 ----
 
 type fakeSource struct {
+	closeOnce sync.Once
+
 	mu     sync.Mutex
 	frames [][]byte // 待收取帧（含 OOB 分离存放）
 	oobs   [][]byte
@@ -65,7 +67,10 @@ func (f *fakeSource) recvFrame(b []byte, deadline time.Time) (int, []byte, error
 	}
 }
 
-func (f *fakeSource) close() error { close(f.closed); return nil }
+func (f *fakeSource) close() error {
+	f.closeOnce.Do(func() { close(f.closed) }) // 同生产源：幂等（评审 A9）
+	return nil
+}
 
 func (f *fakeSource) stats() (uint64, uint64) { return 0, 0 }
 

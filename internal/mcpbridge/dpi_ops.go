@@ -791,6 +791,15 @@ func ftpDownload(rawURL, dest, user, password string, timeoutSec int) error {
 		if err != nil {
 			return line, err
 		}
+		// 多行响应（RFC 959）：首行 "220-xxx" 表示还有后续行，继续读到
+		// "220 "（带空格）为止。只读首行会把后续行留在缓冲里，下一条
+		// expect 读到它而错位（评审 N13）。
+		for strings.HasPrefix(line, code+"-") {
+			line, err = br.ReadString('\n')
+			if err != nil {
+				return line, err
+			}
+		}
 		if !strings.HasPrefix(line, code) {
 			return line, fmt.Errorf("FTP 期望 %s，收到 %q", code, strings.TrimSpace(line))
 		}
@@ -832,11 +841,19 @@ func ftpDownload(rawURL, dest, user, password string, timeoutSec int) error {
 	if err != nil {
 		return err
 	}
-	host, port, err := parsePasv(line)
+	_, port, err := parsePasv(line)
 	if err != nil {
 		return err
 	}
-	data, err := d.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	// 数据连接 IP 用控制连接的对端地址，只采信 PASV 的端口号（评审 N12）：
+	// 服务器在 NAT 后时 PASV 返回内网地址，桥不可达。Python 原版走 wget，
+	// 数据连接默认就是控制连接对端（wget/curl 同款行为），这里对齐。
+	remote := conn.RemoteAddr().String()
+	pasvHost, _, perr := net.SplitHostPort(remote)
+	if perr != nil {
+		pasvHost = remote // 裸 IPv6 无端口形态
+	}
+	data, err := d.Dial("tcp", net.JoinHostPort(pasvHost, strconv.Itoa(port)))
 	if err != nil {
 		return fmt.Errorf("FTP 数据连接失败: %v", err)
 	}

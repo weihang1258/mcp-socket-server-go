@@ -55,7 +55,19 @@ func handleConn(conn net.Conn, do DoFunc) {
 				log.Printf("首包过短: %d bytes", len(chunk))
 				return
 			}
-			dataLen = int32(binary.LittleEndian.Uint32(chunk[:4]))
+			uLen := binary.LittleEndian.Uint32(chunk[:4])
+			// 负数（int32 视角）与超限帧长直接断连（评审 A7）：负数让 acc 永远追不上，
+			// 连接静默僵死；超大值是客户端灌内存。上限默认 2GB——覆盖最大合法上传
+			// （dt23/dt24 整文件单帧，500MB pcap 压后 ~450MB）。
+			if uLen&0x80000000 != 0 {
+				log.Printf("帧长为负（0x%08x），断连", uLen)
+				return
+			}
+			if uLen > maxFrameLen {
+				log.Printf("帧长 %d 超上限 %d，断连", uLen, maxFrameLen)
+				return
+			}
+			dataLen = int32(uLen)
 			acc = append(acc[:0], chunk[4:]...)
 			logf("指定接收有效字节数：%d", dataLen)
 			logf("本条接收长度%d", len(chunk[4:]))
@@ -86,6 +98,9 @@ func handleConn(conn net.Conn, do DoFunc) {
 		}
 	}
 }
+
+// maxFrameLen 单帧长度上限（可按需提为配置项；2GB 覆盖最大合法整文件单帧上传）。
+const maxFrameLen = 2 << 30
 
 // processFrame 处理一个已收满的帧。返回 false = 断连。
 func processFrame(conn net.Conn, cs *ConnState, data []byte, do DoFunc) bool {
@@ -208,19 +223,31 @@ func handleDT24(conn net.Conn, cs *ConnState) bool {
 
 // sendDirect 直发（21-24 握手应答，无重试）。写失败 = 连接已坏，断连。
 func sendDirect(conn net.Conn, resp []byte) bool {
-	if _, err := conn.Write(resp); err != nil {
+	if _, err := writeDeadlineWrap(conn, resp); err != nil {
 		return false
 	}
 	return true
 }
 
+// connWriteTimeout 单次写超时（评审 A11）：客户端不读时内核缓冲满、Write 永久
+// 阻塞，goroutine 连同整份响应一起挂死。dt3 大响应（gzip 后几百 MB）最重。
+const connWriteTimeout = 15 * time.Second
+
+// writeDeadlineWrap 带 60s 写超时的 Write。超时 = 客户端不收（卡死/SIGSTOP），
+// 返回错误让上层按连接坏处理；能写的部分已进内核缓冲，对端重连重取即可。
+func writeDeadlineWrap(conn net.Conn, b []byte) (int, error) {
+	conn.SetWriteDeadline(time.Now().Add(connWriteTimeout))
+	defer conn.SetWriteDeadline(time.Time{})
+	return conn.Write(b)
+}
+
 // sendWithRetry 业务响应发送：失败 sleep 3s 重发一次（§2 规则 5）。
 func sendWithRetry(conn net.Conn, resp []byte) {
-	if _, err := conn.Write(resp); err != nil {
+	if _, err := writeDeadlineWrap(conn, resp); err != nil {
 		log.Printf("发送错误：%v", err)
 		log.Printf("等待3秒，重新发送")
 		time.Sleep(3 * time.Second)
-		if _, err := conn.Write(resp); err != nil {
+		if _, err := writeDeadlineWrap(conn, resp); err != nil {
 			log.Printf("重试发送也失败：%v", err)
 		}
 	}

@@ -152,7 +152,7 @@ func mcpAction(args []string) string {
 	switch args[0] {
 	case "serve":
 		return "serve"
-	case "start", "stop", "status", "enable", "disable":
+	case "start", "stop", "restart", "status", "enable", "disable":
 		return "svc:" + args[0]
 	case "-h", "--help", "help":
 		return "help"
@@ -312,6 +312,8 @@ func svcDispatch(target, action string) {
 		err = svc.AgentStop()
 	case target == "agent" && action == "restart":
 		err = svcAgentRestartFn()
+	case target == "mcp" && action == "restart":
+		err = svcMCPRestartFn()
 	case target == "agent" && action == "enable":
 		err = svc.AgentEnable()
 	case target == "agent" && action == "disable":

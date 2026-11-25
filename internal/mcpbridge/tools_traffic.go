@@ -233,6 +233,14 @@ func (b *Bridge) registerTrafficTools(s *mcp.Server) {
 				fid = &a.ForceIPDst
 			}
 			var fs, fd *uint16
+			// 端口先验（评审 G1）：int 静默 uint16 截断会把 70000 变成 4464 并按
+			// 4464 改写——直接报业务错误而不是改出错误的包。
+			if a.ForceSport < 0 || a.ForceSport > 65535 {
+				return allFailedEnvelope[map[string]any](b.resolve(a.Targets), fmt.Sprintf("force_sport 超出端口范围: %d（1-65535，0 为不改写）", a.ForceSport), ErrBusiness)
+			}
+			if a.ForceDport < 0 || a.ForceDport > 65535 {
+				return allFailedEnvelope[map[string]any](b.resolve(a.Targets), fmt.Sprintf("force_dport 超出端口范围: %d（1-65535，0 为不改写）", a.ForceDport), ErrBusiness)
+			}
 			if a.ForceSport != 0 {
 				x := uint16(a.ForceSport)
 				fs = &x

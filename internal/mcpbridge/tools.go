@@ -47,6 +47,16 @@ type BridgeConfig struct {
 	// 凭据留在桥配置里：不进工具参数、不进审计、不出现在靶机进程表。
 	FTPUser     string
 	FTPPassword string
+	// Pool 池参数（N14：此前解析了配置但从未传入，改了等于没配）。
+	Pool PoolLimits
+}
+
+// PoolLimits 与 config.Pool 对应（避免 mcpbridge 依赖 internal/config）。
+type PoolLimits struct {
+	MaxConnPerTarget     int
+	IdleTimeout          int
+	BorrowTimeout        int
+	MaxGlobalConcurrency int
 }
 
 // Init 初始化（对齐 init_server：registry/locks/audit 共用 db_path）。
@@ -56,11 +66,16 @@ func Init(cfg BridgeConfig) *Bridge {
 	// 生效值一行可见：真机曾因配置层级错误 mirror 未生效，启动时毫无迹象，
 	// 直到下载失败才发现（五轮验收）。repo/mirror/proxy 必须在这里就能对上。
 	log.Printf("升级源配置: repo=%q mirror=%q proxy=%q", cfg.UpgradeRepo, cfg.UpgradeMirror, proxy)
+	// 池参数接线（N14）：ConfiguredPool 值为空 = 配置里没写，保持缺省。
+	if p := cfg.Pool; p.MaxConnPerTarget > 0 || p.IdleTimeout > 0 || p.BorrowTimeout > 0 || p.MaxGlobalConcurrency > 0 {
+		ConfigureLimits(p.MaxConnPerTarget, p.IdleTimeout, p.BorrowTimeout, p.MaxGlobalConcurrency)
+	}
+	schedGlobal = NewScheduler()
 	b := &Bridge{
 		Registry:      mustRegistry(cfg.DBPath),
 		Locks:         NewLockManager(),
 		Audit:         mustAudit(cfg.DBPath, cfg.AuditDays),
-		Sched:         NewScheduler(),
+		Sched:         schedGlobal,
 		Whitelist:     cfg.Whitelist,
 		DownloadDir:   cfg.DownloadDir,
 		Proxy:         cfg.Proxy,

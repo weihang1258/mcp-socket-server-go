@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"strconv"
@@ -155,6 +156,19 @@ func (c *Client) sendRaw(content []byte) error {
 	return writeFull(c.conn, frame.EncodeRaw(content))
 }
 
+// maxRecvFrame 桥侧单帧接收上限（评审 A12）：n 来自对端 4 字节，协议错位时
+// 可能是任意值，直接 make 会一次申请 4GB。上限覆盖最大合法帧（dt3 下载
+// gzip 后 ~1GB 档），超过即报协议错位。
+const maxRecvFrame = 1 << 30
+
+// recvNChecked 带上限的 recvN（四处裸 recvN(int(n)) 统一走此入口）。
+func (c *Client) recvNChecked(n uint32, what string) ([]byte, error) {
+	if n > maxRecvFrame {
+		return nil, fmt.Errorf("%s 长度异常: %d（协议错位？）", what, n)
+	}
+	return c.recvN(int(n))
+}
+
 // recvN 精确读 n 字节。
 func (c *Client) recvN(n int) ([]byte, error) {
 	buf := make([]byte, n)
@@ -203,7 +217,7 @@ func (c *Client) recvGzipRaw() (any, error) {
 		return nil, err
 	}
 	n := binary.LittleEndian.Uint32(head)
-	gz, err := c.recvN(int(n))
+	gz, err := c.recvNChecked(n, "cmd_exec 回执")
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +248,7 @@ func (c *Client) recvLenPrefixedJSON() (map[string]any, error) {
 		return nil, err
 	}
 	n := binary.LittleEndian.Uint32(head)
-	body, err := c.recvN(int(n))
+	body, err := c.recvNChecked(n, "boce 回执")
 	if err != nil {
 		return nil, err
 	}
@@ -308,7 +322,7 @@ func (c *Client) recvLenPrefixedArray() ([]any, error) {
 		return nil, err
 	}
 	n := binary.LittleEndian.Uint32(head)
-	body, err := c.recvN(int(n))
+	body, err := c.recvNChecked(n, "pcap 流回执")
 	if err != nil {
 		return nil, err
 	}
@@ -593,6 +607,9 @@ func (c *Client) SocketListen(action string, listenPort int, file string, maxByt
 			return nil, fmt.Errorf("listen fetch failed: %s", msg)
 		}
 		n := binary.LittleEndian.Uint64(head)
+		if n > uint64(maxRecvFrame) {
+			return nil, fmt.Errorf("listen fetch 长度异常: %d（协议错位？）", n)
+		}
 		body, err := c.recvN(int(n))
 		if err != nil {
 			return nil, err
@@ -641,11 +658,16 @@ func writeFull(conn net.Conn, b []byte) error {
 
 // ---- 连接池（pool.py 语义）----
 
-const (
+// 池参数改为 var（N14：config.go 的 mcp.pool.* 接线），缺省值同 Python pool.py。
+var (
 	poolMaxConnPerTarget = 5
 	poolIdleTimeoutSec   = 600
 	poolBorrowTimeoutSec = 10
+	maxGlobalConcurrency = 50
 )
+
+// schedGlobal Init 建的全局调度器（ConfigureLimits 重建 sem 用）。
+var schedGlobal *Scheduler
 
 type pooledConn struct {
 	c        *Client
@@ -725,7 +747,7 @@ func (p *TargetPool) Acquire(borrowTimeout, socketTimeout int) (*Client, error) 
 	for len(p.idle) > 0 {
 		pc := p.idle[len(p.idle)-1]
 		p.idle = p.idle[:len(p.idle)-1]
-		if now.Sub(pc.lastUsed) > poolIdleTimeoutSec*time.Second || !probeAlive(pc.c) {
+		if now.Sub(pc.lastUsed) > time.Duration(poolIdleTimeoutSec)*time.Second || !probeAlive(pc.c) {
 			expired = append(expired, pc.c)
 			continue
 		}
@@ -791,7 +813,31 @@ type Scheduler struct {
 }
 
 func NewScheduler() *Scheduler {
-	return &Scheduler{pools: map[string]*TargetPool{}, sem: make(chan struct{}, 50)}
+	return &Scheduler{pools: map[string]*TargetPool{}, sem: make(chan struct{}, maxGlobalConcurrency)}
+}
+
+// ConfigureLimits 配置项接线（评审 N14）：config.go 的 mcp.pool.* 与
+// behind_proxy 之前被解析但从未传入——改了配置等于没配。必须在任何
+// Acquire 之前调用（main 启动路径保证）；0 值 = 保持缺省。
+func ConfigureLimits(maxConnPerTarget, idleTimeoutSec, borrowTimeoutSec, maxGlobalConc int) {
+	if maxConnPerTarget > 0 {
+		poolMaxConnPerTarget = maxConnPerTarget
+	}
+	if idleTimeoutSec > 0 {
+		poolIdleTimeoutSec = idleTimeoutSec
+	}
+	if borrowTimeoutSec > 0 {
+		poolBorrowTimeoutSec = borrowTimeoutSec
+	}
+	if maxGlobalConc > 0 {
+		maxGlobalConcurrency = maxGlobalConc
+		// 已建 sem 容量不可调：重建（启动路径 Init 后、首个工具调用前执行）
+		if schedGlobal != nil {
+			schedGlobal.sem = make(chan struct{}, maxGlobalConcurrency)
+		}
+	}
+	log.Printf("连接池配置: max_conn_per_target=%d idle_timeout=%ds borrow_timeout=%ds max_global_concurrency=%d",
+		poolMaxConnPerTarget, poolIdleTimeoutSec, poolBorrowTimeoutSec, maxGlobalConcurrency)
 }
 
 // Sem 全局并发闸门（Python Scheduler 的 max_global_concurrency 语义）。

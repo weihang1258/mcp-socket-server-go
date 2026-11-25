@@ -229,15 +229,46 @@ func tcpChecksum(ipHdr, trans []byte) uint16 {
 
 // buildModifiedPacket 五元组改写（IPv4↔IPv4 完整；v4↔v6 互转含 ICMP 半成品照抄）。
 // 返回 nil = 原样（无法处理）。
-func buildModifiedPacket(ethBytes []byte, modSrc, modDst *string, modSport, modDport *uint16) []byte {
+//
+// 带 VLAN 标签的帧先剥标签再解析 IP（对齐 Python modify_packet replayer.py:585-589
+// 先 parse_vlan 再取 payload——漏剥会让 force_ip_* 对 VLAN 包静默失效，评审 N11）。
+// 整段 panic 兜底转 nil（对齐 Python except Exception → return eth_bytes，评审 N20）。
+func buildModifiedPacket(ethBytes []byte, modSrc, modDst *string, modSport, modDport *uint16) (out []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = nil // 畸形帧原样回放，不让单包 panic 断整条回放
+		}
+	}()
+	if len(ethBytes) < 14 {
+		return nil
+	}
 	payload := ethBytes[14:]
+	if binary.BigEndian.Uint16(ethBytes[12:14]) == 0x8100 {
+		_, _, rest, ok := parseVLANID(payload)
+		if !ok || len(rest) < 1 {
+			return nil
+		}
+		payload = rest
+	}
+	if len(payload) < 1 {
+		return nil
+	}
 	ver := payload[0] >> 4
+	if ver == 4 && len(payload) < 20 {
+		return nil
+	}
+	if ver == 6 && len(payload) < 40 {
+		return nil
+	}
 	srcIs4 := modSrc != nil && net.ParseIP(*modSrc).To4() != nil && isIPv4Literal(*modSrc)
 	dstIs4 := modDst != nil && isIPv4Literal(*modDst)
 	srcIs6 := modSrc != nil && !srcIs4
 	dstIs6 := modDst != nil && !dstIs4
 
-	if ver == 4 && (srcIs4 || dstIs4) {
+	// 仅端口改写（modSrc/modDst 为 nil）也走本分支：Python 的 modified_ip_src/dst
+	// 默认取原始五元组（恒非 None），target_is_ipv4 按包实际版本成立，端口与 IP
+	// 共用一段改写逻辑。此前只看地址导致仅端口时整包被跳过（N11 伴随缺陷）。
+	if ver == 4 && (srcIs4 || dstIs4 || modSport != nil || modDport != nil) {
 		ihl := int(payload[0]&0x0F) * 4
 		ipHdr := append([]byte{}, payload[:ihl]...)
 		trans := append([]byte{}, payload[ihl:]...)
@@ -385,7 +416,7 @@ func buildModifiedPacket(ethBytes []byte, modSrc, modDst *string, modSport, modD
 		}
 		return append(append([]byte{}, ethBytes[:14]...), append(v6, trans...)...)
 	}
-	if ver == 6 && (srcIs6 || dstIs6) {
+	if ver == 6 && (srcIs6 || dstIs6 || modSport != nil || modDport != nil) {
 		ipHdr := append([]byte{}, payload[:40]...)
 		trans := append([]byte{}, payload[40:]...)
 		nh := ipHdr[6]
