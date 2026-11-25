@@ -30,8 +30,8 @@ func TestToolContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Tools) != 47 {
-		t.Fatalf("want 47 tools, got %d", len(list.Tools))
+	if len(list.Tools) != 48 {
+		t.Fatalf("want 48 tools, got %d", len(list.Tools))
 	}
 	got := map[string]bool{}
 	for _, tl := range list.Tools {
@@ -107,6 +107,7 @@ func TestToolContract(t *testing.T) {
 		"dpi_wait_stat":       60,
 		"dpi_wait_file":       600,
 		"dpi_check_stalled":   30,
+		"dpi_clean_stat":      300,
 		"dpi_policy_get":      15,
 		"dpi_policy_put":      15,
 		"dpi_policy_wait":     60,
@@ -143,6 +144,7 @@ var planDanger = map[string]string{
 	"dpi_get_info":       DangerRead, "dpi_get_config": DangerRead, "dpi_apply_config": DangerDestructive,
 	"dpi_service": DangerDestructive, "dpi_agent_service": DangerDestructive, "dpi_switch_mode": DangerDestructive,
 	"dpi_read_stat": DangerRead, "dpi_wait_stat": DangerRead, "dpi_wait_file": DangerRead, "dpi_check_stalled": DangerRead,
+	"dpi_clean_stat": DangerDestructive,
 	"dpi_policy_get": DangerRead, "dpi_policy_put": DangerWrite, "dpi_policy_wait": DangerRead, "dpi_policy_write": DangerWrite,
 	"dpi_prepare_package": DangerWrite, "dpi_install": DangerDestructive, "dpi_upgrade": DangerDestructive,
 	"dpi_backup":     DangerWrite, // 与 production 同源，改名即红

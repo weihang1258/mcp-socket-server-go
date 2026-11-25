@@ -138,3 +138,112 @@ func TestCompareValues(t *testing.T) {
 		}
 	}
 }
+
+// ---- C2 补充 kind（格式采自 82 真机）----
+
+// 表头型：tcpsegment / ring / malicious / proto_public / pcapdump_storage
+func TestParseC2HeaderKinds(t *testing.T) {
+	// 真机格式：表头前 3 列单空格连体（worktask lost_cnt up_pkts），第 4 列起
+	// 多空格分隔；数据行全多空格。连体列名按一格保留，dn_pkts 起可寻址。
+	sd := parseStatText("tcpsegment", "", "worktask lost_cnt up_pkts    dn_pkts\n0        0          1          0\nall      0          2          5\n")
+	if v := rowField(sd, "all", "dn_pkts"); v != "5" {
+		t.Fatalf("tcpsegment: %+v", sd.Rows)
+	}
+	// 真机格式：表头与数据行都是多空格分隔
+	sd = parseStatText("ring", "", "Port               IO-WK fails        TX-IO fails\n0000:00:0b.0       0                  0\ntotal              0                  1\n")
+	if v := rowField(sd, "total", "IO-WK fails"); v != "0" {
+		t.Fatalf("ring: %+v", sd.Rows)
+	}
+	if v := rowField(sd, "total", "TX-IO fails"); v != "1" {
+		t.Fatalf("ring TX-IO: %+v", sd.Rows)
+	}
+	sd = parseStatText("malicious", "", "wtask flow_cnt block_cnt\n0 6 1\nall 7 2\n")
+	if v := rowField(sd, "all", "flow_cnt"); v != "7" {
+		t.Fatalf("malicious: %+v", sd.Rows)
+	}
+	sd = parseStatText("proto_public", "", "inner_ppid up_pkts proto_name\n1 25 HTTP\n")
+	if v := rowField(sd, "1", "proto_name"); v != "HTTP" {
+		t.Fatalf("proto_public: %+v", sd.Rows)
+	}
+	sd = parseStatText("pcapdump_storage", "", "CommandId StorageAmount\nC1 100\n")
+	if v := rowField(sd, "C1", "StorageAmount"); v != "100" {
+		t.Fatalf("pcapdump_storage: %+v", sd.Rows)
+	}
+}
+
+// kv 型：evilblock / eu_overseaip
+func TestParseC2KVKinds(t *testing.T) {
+	sd := parseStatText("evilblock", "", "all:\nevilblk_sts_need_drop 0\nevilblk_sts_not_proc 25\n")
+	if v := rowField(sd, "all", "evilblk_sts_not_proc"); v != "25" {
+		t.Fatalf("evilblock: %+v", sd.Rows)
+	}
+	// 真机格式："worktask: N" 是 KV 内容行（worktask 键、N 值），全部进单行 all
+	sd = parseStatText("eu_overseaip", "", "worktask: 0\ndns_no_overseaip: 0\n\nworktask: all\nvpnblock_no_overseaip: 3\n")
+	if rowField(sd, "all", "dns_no_overseaip") != "0" || rowField(sd, "all", "vpnblock_no_overseaip") != "3" || rowField(sd, "all", "worktask") != "all" {
+		t.Fatalf("eu_overseaip: %+v", sd.Rows)
+	}
+}
+
+// mirrorvlan_limit：两段（worktask 0 / per-g total），第二段多 speed 列
+func TestParseMirrorvlanLimit(t *testing.T) {
+	text := `worktask: 0
+    g    active             limit              reject
+    0    0                  10000              0
+    g    active             limit              reject
+    1    5                  10000              2
+
+per-g flow admission (total):
+    g    active             limit              reject             speed
+    0    1                  10000              0                  0 bps
+`
+	sd := parseStatText("mirrorvlan_limit", "", text)
+	if v := rowField(sd, "0.1", "reject"); v != "2" {
+		t.Fatalf("第一段: %+v", sd.Rows)
+	}
+	if v := rowField(sd, "total.0", "speed"); v != "0 bps" {
+		t.Fatalf("第二段 speed: %+v", sd.Rows)
+	}
+}
+
+// ext_xrt：Port: 行开块，重复键后者覆盖
+func TestParsePortKVExtXrt(t *testing.T) {
+	text := `Port:          0000:00:0b.0
+RX pkts:       37
+RX errors:     0
+TX fails:      0
+==========
+Port:          total
+RX pkts:       40
+RX errors:     2
+`
+	sd := parseStatText("ext_xrt", "", text)
+	if v := rowField(sd, "0000:00:0b.0", "RX pkts"); v != "37" {
+		t.Fatalf("端口块: %+v", sd.Rows)
+	}
+	if v := rowField(sd, "total", "RX errors"); v != "2" {
+		t.Fatalf("total 块: %+v", sd.Rows)
+	}
+}
+
+// sysinfo：块结构套 parseBlocks
+func TestParseSysinfoBlocks(t *testing.T) {
+	text := "cpu type\n  1 io\n  2 wk\n\nnuma msg:0\n"
+	sd := parseStatText("sysinfo", "", text)
+	if sd.Count == 0 {
+		t.Fatalf("sysinfo 应解析出内容: %+v", sd.Rows)
+	}
+}
+
+// raw_text 兜底：行号 + 原文
+func TestParseRawText(t *testing.T) {
+	sd := parseStatText("raw_text", "/dev/shm/xsa/whatever.stat", "first line\n\nsecond line\n")
+	if sd.Count != 2 {
+		t.Fatalf("rows=%d", sd.Count)
+	}
+	if sd.Rows[0].Name != "line.0" || sd.Rows[0].Fields["raw"] != "first line" {
+		t.Fatalf("行号行: %+v", sd.Rows[0])
+	}
+	if sd.Rows[1].Name != "line.2" {
+		t.Fatalf("空行跳过但保留行号: %+v", sd.Rows[1])
+	}
+}

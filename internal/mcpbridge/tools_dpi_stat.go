@@ -43,6 +43,9 @@ var statKinds = map[string]statKind{
 
 	// —— key: value 逐行 ——
 	"flow":           {file: shmXsa + "flow.stat", cmd: "cat " + shmXsa + "flow.stat | grep all -A 70", mode: "kv"},
+	// wait_flow 场景专用（业务答复 Q2）：concurrent_cnt 在文件 113 行，
+	// `grep all -A 70` 窗口会随文件增长断掉；等流超时走直取
+	"flow_wait": {file: shmXsa + "flow.stat", cmd: "cat " + shmXsa + "flow.stat | grep concurrent_cnt", mode: "kv"},
 	"eu_urlnode":     {file: shmXsa + "eu_urlnode.stat", cmd: "cat " + shmXsa + "eu_urlnode.stat | grep all -A20", mode: "kv"},
 	"eu_restore":     {file: shmXsa + "eu_restore.stat", cmd: "cat " + shmXsa + "eu_restore.stat | grep 'all$' -A30", mode: "kv"},
 	"eu_policy":      {file: shmXsa + "eu_policy.stat", cmd: "cat " + shmXsa + "eu_policy.stat | grep all -A30", mode: "kv"},
@@ -59,6 +62,20 @@ var statKinds = map[string]statKind{
 	"commem":       {file: shmXsa + "commem.stat", cmd: "cat " + shmXsa + "commem.stat | grep all -B1", mode: "block"},
 	"marex":        {mode: "marex", warm: 4 * time.Second},
 	"time_main":    {file: shmXsa + "time_main.stat", mode: "raw"},
+
+	// —— C2 补充（docs/code-review-r2-2026-11-25.md §5.1，格式采自 82 真机）——
+	"tcpsegment":       {file: shmXsa + "tcpsegment.stat", mode: "header"},
+	"ring":             {file: shmXsa + "ring.stat", mode: "header"},
+	"malicious":        {file: shmXsa + "malicious.stat", mode: "header"},
+	"evilblock":        {file: shmXsa + "evilblock.stat", mode: "kv"},
+	"proto_public":     {file: shmXsa + "proto.public.stat", mode: "header"},
+	"mirrorvlan_limit": {file: shmXsa + "mirrorvlan_limit.stat", mode: "mvlimit"},
+	"pcapdump_storage": {file: shmXsa + "pcapdump_storage.stat", mode: "header"},
+	"eu_overseaip":     {file: shmXsa + "eu_overseaip.stat", mode: "kv"},
+	"sysinfo":          {file: shmXsa + "sysinfo.stat", mode: "block"},
+	"ext_xrt":          {file: shmXsa + "ext_xrt.stat", mode: "portkv"},
+	// 任意 .stat 兜底：path 必填，按行号原样返回
+	"raw_text": {mode: "rawtext"},
 }
 
 // marexResource marex 一族靠 resource 区分文件（方案 §4.10.2）。
@@ -73,21 +90,35 @@ var marexResource = map[string]string{
 
 type dpiReadStatIn struct {
 	BaseIn
-	Kind     string `json:"kind" jsonschema:"状态种类：xrt|xrtinfo|port_for_snmp|httpxdr|xdrtxtlog|xdrtxtlog2|eublock|proto_app|flow|eu_urlnode|eu_restore|eu_policy|adms_idc_debug|eu_output|mirrorvlan|pcapdump|uploadfile|msgtask|datarpt|datarpt_conn|commem|marex|time_main"`
+	Kind     string `json:"kind" jsonschema:"状态种类：xrt|xrtinfo|port_for_snmp|httpxdr|xdrtxtlog|xdrtxtlog2|eublock|proto_app|flow|eu_urlnode|eu_restore|eu_policy|adms_idc_debug|eu_output|mirrorvlan|pcapdump|uploadfile|msgtask|datarpt|datarpt_conn|commem|marex|time_main|tcpsegment|ring|malicious|evilblock|proto_public|mirrorvlan_limit|pcapdump_storage|eu_overseaip|sysinfo|ext_xrt|raw_text"`
 	Resource string `json:"resource,omitempty" jsonschema:"仅 kind 为 marex 用：eu_plc | pcapdump | mirr | vpn_block"`
-	Path     string `json:"path,omitempty" jsonschema:"覆盖默认文件路径（缺省取 kind 对应的 /dev/shm/xsa/*.stat）"`
+	Path     string `json:"path,omitempty" jsonschema:"覆盖默认文件路径（缺省取 kind 对应的 /dev/shm/xsa/*.stat）；kind=raw_text 时必填任意 .stat 绝对路径"`
 }
 
 type dpiWaitStatIn struct {
 	BaseIn
-	Kind     string `json:"kind" jsonschema:"状态种类，同 dpi_read_stat"`
+	Kind     string `json:"kind" jsonschema:"状态种类，同 dpi_read_stat（raw_text 除外——兜底无结构化字段，不能等）；flow 等流超时用 flow_wait（concurrent_cnt 直取，不受 grep 窗口限制）"`
 	Resource string `json:"resource,omitempty" jsonschema:"仅 kind 为 marex 用"`
 	Path     string `json:"path,omitempty" jsonschema:"覆盖默认文件路径"`
-	Field    string `json:"field" jsonschema:"要轮询的指标：row 名,或 row.字段名（如 all.fopen_ok）"`
+	Field    string `json:"field" jsonschema:"要轮询的指标：row 名,或 row.字段名（如 all.fopen_ok；detail.all.marex_amt_loss 这类多段也支持）"`
 	Operator string `json:"operator,omitempty" jsonschema:"比较方式：eq（缺省）| ne | gte | lte"`
 	Value    string `json:"value" jsonschema:"目标值（按字符串比较；gte/lte 按数值）"`
 	EveryS   int    `json:"every_s,omitempty" jsonschema:"轮询间隔秒，缺省 2"`
 	WaitS    int    `json:"wait_s,omitempty" jsonschema:"最长等待秒数，缺省 60"`
+}
+
+// dpiCleanStatIn / dpiCleanStatData C3 清空 DPI 状态（对齐 dpi.py:190 clean_stat）。
+type dpiCleanStatIn struct {
+	BaseIn
+	Timeout int `json:"timeout,omitempty" jsonschema:"单轮等流超时秒数，缺省 60"`
+	Rounds  int `json:"rounds,omitempty" jsonschema:"最大重试轮数，缺省 3（对齐 Python）"`
+}
+
+type dpiCleanStatData struct {
+	Cleaned  bool   `json:"cleaned" jsonschema:"true 表示 状态已清空（xrt total==0 且流已超时）"`
+	Rounds   int    `json:"rounds" jsonschema:"实际执行的轮数"`
+	LastRx   string `json:"last_rx" jsonschema:"最后一次采到的 xrt total 收包数"`
+	ElapsedS float64 `json:"elapsed_s" jsonschema:"总耗时秒数"`
 }
 
 type dpiWaitFileIn struct {
@@ -146,8 +177,45 @@ func headerRe(kind, line string) []string {
 		return reXrtHead.FindAllString(line, -1)
 	case "port_for_snmp":
 		return reSnmpHead.FindAllString(line, -1)
+	case "ring":
+		// 列名带连字符（IO-WK fails），\w+ 会拆成 4 段导致整行错位；
+		// 表头与数据行都是多空格分隔，统一按多空白切列才能对齐
+		return splitCols(strings.TrimSpace(line))
+	case "tcpsegment", "pcapdump_storage":
+		// tcpsegment 真机表头 18 列全部单空格分隔（数据行多空格）——
+		// 按单词切正好 18 个列名，与数据 splitCols 的 18 列对齐；
+		// pcapdump_storage 列名无空格，reWord 同样安全
+		return reWord.FindAllString(line, -1)
 	}
 	return reWord.FindAllString(line, -1)
+}
+
+// splitCols 按 2+ 空白切列（ring/tcpsegment 表头列间都是 2+ 空格，Go RE2 不支持
+// 前瞻，直接手写扫描）。
+func splitCols(line string) []string {
+	var out []string
+	start := -1
+	gap := 0
+	for i := 0; i < len(line); i++ {
+		if line[i] == ' ' || line[i] == '\t' {
+			if start >= 0 {
+				gap++
+				if gap == 2 {
+					out = append(out, line[start:i-1])
+					start = -1
+				}
+			}
+			continue
+		}
+		if start < 0 {
+			start = i
+		}
+		gap = 0
+	}
+	if start >= 0 {
+		out = append(out, line[start:])
+	}
+	return out
 }
 
 var reTimeField = regexp.MustCompile(`time[:=](\d{9,})`)
@@ -169,9 +237,15 @@ func parseHeaderZipKind(kind string, lines []string) []StatRow {
 			continue
 		}
 		row := StatRow{Name: fields[0], Fields: map[string]string{}}
+		// 数据列按 splitCols 取（ring/tcpsegment 数据行全多空格；普通 kind
+		// 单空格分隔时 splitCols 退化为整行一块，此时仍用 Fields）
+		dataCols := strings.Fields(line)
+		if c := splitCols(strings.TrimSpace(line)); len(c) > 1 {
+			dataCols = c
+		}
 		for i, h := range head[1:] {
-			if i+1 < len(fields) {
-				row.Fields[h] = fields[i+1]
+			if i < len(dataCols)-1 {
+				row.Fields[h] = dataCols[i+1]
 			}
 		}
 		rows = append(rows, row)
@@ -432,6 +506,98 @@ func splitLines(s string) []string {
 	return strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n")
 }
 
+// parseMirrorvlanLimit mirrorvlan_limit.stat：每 VLAN 一组 "g active limit reject"
+// 表头 + 数据行，行名取 g 编号（0..N）；"per-g flow admission (total):" 段多一列
+// speed，也按表头 zip。缩进的表头/数据行都有前导空白，直接 Fields 切分。
+func parseMirrorvlanLimit(lines []string) []StatRow {
+	rows := []StatRow{}
+	var head []string
+	seg := "total"
+	for _, line := range lines {
+		f := strings.Fields(line)
+		if len(f) == 0 {
+			continue
+		}
+		// 分段标题行（"worktask: 0" / "per-g flow admission (total):"）开新 head；
+		// 首列不是 g 也不是数字的行都视为标题/噪声。数据行首列是 g 编号，
+		// 两段重名（0..N 各一次）→ 行名加段前缀保证可寻址
+		if f[0] != "g" && !isAllDigits(f[0]) {
+			head = nil
+			seg = "total"
+			if strings.HasPrefix(f[0], "worktask:") && len(f) > 1 {
+				seg = f[1]
+			}
+			continue
+		}
+		// 表头行：含 "g" 与 "active"
+		if f[0] == "g" {
+			head = f
+			continue
+		}
+		if head == nil {
+			continue
+		}
+		row := StatRow{Name: seg + "." + f[0], Fields: map[string]string{}}
+		// speed 值带单位（"0 bps"），strings.Fields 会拆成两个 token；
+		// 按多空白切列保住带空格的值
+		cols := f
+		if c := splitCols(strings.TrimSpace(line)); len(c) >= len(head) {
+			cols = c
+		}
+		for i, h := range head[1:] {
+			if i < len(cols)-1 {
+				row.Fields[h] = cols[i+1]
+			}
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// parsePortKV ext_xrt.stat："Key: value" 逐行，按 Port: 行切成一段一行
+// （每块首字段如 0000:00:0b.0 / total 作行名）。重复键（RX errors 出现两次）
+// 后者覆盖前者——与源文件口径一致。
+func parsePortKV(lines []string) []StatRow {
+	rows := []StatRow{}
+	var cur *StatRow
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		if t == "" || t == "==========================================================" {
+			continue
+		}
+		idx := strings.Index(t, ":")
+		if idx < 0 {
+			continue
+		}
+		key, val := strings.TrimSpace(t[:idx]), strings.TrimSpace(t[idx+1:])
+		if key == "Port" && (cur == nil || cur.Name != val) {
+			rows = append(rows, StatRow{Name: val, Fields: map[string]string{}})
+			cur = &rows[len(rows)-1]
+			continue
+		}
+		if cur == nil {
+			continue
+		}
+		cur.Fields[key] = val
+	}
+	return rows
+}
+
+// parseRawText raw_text 兜底：不做结构化，行号 + 原文。
+func parseRawText(lines []string) []StatRow {
+	rows := []StatRow{}
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		rows = append(rows, StatRow{
+			Name:   "line." + strconv.Itoa(i),
+			Fields: map[string]string{"raw": line},
+		})
+	}
+	return rows
+}
+
 // statFromText 按 kind 的模式把文本解析成 StatData。
 func statFromText(kind, file, text string) StatData {
 	lines := splitLines(text)
@@ -449,6 +615,12 @@ func statFromText(kind, file, text string) StatData {
 		rows = parseScope(lines)
 	case "raw":
 		rows = parseTimeMain(lines)
+	case "mvlimit":
+		rows = parseMirrorvlanLimit(lines)
+	case "portkv":
+		rows = parsePortKV(lines)
+	case "rawtext":
+		rows = parseRawText(lines)
 	}
 	if rows == nil {
 		rows = []StatRow{}
@@ -465,6 +637,11 @@ func readStat(c *Client, kind, resource, path string) (StatData, error) {
 	file := spec.file
 	if path != "" {
 		file = path
+	}
+	if kind == "raw_text" {
+		if file == "" {
+			return StatData{}, fmt.Errorf("kind=raw_text 需要 path（任意 .stat 文件的绝对路径）")
+		}
 	}
 	if kind == "marex" {
 		file = path
@@ -550,7 +727,7 @@ func compareValues(actual, want, op string) bool {
 func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 	addTyped(s, ro("dpi_read_stat",
 		"读 DPI 状态文件",
-		"按 kind 读 DPI 状态文件并解析成统一行结构，只读不判定。什么时候用：要看当前值（一次性快照）时用它；要等某个值变化到目标请用 dpi_wait_stat。kind 可选 23 种（见参数说明），如 \"all\"、\"detail\"、\"rule\"。返回 data{kind,file,rows[],count,truncated}，rows 每项含 name 与 fields。"),
+		"按 kind 读 DPI 状态文件并解析成统一行结构，只读不判定。什么时候用：要看当前值（一次性快照）时用它；要等某个值变化到目标请用 dpi_wait_stat。kind 可选 34 种（见参数说明，含 tcpsegment/ring/malicious/evilblock/proto_public/mirrorvlan_limit/pcapdump_storage/eu_overseaip/sysinfo/ext_xrt、flow_wait（concurrent_cnt 直取）与 raw_text 兜底——raw_text 需 path 传任意 .stat 绝对路径，按行号原样返回）。返回 data{kind,file,rows[],count,truncated}，rows 每项含 name 与 fields。"),
 		func(ctx context.Context, a dpiReadStatIn) Envelope[StatData] {
 			// 方案 §7：marex（固定 touch + sleep 4）与 eu_output（grep 后解析）给 30 秒
 			if a.Timeout == 0 && (a.Kind == "marex" || a.Kind == "eu_output") {
@@ -665,6 +842,50 @@ func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 				})
 		})
 
+	addTyped(s, destructive("dpi_clean_stat",
+		"清空 DPI 状态",
+		"执行 /opt/dpi/cmdmsg xsa 1 清空 DPI 统计，等 flow.stat concurrent_cnt 降为 0（流超时），再校验 xrt.stat total 收包为 0；不满足则重新下发并重试，对齐 Python clean_stat（dpi.py:190）的三轮编排。什么时候用：压测/回放前把计数器归零，让新一轮数据不被上一轮污染。返回 data{cleaned,rounds,last_rx,elapsed_s}。"),
+		func(ctx context.Context, a dpiCleanStatIn) Envelope[dpiCleanStatData] {
+			timeout := orDefault(a.Timeout, 60)
+			rounds := orDefault(a.Rounds, 3)
+			return runEnvelope[dpiCleanStatData](b, ctx, a.BaseIn, "dpi_clean_stat",
+				map[string]any{"timeout": timeout, "rounds": rounds}, LkNone, "", false,
+				func(c *Client) (any, error) {
+					start := time.Now()
+					cmd1 := "sudo /opt/dpi/cmdmsg xsa 1"
+					out := dpiCleanStatData{}
+					for i := 1; i <= rounds; i++ {
+						out.Rounds = i
+						// 等流超时（wait_flow_timeout，dpi.py:241）：
+						// concurrent_cnt 直取（Q2 答复），等不到说明清空没生效或还有活流
+						if err := waitFlowTimeout(c, timeout); err != nil {
+							return nil, err // "等待流超时失败" 直接判失败（Python 同语义）
+						}
+						// 校验 xrt total 收包数
+						rxOut, err := shell(c, "cat /dev/shm/xsa/xrt.stat |grep total|awk '{print $4}'")
+						if err != nil {
+							return nil, err
+						}
+						rx := strings.TrimSpace(fmt.Sprint(rxOut["stdout"]))
+						out.LastRx = rx
+						if rx == "0" {
+							out.Cleaned = true
+							out.ElapsedS = time.Since(start).Seconds()
+							return out, nil
+						}
+						// 未归零 → 重新下发清空命令（下发失败立即报错）
+						if res, err := shell(c, cmd1); err != nil {
+							return nil, err
+						} else if code := intOf(res["code"]); code != 0 {
+							return nil, cmdErr(res, fmt.Sprintf("执行 %s 失败", cmd1))
+						}
+						time.Sleep(5 * time.Second)
+					}
+					out.ElapsedS = time.Since(start).Seconds()
+					return out, nil // 轮次用尽未归零：cleaned=false，调用方按需重试
+				})
+		})
+
 	addTyped(s, ro("dpi_check_stalled",
 		"查 DPI 线程卡死",
 		"检查 DPI 线程是否卡死：读取各线程的时间戳，与设备当前时间比对，落后超过 max_lag_s 秒判为卡死。什么时候用：怀疑 DPI 无响应、流量不处理时，先跑这个确认。返回 data{stalled,samples,threshold_s,worst_lag_s,device_now}。"),
@@ -709,6 +930,33 @@ func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 					return out, nil
 				})
 		})
+}
+
+// waitFlowTimeout 等 flow.stat concurrent_cnt 降为 0（dpi.py:241 wait_flow_timeout）。
+// 用 flow_wait kind 的 grep 直取路径（业务答复 Q2），不受 `grep all -A 70` 窗口限制。
+func waitFlowTimeout(c *Client, timeoutS int) error {
+	sd, err := readStat(c, "flow_wait", "", "")
+	if err != nil {
+		return err
+	}
+	v, _ := lookupField(sd, "concurrent_cnt")
+	if v == "0" {
+		return nil
+	}
+	deadline := time.Now().Add(time.Duration(timeoutS) * time.Second)
+	for {
+		time.Sleep(2 * time.Second)
+		if time.Now().After(deadline) {
+			return fmt.Errorf("等待流超时失败，等待时间：%ds（concurrent_cnt=%s）", timeoutS, v)
+		}
+		sd, err = readStat(c, "flow_wait", "", "")
+		if err != nil {
+			return err
+		}
+		if v, _ = lookupField(sd, "concurrent_cnt"); v == "0" {
+			return nil
+		}
+	}
 }
 
 // rowField 取指定行的指定字段。
