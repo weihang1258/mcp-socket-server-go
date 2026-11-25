@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/weihang1258/mcp-socket-server-go/internal/ipdb"
 )
 
 // 15 个 MCP 工具（server.py 逐行契约，设计 §4）+ _run_batch 语义。
@@ -31,6 +33,7 @@ type Bridge struct {
 	// 显式 mcp.proxy 优先，空则回退 /opt/socket/config 的 proxy=。
 	proxyResolved string
 	Cfg           BridgeConfig
+	IPDB          *ipdb.Loader // C1：机房 IP 段库（ip_db_load / ip_lookup / pcap 流联动）
 }
 
 type BridgeConfig struct {
@@ -72,6 +75,7 @@ func Init(cfg BridgeConfig) *Bridge {
 	}
 	schedGlobal = NewScheduler()
 	b := &Bridge{
+		IPDB: ipdb.NewLoader(),
 		Registry:      mustRegistry(cfg.DBPath),
 		Locks:         NewLockManager(),
 		Audit:         mustAudit(cfg.DBPath, cfg.AuditDays),
@@ -338,6 +342,7 @@ func (b *Bridge) RegisterTools(s *mcp.Server) {
 	b.registerDpiPolicyTools(s)
 	b.registerDpiInstallTools(s)
 	b.registerBridgeTools(s)
+	b.registerIPDBTools(s)
 }
 func orDefaultStr(v, def string) string {
 	if v == "" {

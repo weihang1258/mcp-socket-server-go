@@ -968,6 +968,9 @@ func (c *Client) downloadFile(path string) ([]byte, error) {
 	return io.ReadAll(zr)
 }
 
+// DownloadFile ipdb 加载层读设备文件的导出入口（内部走 dt21+dt3 同 Python getfo）。
+func (c *Client) DownloadFile(path string) ([]byte, error) { return c.downloadFile(path) }
+
 // uploadFile dt21 文件名 + dt22 长度 + dt24 写盘（gzip 压缩传输）。
 func (c *Client) uploadFile(path string, content []byte) error {
 	if len(content) == 0 {

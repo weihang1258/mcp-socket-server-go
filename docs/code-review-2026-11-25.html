@@ -1,0 +1,555 @@
+<title>socketstack 代码审查</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+/* 设计基调：工程台账 —— 冷灰纸面、仪器青作强调色，严重度用语义色单独一套；
+   字体取 IBM Plex 家族（信息基础设施文档的惯用体例）：Condensed 做标题、Sans 做正文、Mono 做编号与路径。 */
+:root {
+  --bg: #F2F5F7;
+  --surface: #FFFFFF;
+  --surface-2: #E9EFF3;
+  --ink: #12181D;
+  --ink-2: #48555F;
+  --ink-3: #78868F;
+  --rule: #D5DEE5;
+  --rule-2: #E7EDF1;
+  --accent: #0D6B74;
+  --accent-soft: #DCEDEF;
+  --p1: #A63A2E; --p1-soft: #F7E3DF;
+  --p2: #85570F; --p2-soft: #F8EBD5;
+  --p3: #55636D; --p3-soft: #E7ECF0;
+  color-scheme: light;
+  --font-body: "IBM Plex Sans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-display: "IBM Plex Sans Condensed", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0E1317;
+    --surface: #151C21;
+    --surface-2: #1C252B;
+    --ink: #E4EAEE;
+    --ink-2: #A3B1BB;
+    --ink-3: #74838D;
+    --rule: #263139;
+    --rule-2: #1E272D;
+    --accent: #45B7C2;
+    --accent-soft: #123034;
+    --p1: #E08173; --p1-soft: #3A1F1B;
+    --p2: #D8A85E; --p2-soft: #33270F;
+    --p3: #97A5AF; --p3-soft: #212A31;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0E1317;
+  --surface: #151C21;
+  --surface-2: #1C252B;
+  --ink: #E4EAEE;
+  --ink-2: #A3B1BB;
+  --ink-3: #74838D;
+  --rule: #263139;
+  --rule-2: #1E272D;
+  --accent: #45B7C2;
+  --accent-soft: #123034;
+  --p1: #E08173; --p1-soft: #3A1F1B;
+  --p2: #D8A85E; --p2-soft: #33270F;
+  --p3: #97A5AF; --p3-soft: #212A31;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap {
+  max-width: 1400px;
+  margin-inline: auto;
+  padding-left: max(20px, env(safe-area-inset-left, 0px));
+  padding-right: max(20px, env(safe-area-inset-right, 0px));
+}
+
+/* —— 抬头 —— */
+.mast { border-bottom: 1px solid var(--rule); background: var(--surface); }
+.mast .wrap { padding-block: 40px 28px; }
+.kicker {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: clamp(30px, 4.6vw, 46px);
+  line-height: 1.1;
+  letter-spacing: -0.015em;
+  margin: 12px 0 0;
+  text-wrap: balance;
+}
+.lede {
+  margin: 14px 0 0;
+  max-width: 62ch;
+  font-size: 16px;
+  color: var(--ink-2);
+  text-wrap: pretty;
+}
+.tallies {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  margin-top: 30px;
+  border-top: 1px solid var(--rule-2);
+  border-bottom: 1px solid var(--rule-2);
+}
+.tally {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-block: 14px;
+  padding-right: 18px;
+  flex-wrap: wrap;
+}
+.tally + .tally { border-left: 1px solid var(--rule-2); padding-left: 18px; }
+.tally b {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 30px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.tally .tl { font-size: 13px; color: var(--ink-2); }
+
+.sev {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.sev.p1 { background: var(--p1-soft); color: var(--p1); }
+.sev.p2 { background: var(--p2-soft); color: var(--p2); }
+.sev.p3 { background: var(--p3-soft); color: var(--p3); }
+
+/* —— 分组 —— */
+main .wrap { padding-block: 8px 56px; }
+.group { margin-top: 44px; }
+.group h2 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 24px;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-wrap: balance;
+}
+.group-note {
+  margin: 10px 0 18px;
+  max-width: 74ch;
+  font-size: 14px;
+  color: var(--ink-2);
+  text-wrap: pretty;
+}
+
+/* —— 审查表 —— */
+.sheet {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  overflow: hidden;
+  --sev: var(--p3);
+}
+.sheet thead th {
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  background: var(--surface-2);
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+.sheet tbody tr { border-bottom: 1px solid var(--rule-2); }
+.sheet tbody tr:last-child { border-bottom: 0; }
+.sheet td {
+  vertical-align: top;
+  padding: 16px;
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+.sheet td:first-child { border-left: 3px solid var(--sev); }
+.sheet .loc { width: 190px; }
+.sheet .loc .id {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--sev);
+  letter-spacing: 0.02em;
+}
+.sheet .loc .path {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-3);
+  word-break: break-all;
+  line-height: 1.45;
+  margin-top: 3px;
+}
+.sheet .problem { width: 30%; }
+.sheet .impact { width: 30%; }
+.sheet .fix { width: 32%; }
+.sheet td p { margin: 0; text-wrap: pretty; }
+.sheet .fix p { color: var(--ink); }
+.sheet .impact p { color: var(--ink-2); }
+
+/* —— 收尾 —— */
+.batches {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 6px;
+}
+.batch {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-top: 3px solid var(--accent);
+  border-radius: 4px;
+  padding: 18px 18px 20px;
+}
+.batch .tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.batch h3 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 18px;
+  margin: 6px 0 10px;
+  line-height: 1.3;
+}
+.batch ul {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13.5px;
+  color: var(--ink-2);
+  line-height: 1.7;
+}
+.caveat {
+  margin-top: 34px;
+  padding: 16px 18px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0 4px 4px 0;
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+.caveat b {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+.caveat p { margin: 0; text-wrap: pretty; }
+
+/* —— 窄屏：表格塌成逐条卡片 —— */
+@media (max-width: 900px) {
+  .sheet, .sheet tbody, .sheet tbody tr, .sheet td { display: block; width: 100%; }
+  .sheet thead { display: none; }
+  .sheet { background: transparent; border: 0; border-radius: 0; overflow: visible; }
+  .sheet tbody tr {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--sev);
+    border-radius: 0 4px 4px 0;
+    margin-bottom: 12px;
+    padding: 4px 16px 16px;
+  }
+  .sheet tbody tr:last-child { border-bottom: 1px solid var(--rule); margin-bottom: 0; }
+  .sheet td { padding: 12px 0 0; }
+  .sheet td:first-child { border-left: 0; }
+  .sheet td::before {
+    content: attr(data-label);
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin-bottom: 4px;
+  }
+  .sheet td:first-child::before { display: none; }
+  .sheet td:first-child { padding-top: 14px; }
+  .sheet .loc .path { display: inline; margin-left: 8px; }
+  .batches { grid-template-columns: 1fr; }
+  .tallies { grid-template-columns: 1fr; }
+  .tally + .tally { border-left: 0; border-top: 1px solid var(--rule-2); padding-left: 0; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .group { animation: rise 0.5s ease-out both; }
+  @keyframes rise { from { opacity: 0.001; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+}
+</style>
+
+<header class="mast">
+  <div class="wrap">
+    <div class="kicker">v1.9.26 基线 · 2026-11-25 · 静态审阅 27k 行</div>
+    <h1>socketstack 代码审查</h1>
+    <p class="lede">22 项发现。六项会在真机上出事，七项在特定条件下触发，九项只是噪音。每项都给出：它在做什么、真出问题时是什么样子、以及我建议怎么改。</p>
+    <div class="tallies">
+      <div class="tally"><span class="sev p1">P1</span><b>6</b><span class="tl">阻断级 · 真机出事</span></div>
+      <div class="tally"><span class="sev p2">P2</span><b>7</b><span class="tl">隐患 · 条件触发</span></div>
+      <div class="tally"><span class="sev p3">P3</span><b>9</b><span class="tl">清理 · 不影响功能</span></div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+
+    <section class="group" aria-labelledby="g-p1">
+      <h2 id="g-p1"><span class="sev p1">P1</span> 阻断级：真机上会出事</h2>
+      <p class="group-note">这六项不是理论风险。其中两项的后果已经在 82 上直接观察到：进程内存常年 1GB，以及一台单 CPU 的机器被算成「应该绑到 CPU7」。</p>
+
+      <table class="sheet" style="--sev: var(--p1)">
+        <thead>
+          <tr><th scope="col">编号 / 位置</th><th scope="col">问题（白话）</th><th scope="col">影响</th><th scope="col">最优方案</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P1-1</span><span class="path">agent/server.go:58</span></td>
+            <td class="problem" data-label="问题"><p>代理端收一帧时，帧头里写着多长就按多长收，不核对上限。</p></td>
+            <td class="impact" data-label="影响"><p>内存跟着对方报的数字涨。82 上这个进程平时就占 1GB，再撞上一次就是被系统杀掉，同一台机器上的所有连接一起断。</p></td>
+            <td class="fix" data-label="最优方案"><p>帧头加一道 256MB 上限，超了直接断连并记日志。别指望 recover 兜住——OOM 是进程级的，recover 管不到。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P1-2</span><span class="path">agent/capture.go:484</span></td>
+            <td class="problem" data-label="问题"><p>停抓包后要重排时间戳：把整个 pcap 读进内存，再拼一份完整副本写盘。</p></td>
+            <td class="impact" data-label="影响"><p>峰值内存约等于文件大小的两倍。抓五分钟出一个 1GB 的文件，这一下要 2.1GB；设备内存本来就紧。</p></td>
+            <td class="fix" data-label="最优方案"><p>改成两遍流式：第一遍只记时间戳和偏移，第二遍按偏移顺序抄写。退一步，先把缓冲区预分配好，别逐包 append。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P1-3</span><span class="path">agent/capture.go:92-99</span></td>
+            <td class="problem" data-label="问题"><p>同一路径已有抓包在跑时，新请求会先停旧的；但不管旧的停没停成功，登记表都删掉。</p></td>
+            <td class="impact" data-label="影响"><p>旧线程还活着却再也停不掉，新的抓包写同一个文件，两个线程同时写——pcap 交错损坏。拿去对比就是全错，而且看不出原因。</p></td>
+            <td class="fix" data-label="最优方案"><p>只有确认停掉才删登记。没停掉就直接返回失败，不允许在同一路径开新的。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P1-4</span><span class="path">agent/capture.go:256 / 272 / 564</span></td>
+            <td class="problem" data-label="问题"><p>三条收尾路径都能关到同一个 socket：网卡 down 时、正常收尾时、停止超时强制关时。</p></td>
+            <td class="impact" data-label="影响"><p>第二次关闭时 fd 号可能已被别的连接复用，等于把别人的连接关掉。AF_PACKET 关闭还有约 28ms 的内核同步开销。</p></td>
+            <td class="fix" data-label="最优方案"><p>给句柄加 sync.Once——和停止状态那套同一个写法。一次关，之后都是空操作。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P1-5</span><span class="path">bridge/protocol.go:908</span></td>
+            <td class="problem" data-label="问题"><p>桥这边取文件，压缩后的长度超过 1GB 直接报「下载长度异常」。另外解压之后不设上限。</p></td>
+            <td class="impact" data-label="影响"><p>367MB 的 pcap 压完约 120MB，还有余量；但两个 G 级以上的原始文件就撞线，报错文案只说「长度异常」，看不出该换通道。解压不设限则意味着一个很小的压缩包能撑出几十 GB。</p></td>
+            <td class="fix" data-label="最优方案"><p>上限改成配置项（默认 4GB），错误里直接写「改用 :9001 分段下载」。解压侧同步加界。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P1-6</span><span class="path">agent/pcapflow.go:79</span></td>
+            <td class="problem" data-label="问题"><p>提五元组时，目录里所有 pcap 全部解析、全部累积进内存、全部序列化传回桥，桥这边才截到 1000 条。</p></td>
+            <td class="impact" data-label="影响"><p>目录一大就 OOM 或者撞 30 秒超时；算完的 99% 在桥侧被直接丢掉，白算。</p></td>
+            <td class="fix" data-label="最优方案"><p>靶机侧设 20 万条上限，达到就早停，回包带 truncated。桥侧照旧截到 1000。</p></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="group" aria-labelledby="g-p2">
+      <h2 id="g-p2"><span class="sev p2">P2</span> 隐患：特定条件下触发</h2>
+      <p class="group-note">平时不响，出事时又很难从现象反推原因。P2-1 就是上次 pcapdump 卡死排查绕远路的那类问题。</p>
+
+      <table class="sheet" style="--sev: var(--p2)">
+        <thead>
+          <tr><th scope="col">编号 / 位置</th><th scope="col">问题（白话）</th><th scope="col">影响</th><th scope="col">最优方案</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P2-1</span><span class="path">agent/httpfile.go:365</span></td>
+            <td class="problem" data-label="问题"><p>往客户端发文件的返回值被忽略了。</p></td>
+            <td class="impact" data-label="影响"><p>客户端中途断、磁盘读错，服务端日志一片空白。上次排查 pcapdump 卡死，正是因为日志什么都没有，只能从别处绕。</p></td>
+            <td class="fix" data-label="最优方案"><p>检查返回值，失败至少记一条日志：路径 + 已发字节数 + 错误原因。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P2-2</span><span class="path">agent/httpfile.go:443</span></td>
+            <td class="problem" data-label="问题"><p>上传写完不检查关闭是否成功，直接把临时文件改名成目标文件。</p></td>
+            <td class="impact" data-label="影响"><p>磁盘满时数据可能还没刷完，改名却成功了——半截文件被当完整文件收下，调用方还收到 ok:true。下次对比拿这份残包当基准。</p></td>
+            <td class="fix" data-label="最优方案"><p>检查关闭错误；失败就删掉临时文件、返回 500。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P2-3</span><span class="path">agent/capture.go:691</span></td>
+            <td class="problem" data-label="问题"><p>网卡绑到哪个 CPU 记下来就再也不删。</p></td>
+            <td class="impact" data-label="影响"><p>网卡删了重建，旧绑定还占着；网卡 A 拔掉后它占的 CPU 不会让给 B。影响面受网卡数量限制，但语义是错的。</p></td>
+            <td class="fix" data-label="最优方案"><p>抓包结束时按引用计数释放，同一网卡多路径抓包也不冲突。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P2-4</span><span class="path">agent/capture.go:773 / 787</span></td>
+            <td class="problem" data-label="问题"><p>按 /sys 里的目录个数算机器有几个 CPU，不看当前进程实际能用哪几个。</p></td>
+            <td class="impact" data-label="影响"><p>82 实测只有 cpu0 可用（nproc=1），代码却算出 CPU7 写进中断亲和——内核拒绝或静默无效，日志还打「已绑定到 CPU7」，按日志排查会被带歪。</p></td>
+            <td class="fix" data-label="最优方案"><p>改用 SchedGetaffinity 拿真正可用的 CPU 集合，只在集合里挑。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P2-5</span><span class="path">bridge/dpi_ops.go:702 · bridge/tools.go:399</span></td>
+            <td class="problem" data-label="问题"><p>同一模块里两套版本比较：一套按点和横线切、补零到 7 段、带字母权重；另一套只认 1-4 段纯数字、按前缀比。</p></td>
+            <td class="impact" data-label="影响"><p>遇到 1.9.26-rc1 这类字符串，升级判断和兼容判断可能得出相反结论。</p></td>
+            <td class="fix" data-label="最优方案"><p>合成一套，保留完整语义；兼容判断改成调用同一个函数。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P2-6</span><span class="path">bridge/bridge.go:24</span></td>
+            <td class="problem" data-label="问题"><p>代码里定义了「文件读写」这一档锁，实际 file_get / file_put 全走无锁。</p></td>
+            <td class="impact" data-label="影响"><p>两个人同时往同一个远端路径上传，后者覆盖前者，谁都没提示。</p></td>
+            <td class="fix" data-label="最优方案"><p>按远端路径加锁——和抓包那套按 path 加锁同一个思路，keyed 锁。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P2-7</span><span class="path">bridge/contract.go:126</span></td>
+            <td class="problem" data-label="问题"><p>五元组提取的默认超时只给 30 秒。</p></td>
+            <td class="impact" data-label="影响"><p>大目录必然超时，错误还表现为「超时」而不是「目录太大」，现场容易误判成网络问题。</p></td>
+            <td class="fix" data-label="最优方案"><p>默认提到 120 秒，工具描述里写明：大目录请按用例目录分次提取。</p></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="group" aria-labelledby="g-p3">
+      <h2 id="g-p3"><span class="sev p3">P3</span> 清理：不影响功能</h2>
+      <p class="group-note">不修也不会坏，但每一项都在消耗下次读代码的人的注意力，或者白白多占一份内存。</p>
+
+      <table class="sheet" style="--sev: var(--p3)">
+        <thead>
+          <tr><th scope="col">编号 / 位置</th><th scope="col">是什么</th><th scope="col">为什么该清</th><th scope="col">怎么清</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P3-1</span><span class="path">bridge/tools.go:360 · 385</span></td>
+            <td class="problem" data-label="是什么"><p>mergeMap 和 renameField 两个工具函数，全仓零调用。</p></td>
+            <td class="impact" data-label="为什么该清"><p>读代码的人会以为它们在用，多花时间追一遍调用链。</p></td>
+            <td class="fix" data-label="怎么清"><p>直接删。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P3-2</span><span class="path">agent/afpacket_linux.go:177 · bridge/tools.go:430</span></td>
+            <td class="problem" data-label="是什么"><p>syscallReadRO 只有声明没有调用，下面靠 var _ = os.Geteuid 充数；tools.go 同样用 var _ = os.Getenv 只为保住 import。</p></td>
+            <td class="impact" data-label="为什么该清"><p>注释写着「供 setsockopt 使用」，实际没人用，注释本身在误导。</p></td>
+            <td class="fix" data-label="怎么清"><p>删占位符和对应 import，注释一并去掉。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P3-3</span><span class="path">bridge/dpi_ops.go:28</span></td>
+            <td class="problem" data-label="是什么"><p>函数叫 readFileB64，实现里根本没有 base64——它是 dt3 下载后转成字符串。</p></td>
+            <td class="impact" data-label="为什么该清"><p>名字骗人。下次有人以为拿到的已经是 base64，去解码，就会踩坑。</p></td>
+            <td class="fix" data-label="怎么清"><p>改名 readFileText。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P3-4</span><span class="path">bridge/protocol.go:211 · 600 · 915</span></td>
+            <td class="problem" data-label="是什么"><p>解压前用 strings.NewReader(string(gz))，把字节流转成字符串再转回流，等于整份复制一遍。</p></td>
+            <td class="impact" data-label="为什么该清"><p>大文件上这是白白多出一份完整拷贝的内存峰值。</p></td>
+            <td class="fix" data-label="怎么清"><p>改成 bytes.NewReader(gz)。三处一起换。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P3-5</span><span class="path">bridge/protocol.go:927</span></td>
+            <td class="problem" data-label="是什么"><p>上传路径先用 strings.Builder 收压缩结果，再转成 []byte(buf.String())，同一份内容存了三份。</p></td>
+            <td class="impact" data-label="为什么该清"><p>上传大文件时内存放大，和上面那条同源。</p></td>
+            <td class="fix" data-label="怎么清"><p>压缩直接写进 bytes.Buffer，一次就位。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P3-6</span><span class="path">bridge/protocol.go:919</span></td>
+            <td class="problem" data-label="是什么"><p>解压之后 io.ReadAll(zr) 不设界。</p></td>
+            <td class="impact" data-label="为什么该清"><p>和 P1-5 同源：一个很小的压缩包能撑出任意大的内存。</p></td>
+            <td class="fix" data-label="怎么清"><p>换成带上限的读取，超限即报错。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P3-7</span><span class="path">agent/handlers.go:31</span></td>
+            <td class="problem" data-label="是什么"><p>先赋 fp := ""，紧接着就被真值覆盖。</p></td>
+            <td class="impact" data-label="为什么该清"><p>纯冗余，读的时候要多想一秒「这个空串是干嘛的」。</p></td>
+            <td class="fix" data-label="怎么清"><p>合并成一行。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P3-8</span><span class="path">bridge/bridge.go:33-43</span></td>
+            <td class="problem" data-label="是什么"><p>Lk.String() 把六档锁都映射成字符串，但 LkNone 落到 default "none"，和 LkFileIO 那一档从未被任何工具用过是同一起头。</p></td>
+            <td class="impact" data-label="为什么该清"><p>配合 P2-6 一起看：这一档锁的存在本身就说明设计意图没落地。</p></td>
+            <td class="fix" data-label="怎么清"><p>修完 P2-6 后就自然用上了，不用单独处理。</p></td>
+          </tr>
+          <tr>
+            <td class="loc" data-label="位置"><span class="id">P3-9</span><span class="path">agent/server.go:58</span></td>
+            <td class="problem" data-label="是什么"><p>dataLen 是 int32，客户端传负数或超大值时没有额外的语义校验，全靠后面的长度比较兜。</p></td>
+            <td class="impact" data-label="为什么该清"><p>与 P1-1 同一个修复就能覆盖，列在这里只是提醒别只加上限不验符号。</p></td>
+            <td class="fix" data-label="怎么清"><p>和 P1-1 一起做：负值直接断连。</p></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="group" aria-labelledby="g-batch">
+      <h2 id="g-batch">建议的修复批次</h2>
+      <p class="group-note">按「出事概率 × 修复成本」排。第一批三项都是几十行以内的改动，不自测就能看出效果。</p>
+      <div class="batches">
+        <div class="batch">
+          <div class="tag">第一批</div>
+          <h3>先堵住会杀死进程的</h3>
+          <ul>
+            <li>P1-1 帧长上限</li>
+            <li>P1-3 停止失败不删登记</li>
+            <li>P1-4 句柄关闭幂等</li>
+            <li>P1-6 五元组条目上限</li>
+          </ul>
+        </div>
+        <div class="batch">
+          <div class="tag">第二批</div>
+          <h3>让故障可诊断</h3>
+          <ul>
+            <li>P2-1 下载错误记日志</li>
+            <li>P2-2 关闭错误检查</li>
+            <li>P2-4 CPU 可用集合</li>
+            <li>P2-5 合并版本比较</li>
+            <li>P2-6 文件锁落地</li>
+          </ul>
+        </div>
+        <div class="batch">
+          <div class="tag">第三批</div>
+          <h3>降内存、去噪音</h3>
+          <ul>
+            <li>P1-2 排序流式化</li>
+            <li>P1-5 下载上限可配</li>
+            <li>P3-1 至 P3-7 清理</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="caveat">
+        <b>审阅范围</b>
+        <p>replayer.go（798 行）只做了结构扫描，没逐函数审；boce 拨测那组（chromium 相关）整个没看；cmd/socketstack 只看了 install 和 status 两段。除 P1-1 的内存占用与 P2-4 的单 CPU 外，其余结论都来自代码阅读，没有跑压测验证。</p>
+      </div>
+    </section>
+
+  </div>
+</main>

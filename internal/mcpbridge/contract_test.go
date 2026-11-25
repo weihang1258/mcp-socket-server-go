@@ -30,8 +30,8 @@ func TestToolContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Tools) != 45 {
-		t.Fatalf("want 45 tools, got %d", len(list.Tools))
+	if len(list.Tools) != 47 {
+		t.Fatalf("want 47 tools, got %d", len(list.Tools))
 	}
 	got := map[string]bool{}
 	for _, tl := range list.Tools {
@@ -139,6 +139,7 @@ var planDanger = map[string]string{
 	"listen_start": DangerWrite, "listen_clean": DangerWrite, "listen_save": DangerWrite,
 	"listen_fetch": DangerRead, "listen_stop": DangerWrite,
 	"pcap_extract_flows": DangerRead,
+	"ip_db_load": DangerWrite, "ip_lookup": DangerRead,
 	"dpi_get_info":       DangerRead, "dpi_get_config": DangerRead, "dpi_apply_config": DangerDestructive,
 	"dpi_service": DangerDestructive, "dpi_agent_service": DangerDestructive, "dpi_switch_mode": DangerDestructive,
 	"dpi_read_stat": DangerRead, "dpi_wait_stat": DangerRead, "dpi_wait_file": DangerRead, "dpi_check_stalled": DangerRead,

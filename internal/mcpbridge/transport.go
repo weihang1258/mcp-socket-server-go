@@ -26,7 +26,7 @@ const ServerInstructions = `本服务用于操作**远程主机**（也称靶机
 远端执行命令、传文件、抓包分析、流量回放、DPI 设备管理。所有操作发生在被连接的那台
 机器上，不是运行本客户端的那台。
 
-【能力总览（11 类 45 个工具）】
+【能力总览（12 类 47 个工具）】
 1. 主机登记：target_list（列出已登记）、target_add（登记新主机，会先探活）、target_remove（移除）。
 2. 远程命令：shell_exec（在远端执行任意命令，返回 code/stdout/stderr）。
 3. 文件传输：file_get（远端下载到本地）、file_put（本地上传到远端）、file_stat（查存在性/大小）、
@@ -39,7 +39,9 @@ const ServerInstructions = `本服务用于操作**远程主机**（也称靶机
    listen_clean（清空）、listen_stop。
 9. 拨测验证：probe_visit（用远端浏览器访问 URL，判断封堵/重定向是否生效）。
 10. 服务端自身：bridge_version（查远端 socket_server 版本）、bridge_upgrade（升级它）。
-11. DPI 设备（深度包检测/防火墙类设备，18 个工具）：dpi_get_info（版本/模式/PCI）、dpi_service（启停主程序）、
+11. 机房 IP 段库（2 个工具）：ip_db_load（从靶机读 ipsegs 文件建内存库）、
+    ip_lookup（判定 (源IP,目的IP) 的四态方向 internal/inbound/outbound/external）。
+12. DPI 设备（深度包检测/防火墙类设备，18 个工具）：dpi_get_info（版本/模式/PCI）、dpi_service（启停主程序）、
     dpi_agent_service（启停升级 agent）、dpi_switch_mode（切工作模式）、dpi_apply_config（改配置并重启）、
     dpi_get_config、dpi_read_stat（读状态文件）、dpi_wait_stat（等指标达标）、dpi_wait_file（等文件写完）、
     dpi_check_stalled（查线程卡死）、dpi_policy_get（读策略）、dpi_policy_put（下发策略）、
@@ -54,6 +56,7 @@ const ServerInstructions = `本服务用于操作**远程主机**（也称靶机
 上传到远端 / 下载回来 / 传到靶机 / 取回文件 / 远端路径 / 远端目录；
 DPI / 防火墙 / 策略下发 / 封堵 / 重定向 / 模式切换 / 安装固件 / 升级设备 / 设备备份；
 拨测 / 验证封堵 / 访问某 URL 看通不通；
+IP 库 / 机房 IP 段 / ipsegs / 方向判定 / 入向 / 出向 / 内外判定；
 远端执行命令 / 在靶机上跑 / 远程 shell。
 
 【典型调用序列】

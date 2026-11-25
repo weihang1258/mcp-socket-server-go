@@ -49,11 +49,11 @@
 
 | # | 项 | 状态 |
 |---|---|---|
-| C1 | **IP 库 + 方向判定** | 设计定稿（design 文档第九节修订版：paths 直给、按文件建库、宽容解析器、0 协议改动，~400 行+300 测试）。Q4 已答复不映射 darea。**待实现** |
+| C1 | **IP 库 + 方向判定** | ✅已完成（2026-11-25）：internal/ipdb 三文件 + tools_ipdb.go 两工具（ip_db_load/ip_lookup），47 工具；82 真机验收通过——默认库 9 段/53 前缀，四态判定全对，第二独立库互不干扰，sha 未变跳过重建，变更后重载判定跟随。部署 1.9.27-ipdb |
 | C2 | stat 覆盖 23/76：raw_text 兜底 kind + 10 个高价值结构化 kind（tcpsegment/ring/malicious/evilblock/proto_public/mirrorvlan_limit/pcapdump_storage/eu_overseaip/sysinfo/ext_xrt） | 待实现 |
 | C3 | dpi_clean_stat 未实现（cmdmsg xsa 1 + wait_flow_timeout + xrt total==0 三轮编排，dpi.py:190） | 待实现（编排可复用 dpi_wait_stat） |
 | C4 | dpi_wait_stat 的 flow 等待路径改 `grep concurrent_cnt` 直取（Q2 答复，摆脱 -A70 窗口依赖） | 待实现（一处小改，待拍板） |
-| C5 | pcap_flow_extract 结果补方向字段（C1 的联动落点） | 依赖 C1 |
+| C5 | pcap_flow_extract 结果补方向字段（C1 的联动落点） | ✅已完成（2026-11-25，随 C1）：pcap_extract_flows 每条流附加 src_ip_in/dest_ip_in/direction（默认库未建库则省略）；82 真机验证 outbound/external 正确 |
 
 ## D. 业务答复（已全部完成）
 
@@ -105,4 +105,4 @@ Q5 VLAN 包 force_ip 应生效（→A3 按回归修）。
 - A（必修）13 项、B（应修）16 项、C（功能）5 项、G（增补）1 项待修。
 - E（不修）5 类有明确理由。
 - D（业务答复）全部完成。
-- 台账收口：**A 批（含 A1+A2 P0）、B 批、G1 已全部完成（commits d97815e/b9900f5/a5c9c7a，2026-11-25）。剩余：C1 IP 库 → C2/C3/C4 stat 缺口 → 全部完成后发版 v1.9.28。**
+- 台账收口：**A 批（含 A1+A2 P0）、B 批、G1、C1+C5（IP 库）已全部完成（commits d97815e/b9900f5/a5c9c7a，2026-11-25）。剩余：C2/C3/C4 stat 缺口 → 全部完成后发版 v1.9.28。**

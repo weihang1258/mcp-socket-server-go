@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/netip"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -68,6 +69,13 @@ type listenFetchIn struct {
 type pcapFlowsIn struct {
 	BaseIn
 	PcapDir string `json:"pcap_dir" jsonschema:"靶机上的 pcap 目录绝对路径"`
+}
+
+// flowDirection 单条流的 IP 库方向附加字段（ip_db_load 未建库时为空串）。
+type flowDirection struct {
+	SrcIpIn   bool   `json:"src_ip_in"`
+	DestIpIn  bool   `json:"dest_ip_in"`
+	Direction string `json:"direction" jsonschema:"internal|inbound|outbound|external（相对 ip_db_load 默认库）"`
 }
 
 // ---- 出参 ----
@@ -418,7 +426,7 @@ func (b *Bridge) registerListenTools(s *mcp.Server) {
 func (b *Bridge) registerPcapTools(s *mcp.Server) {
 	addTyped(s, ro("pcap_extract_flows",
 		"从 pcap 提五元组流",
-		"从靶机 pcap 目录直接提取五元组流，不下载 pcap 文件。什么时候用：只要流统计、查误封，不需要 pcap 原件时，比 file_get 下载后本地解析快得多。pcap_dir 填靶机上的目录路径。返回流数统计，最多 1000 条，truncated=true 表示已截断。"),
+		"从靶机 pcap 目录直接提取五元组流，不下载 pcap 文件。什么时候用：只要流统计、查误封，不需要 pcap 原件时，比 file_get 下载后本地解析快得多。pcap_dir 填靶机上的目录路径。已 ip_db_load 建库时每条流附加 src_ip_in/dest_ip_in/direction（相对默认库），未建库则省略。返回流数统计，最多 1000 条，truncated=true 表示已截断。"),
 		func(ctx context.Context, a pcapFlowsIn) Envelope[pcapFlowsData] {
 			return runEnvelope[pcapFlowsData](b, ctx, a.BaseIn, "pcap_extract_flows",
 				map[string]any{"pcap_dir": a.PcapDir}, LkNone, "", true, func(c *Client) (any, error) {
@@ -434,6 +442,24 @@ func (b *Bridge) registerPcapTools(s *mcp.Server) {
 					if total > 1000 {
 						flows = flows[:1000]
 						truncated = true
+					}
+					// S4：默认库已建库时给每条流补方向；未建库静默跳过（方向只是附加字段）
+					snap := b.IPDB.Manager().Get(ipdbDefaultPath)
+					if snap != nil {
+						for _, f := range flows {
+							m, ok := f.(map[string]any)
+							if !ok {
+								continue
+							}
+							src, err1 := netip.ParseAddr(fmt.Sprint(m["srcIp"]))
+							dst, err2 := netip.ParseAddr(fmt.Sprint(m["destIp"]))
+							if err1 != nil || err2 != nil {
+								continue
+							}
+							m["src_ip_in"] = snap.Contains(src)
+							m["dest_ip_in"] = snap.Contains(dst)
+							m["direction"] = directionOf(m["src_ip_in"].(bool), m["dest_ip_in"].(bool))
+						}
 					}
 					return pcapFlowsData{Flows: flows, Total: total, Truncated: truncated}, nil
 				})
