@@ -944,7 +944,20 @@ func (c *Client) uploadFile(path string, content []byte) error {
 	if _, err := c.recvUntilTimeout(300 * time.Millisecond); err != nil {
 		return err
 	}
-	if err := c.send(24, compressed); err != nil {
+	// 第 3 步是裸帧 [4B len][content]（Python putfo：struct.pack("i", len(msg))+msg，
+	// 无 datatype 字节）。send 会多出 4B 帧头，agent 按 bin 长度校验报
+	// 「接收字节数大于原始文件字节数」并断连——真机 82 实测。
+	if err := c.sendRaw(compressed); err != nil {
+		return err
+	}
+	// 内容收满 agent 回 "23 ok"（server.go:128，bin 模式至此结束）
+	if _, err := c.recvUntilTimeout(300 * time.Millisecond); err != nil {
+		return err
+	}
+	// 第 4 步：帧化 dt24（空 payload）触发 agent 写盘（handleDT24）→ "24 ok"。
+	// Python putfo 同序：sendall(pack("i",4)+pack("i",24)) → recv。漏了这步
+	// 内容只停在 agent 内存缓冲，文件不落盘且无任何报错。
+	if err := c.send(24, nil); err != nil {
 		return err
 	}
 	_, err := c.recvUntilTimeout(300 * time.Millisecond)

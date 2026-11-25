@@ -566,3 +566,8 @@ func TestDialErrTextKinds(t *testing.T) {
 		}
 	}
 }
+
+
+func mustPortOf(ln net.Listener) int {
+	return portOf(ln.Addr().String())
+}

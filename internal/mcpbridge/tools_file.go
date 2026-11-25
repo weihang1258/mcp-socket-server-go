@@ -707,6 +707,10 @@ func httpUpload(host string, port int, localPath, remotePath string, timeoutSec 
 	if err != nil {
 		return 0, "", err
 	}
+	// agent 侧要求 Content-Length（Python http_file.py:289-293：length<=0 判
+	// "empty body" 回 400）。io.Pipe 让 Go 走 chunked——head/tail 定长、文件大小
+	// 事先已知，直接预算总长度，流式不变。
+	req.ContentLength = int64(len(head)) + fi.Size() + int64(len("\r\n--"+boundary+"--\r\n"))
 	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
 	resp, err := httpClient(timeoutSec, "").Do(req)
 	if err != nil {
