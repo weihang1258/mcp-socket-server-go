@@ -36,6 +36,8 @@ func argvCmd(argv []string) *exec.Cmd {
 }
 
 // stripSudoPrefix root 时剥裸 "sudo "（带 sudo 自身选项或空命令不剥，对齐 netutils）。
+// 调用方保证 euid==0 时才剥（评审 N8：判定在调用方 execCmd；此处不重复判，
+// 非 root 场景剥 sudo 反而改变语义——sudo 才是用户显式意图）。
 func stripSudoPrefix(s string) string {
 	t := strings.TrimSpace(s)
 	if !strings.HasPrefix(t, "sudo ") && !strings.HasPrefix(t, "sudo\t") {
@@ -50,7 +52,7 @@ func stripSudoPrefix(s string) string {
 
 // cleanEnv 移除 LD_LIBRARY_PATH（对齐 netutils._clean_subprocess_env 的通用部分）。
 func cleanEnv(environ []string) []string {
-	out := environ[:0]
+	out := make([]string, 0, len(environ)) // 不复用调用方底层数组（评审 B12）：签名是纯函数语义
 	for _, kv := range environ {
 		if strings.HasPrefix(kv, "LD_LIBRARY_PATH=") {
 			continue

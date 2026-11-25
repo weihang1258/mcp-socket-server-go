@@ -209,7 +209,7 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 		"在靶机递归创建目录。什么时候用：上传文件或解压前要确保目标目录存在时。目录已存在时设备会返回失败（Python os.makedirs 语义，不幂等）——需要幂等请先用 file_stat 判断。path 填靶机绝对路径。"),
 		func(ctx context.Context, a filePathIn) Envelope[fileOpData] {
 			return runEnvelope[fileOpData](b, ctx, a.BaseIn, "file_mkdir", map[string]any{"path": a.Path},
-				LkNone, "", false, func(c *Client) (any, error) {
+				LkFileIO, "", false, func(c *Client) (any, error) {
 					return fileOpData{OK: true, Path: a.Path}, c.Mkdir(a.Path)
 				})
 		})
@@ -230,7 +230,7 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 			}
 			cmd := "rm " + flags + " " + shQuote(a.Path)
 			return runEnvelope[fileOpData](b, ctx, a.BaseIn, "file_remove", map[string]any{"path": a.Path},
-				LkNone, "", false, func(c *Client) (any, error) {
+				LkFileIO, "", false, func(c *Client) (any, error) {
 					out, err := shell(c, cmd)
 					if err != nil {
 						return nil, err
@@ -274,7 +274,7 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 				return allFailedEnvelope[FileData](a.Targets, "桥本地文件不存在: "+a.LocalPath, ErrBusiness)
 			}
 			return runEnvelope[FileData](b, ctx, a.BaseIn, "file_put",
-				map[string]any{"local_path": a.LocalPath, "remote_path": a.RemotePath}, LkNone, "", false,
+				map[string]any{"local_path": a.LocalPath, "remote_path": a.RemotePath}, LkFileIO, "", false,
 				func(c *Client) (any, error) {
 					n, sum, err := httpUpload(c.Host, orDefault(a.HTTPPort, 9001), a.LocalPath, a.RemotePath,
 						timeoutFor(a.BaseIn, "file_put"))
@@ -296,7 +296,7 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 			}
 			outdir := a.Outdir
 			return runEnvelope[fileUnzipData](b, ctx, a.BaseIn, "file_unzip",
-				map[string]any{"file": a.File, "outdir": outdir, "password_ref": a.PasswordRef}, LkNone, "", false,
+				map[string]any{"file": a.File, "outdir": outdir, "password_ref": a.PasswordRef}, LkFileIO, "", false,
 				func(c *Client) (any, error) {
 					dir := outdir
 					if dir == "" {
@@ -380,7 +380,7 @@ func (b *Bridge) registerNetTools(s *mcp.Server) {
 		func(ctx context.Context, a netSetMTUIn) Envelope[netMTUData] {
 			mtu := orDefault(a.MTU, 2000)
 			return runEnvelope[netMTUData](b, ctx, a.BaseIn, "net_set_mtu",
-				map[string]any{"iface": a.Iface, "mtu": mtu}, LkNone, "", false,
+				map[string]any{"iface": a.Iface, "mtu": mtu}, LkFileIO, "", false,
 				func(c *Client) (any, error) {
 					if err := c.SetMTU(a.Iface, mtu); err != nil {
 						return nil, err
@@ -411,7 +411,7 @@ func (b *Bridge) registerNetTools(s *mcp.Server) {
 				want = time.Now().Format("2006-01-02 15:04:05")
 			}
 			return runEnvelope[netTimeData](b, ctx, a.BaseIn, "net_set_time",
-				map[string]any{"time": want}, LkNone, "", false,
+				map[string]any{"time": want}, LkFileIO, "", false,
 				func(c *Client) (any, error) {
 					// date -s 失败 = 系统时间没改，必须报错；
 					// hwclock -w 失败只警告——容器/VM 里没有 RTC，这条必然失败，

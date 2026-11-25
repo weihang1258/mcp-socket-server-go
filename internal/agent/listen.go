@@ -62,13 +62,27 @@ type listenInstance struct {
 	q       chan []byte
 	dataMu  sync.Mutex // 保护 data（cachedata 写 / fetch/save 读）
 	data    []byte
+	dataLimitWarned bool // B10：上限告警只发一次（clean 后重置）
 	stopped atomic.Bool // shutdown 置位 / cachedata 轮询（-race 复审）
 	wg      sync.WaitGroup
 }
 
 // appendData cachedata 侧追加（持 dataMu）。
+// listenDataMax 收流内存上限（评审 B10）：Python 同为无上限（self.data += ...），
+// 长连接收流会吃满内存。超限停止追加并 warn 一次（数据仍可经 .bin 落盘查看）。
+const listenDataMax = 256 << 20
+
 func (li *listenInstance) appendData(chunk []byte) {
 	li.dataMu.Lock()
+	if len(li.data)+len(chunk) > listenDataMax {
+		if !li.dataLimitWarned {
+			li.dataLimitWarned = true
+			log.Printf("[WARN] 端口 %d 收流数据达上限 %dMB，停止累积（fetch/save 只返回前段；落盘 .bin 不受影响）",
+				li.port, listenDataMax>>20)
+		}
+		li.dataMu.Unlock()
+		return
+	}
 	li.data = append(li.data, chunk...)
 	li.dataMu.Unlock()
 }
@@ -366,6 +380,7 @@ func listenStop() ([]byte, error) {
 func (li *listenInstance) dataReset() {
 	li.dataMu.Lock()
 	li.data = nil
+	li.dataLimitWarned = false
 	li.dataMu.Unlock()
 }
 

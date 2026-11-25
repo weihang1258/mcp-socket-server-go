@@ -707,6 +707,9 @@ func probeAlive(c *Client) bool {
 	c.conn.SetReadDeadline(time.Now().Add(time.Millisecond))
 	buf := make([]byte, 1)
 	_, err := c.conn.Read(buf)
+	// 恢复 deadline（评审 B13）：探针把读 deadline 留在过去，复用后任何
+	// 「不先 send 直接 recv」的路径会立刻 i/o timeout。
+	c.conn.SetReadDeadline(time.Time{})
 	if err == nil {
 		return false
 	}

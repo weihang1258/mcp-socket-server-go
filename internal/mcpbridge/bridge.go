@@ -392,6 +392,8 @@ type AuditEntry struct {
 type Audit struct {
 	mu   sync.Mutex
 	conn *sql.DB
+	retentionDays  int
+	writesSincePrune int // B14：常驻进程的滚动清理（每 1000 条触发一次）
 }
 
 func OpenAudit(dbPath string, retentionDays int) (*Audit, error) {
@@ -421,7 +423,8 @@ func OpenAudit(dbPath string, retentionDays int) (*Audit, error) {
 	if retentionDays > 0 {
 		conn.Exec("DELETE FROM audit_log WHERE ts < datetime('now', ?)", fmt.Sprintf("-%d days", retentionDays))
 	}
-	return &Audit{conn: conn}, nil
+	a := &Audit{conn: conn, retentionDays: retentionDays}
+	return a, nil
 }
 
 // truncateParams 参数值字符串 >200 截断 + "..."（audit.py 同语义）。
@@ -449,6 +452,13 @@ func (a *Audit) Write(tool string, params map[string]any, outcomes []map[string]
 	}
 	a.conn.Exec("INSERT INTO audit_log (ts, source_ip, tool, params, ok_count, failed_count, outcomes, duration_ms)"+
 		" VALUES (datetime('now'),?,?,?,?,?,?,?)", sourceIP, tool, string(pJSON), okCount, failedCount, string(oJSON), durationMs)
+	// 滚动清理（评审 B14）：OpenAudit 只在启动跑一次，桥常驻数月保留期不生效。
+	// 每 1000 条写触发一次过期删除，代价可忽略（SQLite 本地）。
+	a.writesSincePrune++
+	if a.retentionDays > 0 && a.writesSincePrune >= 1000 {
+		a.writesSincePrune = 0
+		a.conn.Exec("DELETE FROM audit_log WHERE ts < datetime('now', ?)", fmt.Sprintf("-%d days", a.retentionDays))
+	}
 }
 
 // LastEntry 测试辅助：最近一条。

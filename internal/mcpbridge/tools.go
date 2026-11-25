@@ -438,8 +438,13 @@ func verLess(parts []int, a, b, c int) bool {
 }
 
 func atLeast(v string, a, b, c int) bool {
-	p := parseVer3(v)
-	return p != nil && !verLess(p, a, b, c)
+	// 统一走 compareVersions（评审 B7：三套比较器并存，语义漂移风险）。
+	// compareVersions 对纯数字段与元组前缀语义等价（短段补 0 比较）。
+	want := fmt.Sprintf("%d.%d.%d", a, b, c)
+	if parseVer3(v) == nil {
+		return false // 非法版本号（含 rc 后缀）不满足最低门槛——保守侧
+	}
+	return compareVersions(v, want) >= 0
 }
 
 var _ = os.Getenv

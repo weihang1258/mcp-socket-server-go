@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"io"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -695,14 +696,18 @@ func (r *replayer) replayFile(path string) (int, int, error) {
 	if _, err := os.Stat(path); err != nil {
 		return 0, r.totalBytes, fmt.Errorf("pcap不存在：%s", path)
 	}
-	data, err := os.ReadFile(path)
+	// 流式逐记录读（评审 B11）：os.ReadFile 整文件常驻（1GB pcap = 1GB 内存）。
+	// pcap 结构简单（24B 全局头 + [16B 记录头][data]*），单包缓冲即可。
+	f, err := os.Open(path)
 	if err != nil {
 		return 0, r.totalBytes, fmt.Errorf("pcap不存在：%s", path)
 	}
-	if len(data) < 24 {
+	defer f.Close()
+	g := make([]byte, 24)
+	if _, err := io.ReadFull(f, g); err != nil {
 		return 0, r.totalBytes, fmt.Errorf("pcap 全局头不完整：%s", path)
 	}
-	magic := binary.LittleEndian.Uint32(data[:4])
+	magic := binary.LittleEndian.Uint32(g[:4])
 	divisor := float64(1e6)
 	if magic == 0xA1B23C4D || magic == 0x4D3CB2A1 {
 		divisor = 1e9
@@ -710,17 +715,22 @@ func (r *replayer) replayFile(path string) (int, int, error) {
 	packets := 0
 	lastSend := time.Now()
 	perPktBits := float64(r.mbps) * 1e6
-	for off := 24; off+16 <= len(data); {
-		sec := binary.LittleEndian.Uint32(data[off:])
-		frac := binary.LittleEndian.Uint32(data[off+4:])
-		incl := int(binary.LittleEndian.Uint32(data[off+8:]))
-		origLen := int(binary.LittleEndian.Uint32(data[off+12:]))
-		off += 16
-		if off+incl > len(data) {
+	hdr := make([]byte, 16)
+	for {
+		if _, err := io.ReadFull(f, hdr); err != nil {
+			break // 记录头不完整 → 文件结束/截断
+		}
+		sec := binary.LittleEndian.Uint32(hdr)
+		frac := binary.LittleEndian.Uint32(hdr[4:])
+		incl := int(binary.LittleEndian.Uint32(hdr[8:]))
+		origLen := int(binary.LittleEndian.Uint32(hdr[12:]))
+		if incl <= 0 || incl > 1<<24 { // 16MB 单包上限（pcap 规范上限 65535，取宽裕值防坏帧巨分配）
 			break
 		}
-		pkt := data[off : off+incl]
-		off += incl
+		pkt := make([]byte, incl)
+		if _, err := io.ReadFull(f, pkt); err != nil {
+			break // 记录体截断
+		}
 		ts := float64(sec) + float64(frac)/divisor
 
 		// 解析：eth → VLAN → IP；非 IP 跳过（不计数）

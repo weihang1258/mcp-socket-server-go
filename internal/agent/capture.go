@@ -50,7 +50,29 @@ type bpfInstr struct {
 var (
 	capturesMu sync.Mutex
 	captures   = map[string]*captureEntry{} // path → entry
+
+	// captureStopHooks 抓包停止后的恢复回调（当前：IRQ affinity 还原，评审 B5）。
+	captureStopHooksMu sync.Mutex
+	captureStopHooks   []func()
 )
+
+// runCaptureStopHooks 抓包实例移除时执行恢复回调（一次性，取空即清）。
+func runCaptureStopHooks() {
+	captureStopHooksMu.Lock()
+	hooks := captureStopHooks
+	captureStopHooks = nil
+	captureStopHooksMu.Unlock()
+	for _, h := range hooks {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("抓包恢复回调 panic(忽略): %v", r)
+				}
+			}()
+			h()
+		}()
+	}
+}
 
 type captureEntry struct {
 	stop     chan struct{}
@@ -98,6 +120,9 @@ func tcpdumpStart(eth, path, extended string, singleQueue bool) (bool, error) {
 		}
 		capturesMu.Lock()
 		delete(captures, path)
+		capturesMu.Unlock()
+		runCaptureStopHooks() // 旧实例的恢复回调（评审 B5）
+		capturesMu.Lock()
 	}
 	capturesMu.Unlock()
 
@@ -190,9 +215,17 @@ func captureRecvLoop(src pktSource, path, eth string, stop chan struct{}) (res b
 	}
 
 	var pktCount uint64
+	// 时间戳单调性跟踪（评审 B1）：全程递增的 pcap 完全跳过收尾重排，
+	// 省掉整文件读写与 2 倍内存。常见抓包（AF_PACKET 顺序收）天然单调。
+	tsMonotonic := true
+	var prevTsNs uint64
 	// 写盘失败后续帧无意义（磁盘满），记下错误后停止采集，由 stop 报失败。
 	var writeErr error
 	write := func(data []byte, tsNs uint64) bool {
+		if tsNs < prevTsNs {
+			tsMonotonic = false
+		}
+		prevTsNs = tsNs
 		n, err := writePacket(f, data, tsNs)
 		pktCount += n
 		if err != nil {
@@ -279,7 +312,11 @@ drained:
 	}
 	// Python 日志带 eth/path/包数/丢弃数（capture.py:390）
 	log.Printf("抓包完成 %s -> %s：%d 包，内核丢弃 %d 包", eth, path, pktCount, drops)
-	return sortPcapByTimestamp(path), nil // 0 包也重排（Python 无条件调用）；writeErr 由上面的 defer 转成失败
+	if tsMonotonic {
+		log.Printf("pcap 时间戳全程递增，跳过重排：%s（%d 包）", path, pktCount)
+		return true, nil // 0 包视为单调（Python 无条件调用重排，但空文件无序可调）；writeErr 由上面的 defer 转成失败
+	}
+	return sortPcapByTimestamp(path), nil // 有逆序才整文件重排；writeErr 由上面的 defer 转成失败
 }
 
 func writePacket(f *os.File, data []byte, tsNs uint64) (uint64, error) {
@@ -619,6 +656,7 @@ func tcpdumpStop(path string) bool {
 	capturesMu.Lock()
 	delete(captures, path)
 	capturesMu.Unlock()
+	runCaptureStopHooks() // IRQ affinity 等恢复（评审 B5）
 	return entry.result
 }
 
@@ -672,6 +710,20 @@ func bindIRQToFreeCPU(eth string, count int) {
 		log.Printf("网卡 %s 无法获取中断号，跳过CPU绑定", eth)
 		return
 	}
+	// 记录原 affinity（评审 B5）：抓包结束后恢复，不再让中断永久钉在抓包核上。
+	type irqAff struct {
+		irq int
+		old string
+	}
+	var orig []irqAff
+	for _, irq := range irqs {
+		path := fmt.Sprintf("/proc/irq/%d/smp_affinity_list", irq)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		orig = append(orig, irqAff{irq, strings.TrimSpace(string(b))})
+	}
 	cpu := pickFreeCPU(eth)
 	log.Printf("将网卡 %s 的 %d 个中断绑定到 CPU%d", eth, len(irqs), cpu)
 	for _, irq := range irqs {
@@ -686,7 +738,18 @@ func bindIRQToFreeCPU(eth string, count int) {
 			log.Printf("IRQ %d -> CPU %d", irq, cpu)
 		}
 	}
-	disableRPSRFS(eth)
+	// 注册恢复：抓包停止时回调（stopCaptureEntry 成败均执行）。
+	captureStopHooksMu.Lock()
+	captureStopHooks = append(captureStopHooks, func() {
+		for _, oa := range orig {
+			path := fmt.Sprintf("/proc/irq/%d/smp_affinity_list", oa.irq)
+			if err := os.WriteFile(path, []byte(oa.old), 0o644); err != nil {
+				log.Printf("IRQ %d affinity 恢复失败: %v", oa.irq, err)
+			}
+		}
+		log.Printf("网卡 %s 的 %d 个中断 affinity 已恢复", eth, len(orig))
+	})
+	captureStopHooksMu.Unlock()
 }
 
 // cpuBinding 网卡→CPU 绑定记录（Python 的 _nic_cpu_binding/_allocated_cpus）。
@@ -788,18 +851,60 @@ func pickFreeCPU(eth string) int {
 			n = count
 		}
 	}
-	cpu := n - 1
-	for c := 1; c < n; c++ {
-		if !busy[c] {
+	// 与本进程 cpuset 取交集（评审 B6）：82 这类单核机 cpuset 只有 0，代码却会
+	// 把 IRQ 绑到 CPU1（/proc/stat 有 8 个核的行）——内核拒绝或静默无效，
+	// 日志还谎报「已绑定」。交集为空时明说并放弃绑定。
+	allowed := cpusetCPUs()
+	if len(allowed) == 0 { // 读不到 cpuset 就当作全核可用
+		for c := 0; c < n; c++ {
+			allowed = append(allowed, c)
+		}
+	}
+	cpu := -1
+	for _, c := range allowed {
+		if c != 0 && !busy[c] {
 			cpu = c
 			break
 		}
+	}
+	if cpu == -1 {
+		// 交集内无空闲非 0 核：0 核忙而其余不在 cpuset 等。回退取交集最后一个，
+		// 并如实告警（不谎报成功）。
+		cpu = allowed[len(allowed)-1]
+		log.Printf("[WARN] 网卡 %s 无空闲且在 cpuset 内的 CPU，回退用 CPU%d（可能与业务抢核）", eth, cpu)
 	}
 	cpuBindingMu.Lock()
 	cpuBinding[eth] = cpu
 	allocatedCPU[cpu] = true
 	cpuBindingMu.Unlock()
 	return cpu
+}
+
+// cpusetCPUs 本进程可用 CPU 列表（sched_getaffinity 语义，读 /proc/self/status
+// 的 Cpus_allowed_list，如 "0"、"0-7"）。读不到返回空。
+func cpusetCPUs() []int {
+	b, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return nil
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(line, "Cpus_allowed_list:") {
+			continue
+		}
+		spec := strings.TrimSpace(strings.TrimPrefix(line, "Cpus_allowed_list:"))
+		var out []int
+		for _, seg := range strings.Split(spec, ",") {
+			lo, hi := 0, 0
+			if n, _ := fmt.Sscanf(seg, "%d-%d", &lo, &hi); n == 1 {
+				hi = lo
+			}
+			for c := lo; c <= hi && c < 4096; c++ {
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 func disableRPSRFS(eth string) {

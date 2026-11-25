@@ -91,7 +91,7 @@ func handleConn(conn net.Conn, do DoFunc) {
 		logf("接收总长度%d", len(acc))
 		// 恰好收满一帧
 		data := acc
-		acc = make([]byte, 0, len(acc))
+		acc = acc[:0] // 复用底层数组（评审 B9）：data 在 processFrame 返回前不保留引用
 		dataLen = -1
 		if !processFrame(conn, cs, data, do) {
 			return

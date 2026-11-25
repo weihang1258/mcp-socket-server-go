@@ -362,7 +362,11 @@ func handleFileGET(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(path)))
 	w.WriteHeader(200)
-	io.CopyBuffer(w, io.LimitReader(f, fi.Size()), make([]byte, 1<<20)) // 1MB 分块流式
+	// 中途出错必须记日志（评审 B3）：吞掉后文件半截、客户端拿到 200+短读，
+	// 现场无从判断是磁盘错还是网络断。
+	if _, err := io.CopyBuffer(w, io.LimitReader(f, fi.Size()), make([]byte, 1<<20)); err != nil {
+		log.Printf("下载 %s 中途失败: %v", path, err)
+	}
 }
 
 func handleFilePOST(w http.ResponseWriter, r *http.Request) {
@@ -441,7 +445,12 @@ func handleFilePOST(w http.ResponseWriter, r *http.Request) {
 		}
 		tempPath = "" // 已搬运，别在 defer 里删掉
 	} else if fh != nil {
-		fh.Close()
+		// 关盘错误必须查（评审 B4）：Close 失败 = 缓冲没刷完（磁盘满/IO 错），
+		// 半截文件被 rename 成正式名，客户端拿到 200 + 短文件。
+		if err := fh.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			sendErrorJSON(w, 500, fmt.Sprintf("close failed: %v", err))
+			return
+		}
 		fh = nil
 		if err := os.Rename(partPath, dest); err != nil {
 			sendErrorJSON(w, 500, fmt.Sprintf("write failed: %v", err))

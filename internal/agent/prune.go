@@ -89,7 +89,8 @@ func PruneAtStartup() {
 	}
 }
 
-// versionLess 版本号逐段数字比较。
+// versionLess 版本号逐段数字比较（目录名已过 versionRe，段恒为纯数字；
+// 短段补零语义与 mcpbridge.compareVersions 一致——评审 B7 统一口径）。
 func versionLess(a, b string) bool {
 	as := strings.Split(a, ".")
 	bs := strings.Split(b, ".")

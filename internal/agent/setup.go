@@ -107,6 +107,9 @@ func setupMachineEffectsImpl() {
 		log.Printf("%s", c)
 		exec.Command("/bin/sh", "-c", c).Run()
 	}
+	// 显式告知整机副作用（评审 N9）：在别人的测试机上跑一次就关了防火墙，
+	// 只有上面逐条命令回显，事后没人知道防火墙去哪了。
+	log.Printf("[NOTE] 本机防火墙/SELinux 已按部署约定关闭（firewalld stop+disable、iptables -F/X/Z、setenforce 0）")
 	log.Printf("env PATH=%s", os.Getenv("PATH"))
 }
 

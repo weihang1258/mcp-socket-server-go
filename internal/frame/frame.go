@@ -32,6 +32,7 @@ func EncodeRaw(content []byte) []byte {
 }
 
 // Read 读取完整帧并拆出 datatype 与 payload。长度前缀 <4 视为协议违规返回错误。
+// 仅测试使用（评审 N7）：生产路径生产帧 Encode/EncodeRaw + 各端自收，无此消费方。
 func Read(r io.Reader) (datatype int32, payload []byte, err error) {
 	body, err := ReadRaw(r)
 	if err != nil {
