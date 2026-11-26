@@ -25,7 +25,7 @@ type targetListOut struct {
 
 type targetAddIn struct {
 	Host        string   `json:"host" jsonschema:"靶机 IP 或主机名（IPv6 裸地址，自动剥方括号）"`
-	Port        int      `json:"port,omitempty" jsonschema:"靶机 socket_server TCP 端口，缺省 9000"`
+	Port        int      `json:"port,omitempty" jsonschema:"靶机 socket_server TCP 端口（缺省 9000）"`
 	Tags        []string `json:"tags,omitempty" jsonschema:"标签列表，用于 @tag 选机"`
 	Note        string   `json:"note,omitempty" jsonschema:"备注（如机器用途）"`
 	Force       bool     `json:"force,omitempty" jsonschema:"true 表示 跳过探活强制注册离线靶机，缺省 false"`
@@ -41,7 +41,7 @@ type targetAddOut struct {
 
 type targetRemoveIn struct {
 	Host        string `json:"host" jsonschema:"靶机 IP 或主机名"`
-	Port        int    `json:"port,omitempty" jsonschema:"靶机 socket_server TCP 端口，缺省 9000"`
+	Port        int    `json:"port,omitempty" jsonschema:"靶机 socket_server TCP 端口（缺省 9000）"`
 	Description string `json:"description,omitempty" jsonschema:"一句话说明本次调用的目的（进审计与界面），不超过 50 字"`
 }
 
