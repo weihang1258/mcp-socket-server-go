@@ -872,9 +872,15 @@ func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 			// 到 BudgetEnd 会把后续 shell 钳到 1s，中途死而不是优雅返回 cleaned=false）。
 			// 入参 timeout 显式加大时要求同步加大信封超时。
 			need := rounds*(timeout+5) + 15
-			if a.BaseIn.Timeout > 0 && a.BaseIn.Timeout < need {
+			// 信封预算：入参显式给 timeout 用它，否则用登记表缺省（300）——
+			// 默认场景也要校验，round_timeout_s=120×3 轮 = 390s 已超 300s
+			budget := a.BaseIn.Timeout
+			if budget <= 0 {
+				budget = toolDefaultTimeout["dpi_clean_stat"]
+			}
+			if budget < need {
 				return allFailedEnvelope[dpiCleanStatData](b.resolve(a.Targets),
-					fmt.Sprintf("编排需要约 %d 秒（rounds×(timeout+5)+15），入参 timeout=%d 不够——请同步加大本工具 timeout 参数", need, a.BaseIn.Timeout), ErrBusiness)
+					fmt.Sprintf("编排需要约 %d 秒（rounds×(round_timeout_s+5)+15），超出信封预算 %ds——请减小 round_timeout_s/rounds 或加大本工具 timeout 参数", need, budget), ErrBusiness)
 			}
 			return runEnvelope[dpiCleanStatData](b, ctx, a.BaseIn, "dpi_clean_stat",
 				map[string]any{"round_timeout_s": timeout, "rounds": rounds}, LkSystem, "", false,
@@ -983,6 +989,9 @@ func waitFlowTimeout(c *Client, timeoutS int) error {
 		return err
 	}
 	v, _ := lookupField(sd, "concurrent_cnt")
+	if v == "" {
+		return fmt.Errorf("flow.stat 读不到 concurrent_cnt（文件缺失或格式变更）")
+	}
 	if v == "0" {
 		return nil
 	}
@@ -990,13 +999,15 @@ func waitFlowTimeout(c *Client, timeoutS int) error {
 	for {
 		time.Sleep(2 * time.Second)
 		if time.Now().After(deadline) {
-			return fmt.Errorf("等待流超时失败，等待时间：%ds（concurrent_cnt=%s）", timeoutS, v)
+			return fmt.Errorf("等待流超时失败，等待时间：%ds（concurrent_cnt=%s）——设备上仍有活跃流：停掉业务流量或等其自然超时后重试", timeoutS, v)
 		}
 		sd, err = readStat(c, "flow_wait", "", "")
 		if err != nil {
 			return err
 		}
-		if v, _ = lookupField(sd, "concurrent_cnt"); v == "0" {
+		if v, _ = lookupField(sd, "concurrent_cnt"); v == "" {
+			return fmt.Errorf("flow.stat 读不到 concurrent_cnt（文件缺失或格式变更）")
+		} else if v == "0" {
 			return nil
 		}
 	}
