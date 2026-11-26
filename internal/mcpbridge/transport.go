@@ -77,7 +77,7 @@ IP 库 / 机房 IP 段 / ipsegs / 方向判定 / 入向 / 出向 / 内外判定�
 - 多台主机用 targets 传数组，或 @tag 按标签批量选；工具名不带服务前缀但都属于本服务。
 - 不可逆操作（file_remove / dpi_install / dpi_upgrade / dpi_switch_mode）先确认路径和目标。`
 
-// NewServer 构建 mcp.Server（serverInfo.version = 桥版本 0.5.0（工具集 15→48 跨度，随能力变更升版本；与 dt14 分离））。
+// NewServer 构建 mcp.Server（serverInfo.version = 桥版本 0.5.0——工具集 15→48 跨度随能力变更升版本，与 dt14 分离）。
 func NewServer(b *Bridge) *mcp.Server {
 	impl := &mcp.Implementation{Name: "mcp-socket-server", Version: BridgeVersion}
 	s := mcp.NewServer(impl, &mcp.ServerOptions{Instructions: ServerInstructions})
