@@ -107,7 +107,7 @@ func rangeToPrefixes(lo, hi netip.Addr) []netip.Prefix {
 		//  b) 覆盖：块地址数 2^(bits-size) <= span+1 → size >= bits-k
 		size := bits - maxLead
 		spanAddr := bigDiff(lo, hi)
-		if lim := bits - addrCountFloorBits(spanAddr); lim > size {
+		if lim := bits - addrCountFloorBits(spanAddr, bits); lim > size {
 			size = lim
 		}
 		p, _ := lo.Prefix(size)
@@ -211,13 +211,18 @@ func lastAddr(p netip.Prefix) netip.Addr {
 // addrCountFloorBits diff（hi-lo）→ floor(log2(diff+1))：从 lo 起连续不越界的
 // 最大地址数为 2 的幂时取该幂（diff+1 恰 2^k），否则取更低一档。
 // diff==0（lo==hi）→ 0（/bits 单地址）。
-func addrCountFloorBits(diff [16]byte) int {
+// diff+1 == 2^bits（全地址空间）时 16 字节加法溢出、carry 残留 → 返回满位宽，
+// 让 lim 不再约束块大小（全空间恰是 /0 一块）。
+func addrCountFloorBits(diff [16]byte, bits int) int {
 	inc := diff
 	carry := 1
 	for i := 15; i >= 0 && carry > 0; i-- {
 		s := int(inc[i]) + carry
 		inc[i] = byte(s & 0xFF)
 		carry = s >> 8
+	}
+	if carry > 0 { // diff+1 == 2^bits：全地址空间
+		return bits
 	}
 	for i, byt := range inc {
 		if byt != 0 {

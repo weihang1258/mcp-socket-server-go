@@ -71,13 +71,6 @@ type pcapFlowsIn struct {
 	PcapDir string `json:"pcap_dir" jsonschema:"靶机上的 pcap 目录绝对路径"`
 }
 
-// flowDirection 单条流的 IP 库方向附加字段（ip_db_load 未建库时为空串）。
-type flowDirection struct {
-	SrcIpIn   bool   `json:"src_ip_in"`
-	DestIpIn  bool   `json:"dest_ip_in"`
-	Direction string `json:"direction" jsonschema:"internal|inbound|outbound|external（相对 ip_db_load 默认库）"`
-}
-
 // ---- 出参 ----
 
 type captureStartData struct {

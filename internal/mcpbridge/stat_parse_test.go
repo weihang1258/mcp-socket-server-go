@@ -247,3 +247,32 @@ func TestParseRawText(t *testing.T) {
 		t.Fatalf("空行跳过但保留行号: %+v", sd.Rows[1])
 	}
 }
+
+// 真机 82 格式：每个 worktask 段里都有 "vlan mirror failed" 列头行，
+// 它不能把 detail 段的 seg 重置成 total
+func TestParseMirrorvlanLimitRealFile(t *testing.T) {
+	text := `worktask: 0
+    vlan               mirror             failed
+    g    active             limit              reject
+    0    0                  10000              0
+
+worktask: all
+    vlan               mirror             failed
+    g    active             limit              reject
+    0    3                  10000              1
+
+per-g flow admission (total):
+    g    active             limit              reject             speed
+    0    1                  10000              0                  0 bps
+`
+	sd := parseStatText("mirrorvlan_limit", "", text)
+	if v := rowField(sd, "0.0", "limit"); v != "10000" {
+		t.Fatalf("worktask 0 段行名应为 0.0: %+v", sd.Rows)
+	}
+	if v := rowField(sd, "all.0", "active"); v != "3" {
+		t.Fatalf("worktask all 段行名应为 all.0: %+v", sd.Rows)
+	}
+	if v := rowField(sd, "total.0", "speed"); v != "0 bps" {
+		t.Fatalf("汇总段 total.0: %+v", sd.Rows)
+	}
+}

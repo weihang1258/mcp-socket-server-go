@@ -38,6 +38,7 @@ type LoadResult struct {
 	SHA256   string `json:"sha256"`
 	Elapsed  int64  `json:"elapsed_ms"`
 	Skipped  bool   `json:"skipped,omitempty"` // sha 未变，复用上一库
+	Warning  string `json:"warning,omitempty"` // 建库时跳过了坏段
 	Error    string `json:"error,omitempty"`
 }
 
@@ -80,6 +81,9 @@ func (l *Loader) loadOne(c FileFetcher, path string) LoadResult {
 	res.Entries = snap.Entries
 	res.Prefixes = snap.Prefixes
 	res.Elapsed = time.Since(t0).Milliseconds()
-	log.Printf("ipdb 已加载 %s：%d 段 → %d 前缀（sha %s…）", path, snap.Entries, snap.Prefixes, sha[:12])
+	if snap.Skipped > 0 {
+		res.Warning = fmt.Sprintf("%d 段解析失败被跳过（跨族/非法区间）", snap.Skipped)
+	}
+	log.Printf("ipdb 已加载 %s：%d 段 → %d 前缀（跳过 %d，sha %s…）", path, snap.Entries, snap.Prefixes, snap.Skipped, sha[:12])
 	return res
 }

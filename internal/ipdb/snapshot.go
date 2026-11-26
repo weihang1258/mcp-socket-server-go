@@ -13,15 +13,15 @@ type Snapshot struct {
 	// 统计（建库时固化）
 	Entries  int    // 原始段数
 	Prefixes int    // 前缀数
+	Skipped  int    // 建库时跳过的坏段（跨族/非法区间）
 	SHA256   string // 源文件 sha256（重载跳过判据）
 }
 
 // NewSnapshot 由段集建快照。
 func NewSnapshot(segs []Seg, sha256 string) *Snapshot {
 	ps, skipped := SegsToPrefixes(segs)
-	s := &Snapshot{Entries: len(segs), SHA256: sha256}
+	s := &Snapshot{Entries: len(segs), SHA256: sha256, Skipped: skipped}
 	s.splitFamilies(ps)
-	_ = skipped // 跨族段已在 SegsToPrefixes 计入返回值；快照层只存有效部分
 	return s
 }
 
@@ -65,6 +65,10 @@ func (s *Snapshot) Contains(a netip.Addr) bool {
 }
 
 // Manager 每路径一库（设计修订：paths 直给，map[路径]*Snapshot）。
+//
+// ponytail: 库按路径全局唯一，不带 host 维度——多靶机同路径文件内容不同时，
+// 后加载的覆盖先加载的（ip_lookup 无 host 概念，判定基准是最后一次加载）。
+// 单靶机场景不受影响；多机差异化 IP 段出现时再把 key 扩成 host+path。
 type Manager struct {
 	libs atomic.Pointer[map[string]*Snapshot]
 }

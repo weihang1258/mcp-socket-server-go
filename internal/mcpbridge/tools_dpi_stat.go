@@ -518,14 +518,17 @@ func parseMirrorvlanLimit(lines []string) []StatRow {
 		if len(f) == 0 {
 			continue
 		}
-		// 分段标题行（"worktask: 0" / "per-g flow admission (total):"）开新 head；
-		// 首列不是 g 也不是数字的行都视为标题/噪声。数据行首列是 g 编号，
-		// 两段重名（0..N 各一次）→ 行名加段前缀保证可寻址
+		// 段标题行切换 seg："worktask: N" → seg=N（detail 段），
+		// "per-g flow admission (total):" → seg=total（汇总段）。
+		// 其它非数据行（如 "vlan mirror failed" 列头）只清 head，不动 seg
+		// ——真机每个 worktask 段里都有这个列头，清 seg 会把 detail 段
+		// 全部错标成 total（真机 82 实测踩过）。
 		if f[0] != "g" && !isAllDigits(f[0]) {
 			head = nil
-			seg = "total"
 			if strings.HasPrefix(f[0], "worktask:") && len(f) > 1 {
 				seg = f[1]
+			} else if strings.HasPrefix(f[0], "per-g") {
+				seg = "total"
 			}
 			continue
 		}
@@ -742,10 +745,13 @@ func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 
 	addTyped(s, ro("dpi_wait_stat",
 		"等 DPI 指标到目标值",
-		"轮询单个 DPI 指标直到达到目标值。什么时候用：下发策略或起停 DPI 后，要确认某指标确实变了（而不是立刻读一次碰运气）时。与 dpi_read_stat 的区别：read 读一次，wait 轮询到满足条件或超时。field 支持 row 名或 row.字段名（如 \"all.fopen_ok\"）；operator 取 eq/ne/gt/ge/lt/le；value 为目标值，wait_s 为最长等待，every_s 为轮询间隔。"),
+		"轮询单个 DPI 指标直到达到目标值。什么时候用：下发策略或起停 DPI 后，要确认某指标确实变了（而不是立刻读一次碰运气）时。与 dpi_read_stat 的区别：read 读一次，wait 轮询到满足条件或超时。field 支持 row 名或 row.字段名（如 \"all.fopen_ok\"）；operator 取 eq/ne/gte/lte；value 为目标值，wait_s 为最长等待，every_s 为轮询间隔。"),
 		func(ctx context.Context, a dpiWaitStatIn) Envelope[dpiWaitStatData] {
 			every := orDefault(a.EveryS, 2)
 			wait := orDefault(a.WaitS, 60)
+			if every <= 0 || wait <= 0 {
+				return allFailedEnvelope[dpiWaitStatData](b.resolve(a.Targets), "every_s 与 wait_s 必须为正整数", ErrBusiness)
+			}
 			op := orDefaultStr(a.Operator, "eq")
 			return runEnvelope[dpiWaitStatData](b, ctx, a.BaseIn, "dpi_wait_stat",
 				map[string]any{"kind": a.Kind, "field": a.Field, "operator": op, "value": a.Value},
@@ -782,6 +788,9 @@ func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 		func(ctx context.Context, a dpiWaitFileIn) Envelope[dpiWaitFileData] {
 			every := orDefault(a.EveryS, 2)
 			wait := orDefault(a.WaitS, 600)
+			if every <= 0 || wait <= 0 {
+				return allFailedEnvelope[dpiWaitFileData](b.resolve(a.Targets), "every_s 与 wait_s 必须为正整数", ErrBusiness)
+			}
 			src := orDefaultStr(a.Source, "xdrtxtlog")
 			mode := orDefaultStr(a.Mode, "close")
 			var kind, rowName, leftKey, rightKey string
@@ -848,8 +857,11 @@ func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 		func(ctx context.Context, a dpiCleanStatIn) Envelope[dpiCleanStatData] {
 			timeout := orDefault(a.Timeout, 60)
 			rounds := orDefault(a.Rounds, 3)
+			if timeout <= 0 || rounds <= 0 {
+				return allFailedEnvelope[dpiCleanStatData](b.resolve(a.Targets), "timeout 与 rounds 必须为正整数", ErrBusiness)
+			}
 			return runEnvelope[dpiCleanStatData](b, ctx, a.BaseIn, "dpi_clean_stat",
-				map[string]any{"timeout": timeout, "rounds": rounds}, LkNone, "", false,
+				map[string]any{"timeout": timeout, "rounds": rounds}, LkSystem, "", false,
 				func(c *Client) (any, error) {
 					start := time.Now()
 					cmd1 := "sudo /opt/dpi/cmdmsg xsa 1"

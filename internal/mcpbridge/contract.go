@@ -124,6 +124,8 @@ var toolBasis = map[string]string{
 	"listen_fetch":        "大数据传输，比控制类慢一倍",
 	"listen_stop":         "沿用现有 30",
 	"pcap_extract_flows":  "沿用现有 30；最多 1000 条",
+	"ip_db_load":          "每路径一次 dt3 下载 + 解析建库（5 万段实测 <1s），余量到 30",
+	"ip_lookup":           "纯内存查询，无网络往返",
 	"dpi_get_info":        "四次只读命令（dpi.py:553-612）",
 	"dpi_get_config":      "只读小文件（dpi.py:288-440）",
 	"dpi_apply_config":    "停 600 + 起 600 + 余量 30",

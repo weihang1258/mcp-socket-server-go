@@ -53,7 +53,7 @@ const (
 func (b *Bridge) registerIPDBTools(s *mcp.Server) {
 	addTyped(s, write("ip_db_load",
 		"加载机房 IP 段库",
-		"从靶机读 IP 段文件建内存库（供 ip_lookup 与 pcap 流方向判定复用）。什么时候用：首次使用 ip_lookup 前；设备上 ipsegs 文件变更后重新加载。paths 每份文件建一个独立库，缺省 house_ipsegs.txt；sha256 没变的文件自动跳过重建。返回 results[].data.libs{路径:{entries,prefixes,sha256,elapsed_ms,skipped}}。"),
+		"从靶机读 IP 段文件建内存库（供 ip_lookup 与 pcap 流方向判定复用）。什么时候用：首次使用 ip_lookup 前；设备上 ipsegs 文件变更后重新加载。paths 每份文件建一个独立库，缺省 house_ipsegs.txt；sha256 没变的文件自动跳过重建。注意：库按路径全局唯一（不带靶机维度），多台靶机同路径文件不同时后加载的覆盖先加载的——多机差异化 IP 段请逐台加载并显式传 lib。返回 results[].data.libs{路径:{entries,prefixes,sha256,elapsed_ms,skipped}}。"),
 		func(ctx context.Context, a ipdbLoadIn) Envelope[ipdbLoadData] {
 			paths := a.Paths
 			if len(paths) == 0 {
