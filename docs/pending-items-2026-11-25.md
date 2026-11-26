@@ -105,4 +105,21 @@ Q5 VLAN 包 force_ip 应生效（→A3 按回归修）。
 - A（必修）13 项、B（应修）16 项、C（功能）5 项、G（增补）1 项待修。
 - E（不修）5 类有明确理由。
 - D（业务答复）全部完成。
-- 台账收口：**A 批（含 A1+A2 P0）、B 批、G1、C1+C5（IP 库）已全部完成（commits d97815e/b9900f5/a5c9c7a，2026-11-25）。C2/C3/C4 也已全部完成（2026-11-25）。**全部 A/B/C/G 修复与新功能完成 → 待发版 v1.9.28（scripts/release.sh + 真机验收）。****
+- 台账收口：**A 批（含 A1+A2 P0）、B 批、G1、C1+C5（IP 库）已全部完成（commits d97815e/b9900f5/a5c9c7a，2026-11-25）。C2/C3/C4 也已全部完成（2026-11-25）。
+
+## I. R5 复审（2026-11-26，commit 06353e8）——C 批新增代码全面审查
+
+| # | 发现 | 处置 |
+|---|---|---|
+| I1 | ipdb addrCountFloorBits 溢出位：diff+1==2^bits 时 carry 溢出 16B → v6 全区间错误拆 128+ 前缀 | ✅已修（返回满位宽）+ v4/v6 全空间边界测试 + 随机 3000 区间性质测试 |
+| I2 | dpi_clean_stat 挂 LkNone，与 dpi_service 等设备操作不互斥 | ✅已修（LkSystem） |
+| I3 | mirrorvlan_limit：真机每 worktask 段的 "vlan mirror failed" 列头行把 detail 段 seg 重置成 total，行名全错 | ✅已修（只有 worktask:/per-g 行切 seg），82 真机复验行名正确 |
+| I4 | ip_db_load 多靶机同路径文件不同 → 后加载覆盖先加载（ip_lookup 无 host 维度） | ✅标注（描述+ponytail 注释）；单机场景无影响，多机差异化出现时再扩 key |
+| I5 | Snapshot.Skipped 无出口（坏段静默消失） | ✅已修（LoadResult.Warning 字段 + 日志） |
+| I6 | dpi_wait_stat/wait_file/clean_stat 负数入参无防护（every_s 负数 → 忙等烧 CPU） | ✅已修（正整数校验） |
+| I7 | wait_stat 描述 operator 写 gt/lt 但实现只有 eq/ne/gte/lte | ✅已修（描述对齐） |
+| I8 | contract.go ip_db_load/ip_lookup 缺 timeout_basis | ✅已补 |
+| I9 | tools_traffic.go flowDirection 类型定义未使用 | ✅已删 |
+| I10 | clean_stat 语义 vs Python dpi.py:190 逐行对照：cmd1 首轮不发、失败路径 cmd1+sleep5+continue 等价；Python 失败路径多发一次 cmd1（幂等，无害） | ✅确认对齐 |
+
+**全部 A/B/C/G + R5 复审完成 → 待发版 v1.9.28（scripts/release.sh + 真机验收）。****
