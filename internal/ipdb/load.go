@@ -64,11 +64,14 @@ func (l *Loader) loadOne(c FileFetcher, path string) LoadResult {
 	sum := sha256.Sum256(content)
 	sha := hex.EncodeToString(sum[:])
 	res.SHA256 = sha
+	// cache 查与 mgr.Get 必须在同一 mu 区间：Get 放锁外的话，另一 goroutine
+	// 的 Set 可在两步之间替换该路径快照 → skipped=true 却报另一份内容的
+	// 统计（R5-A5）。Manager.Get 自身原子，但「sha 未变」与「库未变」要一致。
 	l.mu.Lock()
 	old, hadOld := l.cache[path]
-	l.mu.Unlock()
 	if hadOld && old == sha {
-		if cur := l.mgr.Get(path); cur != nil { // Manager.Get 自身原子
+		if cur := l.mgr.Get(path); cur != nil {
+			l.mu.Unlock()
 			res.Skipped = true
 			res.Entries = cur.Entries
 			res.Prefixes = cur.Prefixes
@@ -76,6 +79,7 @@ func (l *Loader) loadOne(c FileFetcher, path string) LoadResult {
 			return res
 		}
 	}
+	l.mu.Unlock()
 	segs := ParseFile(string(content))
 	snap := NewSnapshot(segs, sha) // 无锁：纯 CPU
 	l.mu.Lock()

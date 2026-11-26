@@ -110,8 +110,11 @@ type dpiWaitStatIn struct {
 // dpiCleanStatIn / dpiCleanStatData C3 清空 DPI 状态（对齐 dpi.py:190 clean_stat）。
 type dpiCleanStatIn struct {
 	BaseIn
-	Timeout int `json:"timeout,omitempty" jsonschema:"单轮等流超时秒数，缺省 60"`
-	Rounds  int `json:"rounds,omitempty" jsonschema:"最大重试轮数，缺省 3（对齐 Python）"`
+	// R5-A1：这里不能再用 json:"timeout"——与 BaseIn.Timeout 同键，
+	// encoding/json 总解析到外层字段，信封超时被永久遮蔽（timeoutFor 恒拿 0
+	// → 默认 300s，预算校验也永远跳过）。单轮等待改用独立键。
+	RoundTimeoutS int `json:"round_timeout_s,omitempty" jsonschema:"单轮等流超时秒数，缺省 60"`
+	Rounds        int `json:"rounds,omitempty" jsonschema:"最大重试轮数，缺省 3（对齐 Python）"`
 }
 
 type dpiCleanStatData struct {
@@ -858,9 +861,9 @@ func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 
 	addTyped(s, destructive("dpi_clean_stat",
 		"清空 DPI 状态",
-		"执行 /opt/dpi/cmdmsg xsa 1 清空 DPI 统计，等 flow.stat concurrent_cnt 降为 0（流超时），再校验 xrt.stat total 收包为 0；不满足则重新下发并重试，对齐 Python clean_stat（dpi.py:190）的三轮编排。什么时候用：压测/回放前把计数器归零，让新一轮数据不被上一轮污染。总耗时约 rounds×(timeout+5) 秒，加大入参 timeout/rounds 时须同步加大工具 timeout 参数（缺省 300 够 60×3 用）。返回 data{cleaned,rounds,last_rx,elapsed_s}。"),
+		"执行 /opt/dpi/cmdmsg xsa 1 清空 DPI 统计，等 flow.stat concurrent_cnt 降为 0（流超时），再校验 xrt.stat total 收包为 0；不满足则重新下发并重试，对齐 Python clean_stat（dpi.py:190）的三轮编排。什么时候用：压测/回放前把计数器归零，让新一轮数据不被上一轮污染。总耗时约 rounds×(round_timeout_s+5) 秒，加大入参 round_timeout_s/rounds 时须同步加大工具 timeout 参数（缺省 300 够 60×3 用）。返回 data{cleaned,rounds,last_rx,elapsed_s}。"),
 		func(ctx context.Context, a dpiCleanStatIn) Envelope[dpiCleanStatData] {
-			timeout := orDefault(a.Timeout, 60)
+			timeout := orDefault(a.RoundTimeoutS, 60)
 			rounds := orDefault(a.Rounds, 3)
 			if timeout <= 0 || rounds <= 0 {
 				return allFailedEnvelope[dpiCleanStatData](b.resolve(a.Targets), "timeout 与 rounds 必须为正整数", ErrBusiness)
@@ -874,7 +877,7 @@ func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 					fmt.Sprintf("编排需要约 %d 秒（rounds×(timeout+5)+15），入参 timeout=%d 不够——请同步加大本工具 timeout 参数", need, a.BaseIn.Timeout), ErrBusiness)
 			}
 			return runEnvelope[dpiCleanStatData](b, ctx, a.BaseIn, "dpi_clean_stat",
-				map[string]any{"timeout": timeout, "rounds": rounds}, LkSystem, "", false,
+				map[string]any{"round_timeout_s": timeout, "rounds": rounds}, LkSystem, "", false,
 				func(c *Client) (any, error) {
 					start := time.Now()
 					cmd1 := "sudo /opt/dpi/cmdmsg xsa 1"
@@ -894,10 +897,17 @@ func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 						if err := waitFlowTimeout(c, timeout); err != nil {
 							return nil, err // "等待流超时失败" 直接判失败（Python 同语义）
 						}
-						// 校验 xrt total 收包数
+						// 校验 xrt total 收包数。code!=0（文件不存在/DPI 未运行）必须报错
+						// 而非当"未清零"——静默重试会连发 rounds 次破坏性 cmdmsg 且掩盖
+						// 真实原因（R5-A2）。空输出不同：cmdmsg 清空瞬间 xrt.stat 重建
+						// 窗口期 grep total 无行（82 真机实测），Python 原版对此走
+						// except → cmd1 + sleep 5 + continue —— 归入重试路径。
 						rxOut, err := shell(c, "cat /dev/shm/xsa/xrt.stat |grep total|awk '{print $4}'")
 						if err != nil {
 							return nil, err
+						}
+						if code := intOf(rxOut["code"]); code != 0 {
+							return nil, cmdErr(rxOut, "读取 xrt.stat total 失败（文件不存在或 DPI 未运行？）")
 						}
 						rx := strings.TrimSpace(fmt.Sprint(rxOut["stdout"]))
 						out.LastRx = rx

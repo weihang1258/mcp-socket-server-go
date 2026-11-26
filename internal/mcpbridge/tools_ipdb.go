@@ -115,12 +115,13 @@ func (b *Bridge) registerIPDBTools(s *mcp.Server) {
 				})
 			}
 			// 纯内存查询：结果已算完，不连靶机（@tag 批量时不该为无网络工作
-			// 逐台建连，靶机宕机也不影响判定）。信封组装/审计与 runEnvelope 同构。
-			raw := make([]TargetResult, 0, max(len(b.resolve(a.Targets)), 1))
+			// 逐台建连，靶机宕机也不影响判定）。信封组装/审计与 runEnvelope 同构；
+			// resolve 为 0 台时走与其它工具一致的可见失败行（R5-A3）
 			targets := b.resolve(a.Targets)
 			if len(targets) == 0 {
-				targets = []string{joinTargets(a.Targets)}
+				return emptyResolveEnvelope[ipLookupData](a.Targets)
 			}
+			raw := make([]TargetResult, 0, len(targets))
 			for _, t := range targets {
 				raw = append(raw, TargetResult{Target: t, Ok: true,
 					Data: ipLookupData{Lib: lib, Pairs: out}})

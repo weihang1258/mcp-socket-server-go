@@ -43,20 +43,49 @@ func ParseFile(content string) []Seg {
 	return out
 }
 
-// parseLine 单行：按 | 或空白分列，取最左的两个 IP 列。
+// parseLine 单行：按 | 或空白分列。
+// 列数决定起止列（R5-A4：无脑取最左两个 IP 列，在 ID 列恰为 IP 形态时
+// 会把真实区间错建成 ID 段）：
+//   4+ 列（house/pcip：ID|ID|start|end|备注…）→ 取列 3/4；
+//   2 列（oversea：start|end|备注…）→ 取列 1/2；
+//   3 列 → 最左两个可解析 IP 列；1 列 → 裸单 IP。
+// 起止列解析失败时回退到"最左两个可解析 IP 列"（容脏行）。
 func parseLine(line string) (Seg, bool) {
 	cols := strings.Split(line, "|")
 	if len(cols) == 1 { // zcip：空白分隔也可能，兜底按字段切
 		cols = strings.Fields(line)
 	}
+	parseCol := func(c string) (netip.Addr, bool) {
+		a, err := netip.ParseAddr(strings.TrimSpace(c))
+		if err != nil {
+			return netip.Addr{}, false
+		}
+		return a.Unmap(), true
+	}
+	segFrom := func(a, b netip.Addr) (Seg, bool) {
+		if a.Compare(b) > 0 {
+			a, b = b, a
+		}
+		return Seg{Start: a, End: b, Raw: line}, true
+	}
+	if len(cols) >= 4 {
+		lo, ok1 := parseCol(cols[2])
+		hi, ok2 := parseCol(cols[3])
+		if ok1 && ok2 {
+			return segFrom(lo, hi)
+		}
+	} else if len(cols) == 2 {
+		lo, ok1 := parseCol(cols[0])
+		hi, ok2 := parseCol(cols[1])
+		if ok1 && ok2 {
+			return segFrom(lo, hi)
+		}
+	}
+	// 3 列 / 固定列解析失败：回退最左两个可解析 IP 列
 	var ips []netip.Addr
 	for _, c := range cols {
-		c = strings.TrimSpace(c)
-		if c == "" {
-			continue
-		}
-		if a, err := netip.ParseAddr(c); err == nil {
-			ips = append(ips, a.Unmap())
+		if a, ok := parseCol(c); ok {
+			ips = append(ips, a)
 			if len(ips) == 2 {
 				break
 			}
@@ -66,11 +95,7 @@ func parseLine(line string) (Seg, bool) {
 	case 1:
 		return Seg{Start: ips[0], End: ips[0], Raw: line}, true
 	case 2:
-		lo, hi := ips[0], ips[1]
-		if lo.Compare(hi) > 0 {
-			lo, hi = hi, lo
-		}
-		return Seg{Start: lo, End: hi, Raw: line}, true
+		return segFrom(ips[0], ips[1])
 	}
 	return Seg{}, false
 }

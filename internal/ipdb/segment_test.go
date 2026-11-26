@@ -151,3 +151,33 @@ func TestHouseSampleEndToEnd(t *testing.T) {
 		t.Fatal("20.0.0.1 不应命中（区间前）")
 	}
 }
+
+// R5-A4：ID 列恰为 IP 形态时必须取列 3/4，不能把 ID 段当真实区间
+func TestParseLineIDColumnIsIP(t *testing.T) {
+	seg, ok := parseLine("100.64.0.1|100.64.0.2|20.1.1.1|20.1.1.5")
+	if !ok {
+		t.Fatal("未解析")
+	}
+	if seg.Start.String() != "20.1.1.1" || seg.End.String() != "20.1.1.5" {
+		t.Fatalf("4 列应取列 3/4: %s-%s", seg.Start, seg.End)
+	}
+	// 2 列 oversea 仍取列 1/2
+	seg, ok = parseLine("108.138.7.71|108.138.7.71|跨境|测试1")
+	if !ok || seg.Start.String() != "108.138.7.71" {
+		t.Fatalf("带备注 4 列: %+v", seg)
+	}
+	seg, ok = parseLine("108.138.7.71|108.138.7.71")
+	if !ok || seg.Start.String() != "108.138.7.71" || seg.End.String() != "108.138.7.71" {
+		t.Fatalf("2 列 oversea: %+v", seg)
+	}
+	// house 数字 ID 仍正确
+	seg, ok = parseLine("1000|90134|20.1.1.1|20.255.255.254")
+	if !ok || seg.Start.String() != "20.1.1.1" {
+		t.Fatalf("house: %+v", seg)
+	}
+	// 起止列脏时回退最左两个 IP
+	seg, ok = parseLine("1|脏|20.1.1.1|20.1.1.5")
+	if !ok || seg.Start.String() != "20.1.1.1" || seg.End.String() != "20.1.1.5" {
+		t.Fatalf("回退: %+v", seg)
+	}
+}
