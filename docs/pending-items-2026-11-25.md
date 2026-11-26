@@ -142,4 +142,12 @@ Q5 VLAN 包 force_ip 应生效（→A3 按回归修）。
 | — | 复审点 13-25 逐项确认无问题：mergeSegs 相邻不合并无害（不重叠前提不破）、跨族交错排序下每族 lastAddr 仍全序、ext_xrt 分隔线 58 字符匹配、mvl speed 列保住、flow_wait 多行覆盖语义与 Python 一致、ip_lookup 审计路径与其它工具一致 | ✅确认 |
 | — | （R7 二轮自复审，不使用子代理）真机 MCP 协议实测：10001 对边界报业务错、10000 对 0.28s 完成（二分实锤）、错误 @tag 走 noResolveReason、非法 IP 报 pairs[N].src、mapped IP 命中、schema 里 timeout/round_timeout_s 双键分离、预算校验实测拦截 390s>300s、timeout=400 放行执行、审计链完整（含失败路径）、跨族段 Skipped 计数有出口（补 TestCrossFamilySeg 验证）、TryAcquire/Release 互斥语义与 LkSystem 相容、agent 侧零改动、部署与 HEAD 一致；已知无害预留：StatData.Truncated 从不设置（现实 stat 最大 34KB，CmdExec 64KB 截断兜底） | ✅确认，无新缺陷 |
 
-**全部 A/B/C/G + R5 复审完成 → 待发版 v1.9.28（scripts/release.sh + 真机验收）。****
+**全部 A/B/C/G + R5 复审完成。**
+
+## J. 发版（2026-11-26）
+
+**v1.9.28 已发版**：scripts/release.sh 通过（静态链接闸门 + sha 923abde3… + gh-proxy 镜像回源验证 OK）。
+82 bridge_upgrade 1.9.26→1.9.28 成功（bridge_version 复核 1.9.28），升级后真机复验全部通过：
+ip_db_load（9 段/53 前缀）、ip_lookup 六对四态（含 mapped）、dpi_clean_stat（cleaned=true），
+tcpsegment/mirrorvlan_limit 新 kind、pcap_extract_flows S4 方向字段（outbound/external）。
+35 仍为 1.9.21（另行安排）。
