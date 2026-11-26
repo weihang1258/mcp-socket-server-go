@@ -120,6 +120,8 @@ Q5 VLAN 包 force_ip 应生效（→A3 按回归修）。
 | I7 | wait_stat 描述 operator 写 gt/lt 但实现只有 eq/ne/gte/lte | ✅已修（描述对齐） |
 | I8 | contract.go ip_db_load/ip_lookup 缺 timeout_basis | ✅已补 |
 | I9 | tools_traffic.go flowDirection 类型定义未使用 | ✅已删 |
-| I10 | clean_stat 语义 vs Python dpi.py:190 逐行对照：cmd1 首轮不发、失败路径 cmd1+sleep5+continue 等价；Python 失败路径多发一次 cmd1（幂等，无害） | ✅确认对齐 |
+| I10 | clean_stat 语义 vs Python dpi.py:190 逐行对照：cmd1 首轮不发、失败路径 cmd1+sleep5+continue 等价；Python 失败路径多发一次 cmd1（幂等，无害） | ✅确认对齐；**追加改良**（commit d9852db）：Python clean_stat 在 dpiAutoExcel 是从未被调用的死代码，首轮不发 cmd1 依赖调用方先手动清空——工具版改为进循环前先发 cmd1（幂等），"调用即清空"语义自洽，82 真机复验 rounds=1 通过 |
+| I11 | 计数一致性 6 处：kind 枚举漏 flow_wait（三方 23/34/35 矛盾）、statKinds 注释、contract_test 注释 45、RegisterTools/transport 注释 11 类 | ✅已修（commit d9852db） |
+| I12 | directionOf 与 Snapshot.Direction 四态 switch 重复（两份真相） | ✅已修：ip_lookup 与 pcap 流方向统一走 Snapshot.Direction |
 
 **全部 A/B/C/G + R5 复审完成 → 待发版 v1.9.28（scripts/release.sh + 真机验收）。****
