@@ -136,5 +136,9 @@ Q5 VLAN 包 force_ip 应生效（→A3 按回归修）。
 | I23 | ip_lookup resolve 0 台伪造 targets 填 Ok=true 绕过失败行契约 | ✅已修：走 emptyResolveEnvelope |
 | I24 | parseLine 无脑取最左两个 IP 列：ID 列为 IP 形态时真实区间被错建成 ID 段（静默错判） | ✅已修：按列数定起止列（4+列取 3/4、2 列取 1/2、3 列回退）+ 脏列回退，补回归测试 |
 | I25 | loadOne sha 命中路径 mgr.Get 在锁外：并发 Set 竞态 → skipped=true 报另一份统计 | ✅已修：cache 查与 Get 同 mu 区间 |
+| I26 | （R6 自复审，不使用子代理，commit 972690e）**clean_stat 预算校验死区**：BaseIn.Timeout==0（调用方只加 round_timeout_s 不动信封 timeout）时校验被跳过，默认 300s 预算下 round_timeout_s=120×3 仍中途死 | ✅已修：budget 缺省回落 toolDefaultTimeout，默认场景也校验 |
+| I27 | waitFlowTimeout 对 concurrent_cnt 空读（文件缺失/格式变更）白等到超时 | ✅已修：首轮与循环内空值直接报错 |
+| I28 | 流超时/预算报错文案不含 actionable 信息（活流提示、实际预算值） | ✅已修 |
+| — | 复审点 13-25 逐项确认无问题：mergeSegs 相邻不合并无害（不重叠前提不破）、跨族交错排序下每族 lastAddr 仍全序、ext_xrt 分隔线 58 字符匹配、mvl speed 列保住、flow_wait 多行覆盖语义与 Python 一致、ip_lookup 审计路径与其它工具一致 | ✅确认 |
 
 **全部 A/B/C/G + R5 复审完成 → 待发版 v1.9.28（scripts/release.sh + 真机验收）。****
