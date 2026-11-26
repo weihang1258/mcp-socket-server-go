@@ -151,3 +151,11 @@ Q5 VLAN 包 force_ip 应生效（→A3 按回归修）。
 ip_db_load（9 段/53 前缀）、ip_lookup 六对四态（含 mapped）、dpi_clean_stat（cleaned=true），
 tcpsegment/mirrorvlan_limit 新 kind、pcap_extract_flows S4 方向字段（outbound/external）。
 35 仍为 1.9.21（另行安排）。
+
+## K. 全量铺开（2026-11-26 续）
+
+三台靶机全部升级至 v1.9.28：35（bridge_upgrade，apply 阶段 ECONNRESET 为 dt20 自杀式重启竞态，
+轮询确认 1.9.28；本机桥 systemctl restart 加载新二进制——**发现本机工作站就是 35**），
+32（1.9.21→1.9.28），82（1.9.26→1.9.28，见 J 节）。bridge_version 三台复核全 1.9.28。
+本机 /opt/socket/versions/1.9.28 sha 与 release 资产一致（923abde3…）；
+1.9.26/27/27-ipdb/27-p0fix 目录保留作回滚锚点。**v1.9.28 铺开完成，台账全部收口。**
