@@ -699,7 +699,10 @@ func lookupField(sd StatData, field string) (string, bool) {
 		if v, ok := r.Fields[field]; ok {
 			return v, true
 		}
-		if r.Name == field {
+		// row 名寻址：只对单字段行返回值。多字段行命中 row 名时返回 false——
+		// Go map 迭代序随机，挑一个字段等于碰运气（R5-D2：mirrorvlan_limit
+		// 行 "0.0" 有 active/limit/reject 三个字段，轮询时每轮可能采到不同值）
+		if r.Name == field && len(r.Fields) == 1 {
 			for _, v := range r.Fields {
 				return v, true
 			}
@@ -747,7 +750,7 @@ func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 
 	addTyped(s, ro("dpi_wait_stat",
 		"等 DPI 指标到目标值",
-		"轮询单个 DPI 指标直到达到目标值。什么时候用：下发策略或起停 DPI 后，要确认某指标确实变了（而不是立刻读一次碰运气）时。与 dpi_read_stat 的区别：read 读一次，wait 轮询到满足条件或超时。field 支持 row 名或 row.字段名（如 \"all.fopen_ok\"）；operator 取 eq/ne/gte/lte；value 为目标值，wait_s 为最长等待，every_s 为轮询间隔。"),
+		"轮询单个 DPI 指标直到达到目标值。什么时候用：下发策略或起停 DPI 后，要确认某指标确实变了（而不是立刻读一次碰运气）时。与 dpi_read_stat 的区别：read 读一次，wait 轮询到满足条件或超时。field 支持 row.字段名（如 \"all.fopen_ok\"、\"detail.all.marex_amt_loss\"；裸 row 名仅该行只有一个字段时可寻址，多字段行必须写 row.字段）；operator 取 eq/ne/gte/lte；value 为目标值，wait_s 为最长等待，every_s 为轮询间隔。"),
 		func(ctx context.Context, a dpiWaitStatIn) Envelope[dpiWaitStatData] {
 			every := orDefault(a.EveryS, 2)
 			wait := orDefault(a.WaitS, 60)
@@ -855,12 +858,20 @@ func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 
 	addTyped(s, destructive("dpi_clean_stat",
 		"清空 DPI 状态",
-		"执行 /opt/dpi/cmdmsg xsa 1 清空 DPI 统计，等 flow.stat concurrent_cnt 降为 0（流超时），再校验 xrt.stat total 收包为 0；不满足则重新下发并重试，对齐 Python clean_stat（dpi.py:190）的三轮编排。什么时候用：压测/回放前把计数器归零，让新一轮数据不被上一轮污染。返回 data{cleaned,rounds,last_rx,elapsed_s}。"),
+		"执行 /opt/dpi/cmdmsg xsa 1 清空 DPI 统计，等 flow.stat concurrent_cnt 降为 0（流超时），再校验 xrt.stat total 收包为 0；不满足则重新下发并重试，对齐 Python clean_stat（dpi.py:190）的三轮编排。什么时候用：压测/回放前把计数器归零，让新一轮数据不被上一轮污染。总耗时约 rounds×(timeout+5) 秒，加大入参 timeout/rounds 时须同步加大工具 timeout 参数（缺省 300 够 60×3 用）。返回 data{cleaned,rounds,last_rx,elapsed_s}。"),
 		func(ctx context.Context, a dpiCleanStatIn) Envelope[dpiCleanStatData] {
 			timeout := orDefault(a.Timeout, 60)
 			rounds := orDefault(a.Rounds, 3)
 			if timeout <= 0 || rounds <= 0 {
 				return allFailedEnvelope[dpiCleanStatData](b.resolve(a.Targets), "timeout 与 rounds 必须为正整数", ErrBusiness)
+			}
+			// 内部编排耗时 rounds×(timeout+5)+余量 必须装进信封预算（runEnvelope
+			// 到 BudgetEnd 会把后续 shell 钳到 1s，中途死而不是优雅返回 cleaned=false）。
+			// 入参 timeout 显式加大时要求同步加大信封超时。
+			need := rounds*(timeout+5) + 15
+			if a.BaseIn.Timeout > 0 && a.BaseIn.Timeout < need {
+				return allFailedEnvelope[dpiCleanStatData](b.resolve(a.Targets),
+					fmt.Sprintf("编排需要约 %d 秒（rounds×(timeout+5)+15），入参 timeout=%d 不够——请同步加大本工具 timeout 参数", need, a.BaseIn.Timeout), ErrBusiness)
 			}
 			return runEnvelope[dpiCleanStatData](b, ctx, a.BaseIn, "dpi_clean_stat",
 				map[string]any{"timeout": timeout, "rounds": rounds}, LkSystem, "", false,

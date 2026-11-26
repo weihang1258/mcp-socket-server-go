@@ -81,8 +81,11 @@ func (s *Snapshot) Contains(a netip.Addr) bool {
 	if !a.IsValid() {
 		return false
 	}
+	// v4-mapped（::ffff:x.x.x.x）Is4()==false 但语义是 v4——agent 对双栈
+	// 抓包有意回 mapped 串（pcapflow.go），ip_lookup 也可能收到 mapped 字面量。
+	// 先 Unmap 再判族（纯 v6 上 Unmap 是恒等）。
+	a = a.Unmap()
 	if a.Is4() {
-		a = a.Unmap()
 		i := sort.Search(len(s.v4), func(i int) bool {
 			return lastAddr(s.v4[i]).Compare(a) >= 0
 		})
