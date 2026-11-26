@@ -110,7 +110,7 @@ func (b *Bridge) registerIPDBTools(s *mcp.Server) {
 				dstIn := snap.Contains(dst)
 				out = append(out, ipLookupPairOut{
 					Src: p.Src, Dst: p.Dst, SrcIn: srcIn, DstIn: dstIn,
-					Direction: directionOf(srcIn, dstIn),
+					Direction: snap.Direction(src, dst), // 四态唯一真相在 Snapshot.Direction
 				})
 			}
 			return runEnvelope[ipLookupData](b, ctx, a.BaseIn, "ip_lookup",
@@ -121,15 +121,3 @@ func (b *Bridge) registerIPDBTools(s *mcp.Server) {
 		})
 }
 
-func directionOf(srcIn, dstIn bool) string {
-	switch {
-	case srcIn && dstIn:
-		return "internal"
-	case srcIn:
-		return "outbound"
-	case dstIn:
-		return "inbound"
-	default:
-		return "external"
-	}
-}

@@ -7,7 +7,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// 方案 §2/§3 契约：45 个工具，每个都有 inputSchema / outputSchema / _meta。
+// 方案 §2/§3 契约：48 个工具，每个都有 inputSchema / outputSchema / _meta。
 func TestToolContract(t *testing.T) {
 	b := newTestBridge(t)
 	srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)

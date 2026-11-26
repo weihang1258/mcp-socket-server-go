@@ -29,7 +29,7 @@ type statKind struct {
 	warm time.Duration
 }
 
-// statKinds 23 种 kind（方案 §4.10.2 清单）。
+// statKinds 35 种 kind（方案 §4.10.2 的 23 种 + flow_wait + C2 的 10 种 + raw_text 兜底）。
 var statKinds = map[string]statKind{
 	// —— 表头逐行 ——
 	"xrt":           {file: shmXsa + "xrt.stat", mode: "header"},
@@ -90,7 +90,7 @@ var marexResource = map[string]string{
 
 type dpiReadStatIn struct {
 	BaseIn
-	Kind     string `json:"kind" jsonschema:"状态种类：xrt|xrtinfo|port_for_snmp|httpxdr|xdrtxtlog|xdrtxtlog2|eublock|proto_app|flow|eu_urlnode|eu_restore|eu_policy|adms_idc_debug|eu_output|mirrorvlan|pcapdump|uploadfile|msgtask|datarpt|datarpt_conn|commem|marex|time_main|tcpsegment|ring|malicious|evilblock|proto_public|mirrorvlan_limit|pcapdump_storage|eu_overseaip|sysinfo|ext_xrt|raw_text"`
+	Kind     string `json:"kind" jsonschema:"状态种类：xrt|xrtinfo|port_for_snmp|httpxdr|xdrtxtlog|xdrtxtlog2|eublock|proto_app|flow|flow_wait|eu_urlnode|eu_restore|eu_policy|adms_idc_debug|eu_output|mirrorvlan|pcapdump|uploadfile|msgtask|datarpt|datarpt_conn|commem|marex|time_main|tcpsegment|ring|malicious|evilblock|proto_public|mirrorvlan_limit|pcapdump_storage|eu_overseaip|sysinfo|ext_xrt|raw_text"`
 	Resource string `json:"resource,omitempty" jsonschema:"仅 kind 为 marex 用：eu_plc | pcapdump | mirr | vpn_block"`
 	Path     string `json:"path,omitempty" jsonschema:"覆盖默认文件路径（缺省取 kind 对应的 /dev/shm/xsa/*.stat）；kind=raw_text 时必填任意 .stat 绝对路径"`
 }
@@ -730,7 +730,7 @@ func compareValues(actual, want, op string) bool {
 func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 	addTyped(s, ro("dpi_read_stat",
 		"读 DPI 状态文件",
-		"按 kind 读 DPI 状态文件并解析成统一行结构，只读不判定。什么时候用：要看当前值（一次性快照）时用它；要等某个值变化到目标请用 dpi_wait_stat。kind 可选 34 种（见参数说明，含 tcpsegment/ring/malicious/evilblock/proto_public/mirrorvlan_limit/pcapdump_storage/eu_overseaip/sysinfo/ext_xrt、flow_wait（concurrent_cnt 直取）与 raw_text 兜底——raw_text 需 path 传任意 .stat 绝对路径，按行号原样返回）。返回 data{kind,file,rows[],count,truncated}，rows 每项含 name 与 fields。"),
+		"按 kind 读 DPI 状态文件并解析成统一行结构，只读不判定。什么时候用：要看当前值（一次性快照）时用它；要等某个值变化到目标请用 dpi_wait_stat。kind 可选 35 种（见参数说明，含 tcpsegment/ring/malicious/evilblock/proto_public/mirrorvlan_limit/pcapdump_storage/eu_overseaip/sysinfo/ext_xrt、flow_wait（concurrent_cnt 直取）与 raw_text 兜底——raw_text 需 path 传任意 .stat 绝对路径，按行号原样返回）。返回 data{kind,file,rows[],count,truncated}，rows 每项含 name 与 fields。"),
 		func(ctx context.Context, a dpiReadStatIn) Envelope[StatData] {
 			// 方案 §7：marex（固定 touch + sleep 4）与 eu_output（grep 后解析）给 30 秒
 			if a.Timeout == 0 && (a.Kind == "marex" || a.Kind == "eu_output") {
@@ -865,6 +865,14 @@ func (b *Bridge) registerDpiStatTools(s *mcp.Server) {
 				func(c *Client) (any, error) {
 					start := time.Now()
 					cmd1 := "sudo /opt/dpi/cmdmsg xsa 1"
+					// Python clean_stat（dpiAutoExcel 死代码，从未被业务调用）首轮不发 cmd1、
+					// 只等流超时——依赖调用方先手动清空。工具版必须自洽：先下发再验证，
+					// 保证"调用即清空"语义（cmd1 幂等，多发无害）。
+					if res, err := shell(c, cmd1); err != nil {
+						return nil, err
+					} else if code := intOf(res["code"]); code != 0 {
+						return nil, cmdErr(res, fmt.Sprintf("执行 %s 失败", cmd1))
+					}
 					out := dpiCleanStatData{}
 					for i := 1; i <= rounds; i++ {
 						out.Rounds = i

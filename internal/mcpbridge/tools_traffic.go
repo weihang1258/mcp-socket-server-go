@@ -451,7 +451,7 @@ func (b *Bridge) registerPcapTools(s *mcp.Server) {
 							}
 							m["src_ip_in"] = snap.Contains(src)
 							m["dest_ip_in"] = snap.Contains(dst)
-							m["direction"] = directionOf(m["src_ip_in"].(bool), m["dest_ip_in"].(bool))
+							m["direction"] = snap.Direction(src, dst) // 四态唯一真相在 Snapshot.Direction
 						}
 					}
 					return pcapFlowsData{Flows: flows, Total: total, Truncated: truncated}, nil

@@ -326,7 +326,7 @@ func splitHostPort(hp string, defaultPort int) (string, int) {
 // ---- 工具注册（15 工具；入参 typed schema：jsonschema tag = Python Field description，
 // omitempty = 非必填（可选参数默认值写入描述），对齐 server.py:37-75 的 Annotated 契约）----
 
-// RegisterTools 注册全部工具（11 类，方案 §2/§4）。
+// RegisterTools 注册全部工具（12 类，方案 §2/§4 + C1 IP 库）。
 // 每个工具的 name/description/inputSchema/outputSchema/_meta 一次注册齐全。
 func (b *Bridge) RegisterTools(s *mcp.Server) {
 	b.registerTargetTools(s)
