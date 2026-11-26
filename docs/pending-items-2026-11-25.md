@@ -131,5 +131,10 @@ Q5 VLAN 包 force_ip 应生效（→A3 按回归修）。
 | I18 | lookupField 裸 row 名 fallback 返回随机 map 值（迭代序）→ mirrorvlan_limit 等多字段行 wait 判定非确定 | ✅已修：多字段行命中 row 名返回 false，歧义显式失败 |
 | I19 | Loader.Load 锁跨远端 IO → 全进程 ip_db_load 串行化到 socket 超时量级 | ✅已修：下载/解析移出锁，mu 只护 swap |
 | I20 | clean_stat 内部编排 rounds×(timeout+5) 可超信封预算（BudgetEnd 钳 1s 中途死） | ✅已修：入参加大时校验预算报业务错误 + 描述补耗时公式 |
+| I21 | （R5-A 逐行审查，commit a5600ac）**dpiCleanStatIn.Timeout 遮蔽 BaseIn.Timeout**（同 json:"timeout" 键，外层胜出）→ 信封超时永久默认 300s、预算校验死代码 | ✅已修：单轮等待改名 round_timeout_s |
+| I22 | xrt total 读取不查 code：文件缺失静默重发破坏性 cmdmsg；空输出（cmdmsg 清空瞬间 xrt.stat 重建窗口，82 实测）按 Python except 语义归入重试 | ✅已修：code!=0 报错、空输出重试 |
+| I23 | ip_lookup resolve 0 台伪造 targets 填 Ok=true 绕过失败行契约 | ✅已修：走 emptyResolveEnvelope |
+| I24 | parseLine 无脑取最左两个 IP 列：ID 列为 IP 形态时真实区间被错建成 ID 段（静默错判） | ✅已修：按列数定起止列（4+列取 3/4、2 列取 1/2、3 列回退）+ 脏列回退，补回归测试 |
+| I25 | loadOne sha 命中路径 mgr.Get 在锁外：并发 Set 竞态 → skipped=true 报另一份统计 | ✅已修：cache 查与 Get 同 mu 区间 |
 
 **全部 A/B/C/G + R5 复审完成 → 待发版 v1.9.28（scripts/release.sh + 真机验收）。****
