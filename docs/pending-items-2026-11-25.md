@@ -127,5 +127,9 @@ Q5 VLAN 包 force_ip 应生效（→A3 按回归修）。
 | I14 | ip_lookup 纯内存却经 runEnvelope 逐靶机建连（@tag 批量白连、靶机宕机反报 network 错） | ✅已修：预计算后直接组装信封 |
 | I15 | parseHeaderZipKind 每行 3 次分词（2 次 strings.Fields + 全 kind splitCols） | ✅已修：复用 fields，splitCols 仅 3 个 kind |
 | I16 | bitsSpan 死代码 ~30 行 | ✅已删 |
+| I17 | （R5-D Go 陷阱审查，commit 9ea17bf）**Contains 漏 v4-mapped**：::ffff:x.x.x.x Is4()==false 走 v6 列表 → mapped 查询全 false；agent 双栈抓包有意回 mapped 串，此类流方向全错 | ✅已修：Contains 无原则 Unmap；82 真机复验 mapped/plain 同判 |
+| I18 | lookupField 裸 row 名 fallback 返回随机 map 值（迭代序）→ mirrorvlan_limit 等多字段行 wait 判定非确定 | ✅已修：多字段行命中 row 名返回 false，歧义显式失败 |
+| I19 | Loader.Load 锁跨远端 IO → 全进程 ip_db_load 串行化到 socket 超时量级 | ✅已修：下载/解析移出锁，mu 只护 swap |
+| I20 | clean_stat 内部编排 rounds×(timeout+5) 可超信封预算（BudgetEnd 钳 1s 中途死） | ✅已修：入参加大时校验预算报业务错误 + 描述补耗时公式 |
 
 **全部 A/B/C/G + R5 复审完成 → 待发版 v1.9.28（scripts/release.sh + 真机验收）。****
