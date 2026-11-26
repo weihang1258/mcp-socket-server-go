@@ -149,28 +149,6 @@ func trailingZeros(a netip.Addr) int {
 	return n
 }
 
-// bitsSpan lo..hi（含）的位数跨度：≥1。等价 floor(log2(hi-lo))+1。
-func bitsSpan(lo, hi netip.Addr) int {
-	diff := bigDiff(lo, hi) // hi-lo 的 16 字节大端表示
-	bits := lo.BitLen()
-	// 找最高有效位
-	for byteIdx, byt := range diff {
-		if byt != 0 {
-			hb := 7
-			for byt&0x80 == 0 {
-				byt <<= 1
-				hb--
-			}
-			leading := byteIdx * 8 // 大端：前面的字节都是 0
-			if lo.Is4() {
-				leading -= 96 // v4 有效部分是最后 4 字节
-			}
-			return bits - (leading + hb)
-		}
-	}
-	return 1 // lo==hi
-}
-
 // bigDiff hi-lo（大端 16 字节）。仅内部使用（lo<=hi 同族）。
 func bigDiff(lo, hi netip.Addr) [16]byte {
 	var out [16]byte

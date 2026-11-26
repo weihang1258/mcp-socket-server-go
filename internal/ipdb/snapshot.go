@@ -2,6 +2,7 @@ package ipdb
 
 import (
 	"net/netip"
+	"sort"
 	"sync/atomic"
 )
 
@@ -19,10 +20,43 @@ type Snapshot struct {
 
 // NewSnapshot 由段集建快照。
 func NewSnapshot(segs []Seg, sha256 string) *Snapshot {
-	ps, skipped := SegsToPrefixes(segs)
+	merged := mergeSegs(segs)
+	ps, skipped := SegsToPrefixes(merged)
 	s := &Snapshot{Entries: len(segs), SHA256: sha256, Skipped: skipped}
 	s.splitFamilies(ps)
 	return s
+}
+
+// mergeSegs 按 (Start,End) 排序后合并重叠/相邻段（同族）。
+// 输出互不重叠——Contains 二分的前提。
+func mergeSegs(segs []Seg) []Seg {
+	if len(segs) < 2 {
+		return segs
+	}
+	sorted := make([]Seg, len(segs))
+	copy(sorted, segs)
+	sort.Slice(sorted, func(i, j int) bool {
+		if c := sorted[i].Start.Compare(sorted[j].Start); c != 0 {
+			return c < 0
+		}
+		return sorted[i].End.Compare(sorted[j].End) < 0
+	})
+	out := sorted[:1]
+	for _, s := range sorted[1:] {
+		cur := &out[len(out)-1]
+		if cur.Start.Is4() != s.Start.Is4() {
+			out = append(out, s) // 跨族不合并
+			continue
+		}
+		if cur.End.Compare(s.Start) >= 0 {
+			if cur.End.Compare(s.End) < 0 {
+				cur.End = s.End // 重叠：扩到更远的尾
+			}
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 func (s *Snapshot) splitFamilies(ps []netip.Prefix) {
@@ -33,35 +67,31 @@ func (s *Snapshot) splitFamilies(ps []netip.Prefix) {
 			s.v6 = append(s.v6, p)
 		}
 	}
+	// mergeSegs 按 start 排序 + 不重叠 → lastAddr 天然全序，无需再排
 	s.Prefixes = len(s.v4) + len(s.v6)
 }
 
 // Contains 该地址是否在库内。
 //
-// 查询结构不用显式 radix 树：前缀集合来自「区间拆 CIDR」，天然**互不重叠**
-// （rangeToPrefixes 输出保证），且每段查询可化为「找任一前缀包含 a」。
-// 5 万前缀线性扫是毫秒级、1 万对 IP 判定也就一次建库成本——按 ponytail 原则
-// 先线性；若生产 house 文件涨到十万段量级再换 lastAddr 排序二分（ ponytail:
-// 线性扫，10 万段以上换排序+二分）。
+// 前缀集合来自「区间拆 CIDR」：单段内互不重叠，多段间可能重叠（源文件
+// 同区间重复行）。建库时先按起止合并所有重叠/相邻段再拆前缀 → 合并后
+// 互不重叠且 lastAddr 全序，Contains 用 sort.Search 二分（R5 复审实测
+// 5 万前缀线性扫一次未命中 ~390µs，1 万对判定就是秒级 CPU）。
 func (s *Snapshot) Contains(a netip.Addr) bool {
 	if !a.IsValid() {
 		return false
 	}
 	if a.Is4() {
 		a = a.Unmap()
-		for i := range s.v4 {
-			if s.v4[i].Contains(a) {
-				return true
-			}
-		}
-		return false
+		i := sort.Search(len(s.v4), func(i int) bool {
+			return lastAddr(s.v4[i]).Compare(a) >= 0
+		})
+		return i < len(s.v4) && s.v4[i].Contains(a)
 	}
-	for i := range s.v6 {
-		if s.v6[i].Contains(a) {
-			return true
-		}
-	}
-	return false
+	i := sort.Search(len(s.v6), func(i int) bool {
+		return lastAddr(s.v6[i]).Compare(a) >= 0
+	})
+	return i < len(s.v6) && s.v6[i].Contains(a)
 }
 
 // Manager 每路径一库（设计修订：paths 直给，map[路径]*Snapshot）。

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/weihang1258/mcp-socket-server-go/internal/ipdb"
@@ -113,11 +114,20 @@ func (b *Bridge) registerIPDBTools(s *mcp.Server) {
 					Direction: snap.Direction(src, dst), // 四态唯一真相在 Snapshot.Direction
 				})
 			}
-			return runEnvelope[ipLookupData](b, ctx, a.BaseIn, "ip_lookup",
-				map[string]any{"lib": lib, "count": len(a.Pairs)}, LkNone, "", true,
-				func(c *Client) (any, error) {
-					return ipLookupData{Lib: lib, Pairs: out}, nil // 纯内存：不触达靶机
-				})
+			// 纯内存查询：结果已算完，不连靶机（@tag 批量时不该为无网络工作
+			// 逐台建连，靶机宕机也不影响判定）。信封组装/审计与 runEnvelope 同构。
+			raw := make([]TargetResult, 0, max(len(b.resolve(a.Targets)), 1))
+			targets := b.resolve(a.Targets)
+			if len(targets) == 0 {
+				targets = []string{joinTargets(a.Targets)}
+			}
+			for _, t := range targets {
+				raw = append(raw, TargetResult{Target: t, Ok: true,
+					Data: ipLookupData{Lib: lib, Pairs: out}})
+			}
+			t0 := time.Now()
+			b.writeAudit(ctx, "ip_lookup", map[string]any{"lib": lib, "count": len(a.Pairs)}, raw, t0)
+			return envelopeFrom[ipLookupData](raw)
 		})
 }
 

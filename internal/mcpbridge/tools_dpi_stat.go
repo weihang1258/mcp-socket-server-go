@@ -237,11 +237,13 @@ func parseHeaderZipKind(kind string, lines []string) []StatRow {
 			continue
 		}
 		row := StatRow{Name: fields[0], Fields: map[string]string{}}
-		// 数据列按 splitCols 取（ring/tcpsegment 数据行全多空格；普通 kind
-		// 单空格分隔时 splitCols 退化为整行一块，此时仍用 Fields）
-		dataCols := strings.Fields(line)
-		if c := splitCols(strings.TrimSpace(line)); len(c) > 1 {
-			dataCols = c
+		// ring/tcpsegment 数据行全多空格，按 splitCols 取列；其余 kind
+		// 单空格分隔，Fields 已是列切分（R5 复审 E3：别对每行重复分词）
+		dataCols := fields
+		if kind == "ring" || kind == "tcpsegment" || kind == "pcapdump_storage" {
+			if c := splitCols(strings.TrimSpace(line)); len(c) > 1 {
+				dataCols = c
+			}
 		}
 		for i, h := range head[1:] {
 			if i < len(dataCols)-1 {
