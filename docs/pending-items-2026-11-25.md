@@ -159,3 +159,11 @@ tcpsegment/mirrorvlan_limit 新 kind、pcap_extract_flows S4 方向字段（outb
 32（1.9.21→1.9.28），82（1.9.26→1.9.28，见 J 节）。bridge_version 三台复核全 1.9.28。
 本机 /opt/socket/versions/1.9.28 sha 与 release 资产一致（923abde3…）；
 1.9.26/27/27-ipdb/27-p0fix 目录保留作回滚锚点。**v1.9.28 铺开完成，台账全部收口。**
+
+## L. 桥版本补 bump 与快照对齐（2026-11-26，follow 侧复审引出）
+
+BridgeVersion 0.4.0→0.5.0（c77eb39）：自 S4 起工具集 15→48 未动版本号，按「能力变更升版本」补齐；
+target_add/target_remove 的 port 描述统一括号风格（e6ee81f），其余 46 工具本就一致。
+本机源码已 bump 但**尚未构建部署**（运行中的桥实测仍报 0.4.0，需 go build + systemctl restart 后生效）；
+follow 平台 mcp_tool 快照按页面「测试连接」同口径刷新至 48 工具（ip_db_load/ip_lookup/dpi_clean_stat
+入库，行级启停保留；port 描述仍为旧文案，随下次桥部署自然对齐）。
