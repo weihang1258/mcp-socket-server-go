@@ -22,62 +22,29 @@ import (
 //     内置工具集不在本服务管辖范围内。
 //   - 列全 12 类能力 + 触发关键词：ToolSearch 只做字面量匹配，模型得先想到
 //     对应的词才搜得到。
-const ServerInstructions = `本服务用于操作**远程主机**（也称靶机/服务器/设备）：通过 socket_server 协议连接
-远端执行命令、传文件、抓包分析、流量回放、DPI 设备管理。所有操作发生在被连接的那台
-机器上，不是运行本客户端的那台。
+const ServerInstructions = `操作**远程主机**（靶机/服务器/设备）：socket_server 协议连远端执行命令、传文件、
+抓包、流量回放、DPI 设备管理。所有操作发生在被连接的机器上，不是本机。
 
-【能力总览（12 类 48 个工具）】
-1. 主机登记：target_list（列出已登记）、target_add（登记新主机，会先探活）、target_remove（移除）。
-2. 远程命令：shell_exec（在远端执行任意命令，返回 code/stdout/stderr）。
-3. 文件传输：file_get（远端下载到本地）、file_put（本地上传到远端）、file_stat（查存在性/大小）、
-   file_list（列目录）、file_mkdir、file_remove、file_unzip（解压）、file_transfer_hint（生成 curl 命令）。
-4. 网络信息：net_route（默认路由与网卡）、net_set_mtu（改 MTU）、net_set_time（设系统时间）。
-5. 抓包：capture_start（启动抓包，可指定网卡与过滤表达式）、capture_stop（停止并判断 pcap 完整性）。
-6. 流量回放：replay_run（回放 pcap 文件，可限速、改五元组）。
-7. 流量分析：pcap_extract_flows（从 pcap 直接提五元组流，不下载文件）。
-8. 端口收流：listen_start（监听端口收流量）、listen_fetch（取回数据）、listen_save（存到远端）、
-   listen_clean（清空）、listen_stop。
-9. 拨测验证：probe_visit（用远端浏览器访问 URL，判断封堵/重定向是否生效）。
-10. 服务端自身：bridge_version（查远端 socket_server 版本）、bridge_upgrade（升级它）。
-11. 机房 IP 段库（2 个工具）：ip_db_load（从靶机读 ipsegs 文件建内存库）、
-    ip_lookup（判定 (源IP,目的IP) 的四态方向 internal/inbound/outbound/external）。
-12. DPI 设备（深度包检测/防火墙类设备，19 个工具）：dpi_get_info（版本/模式/PCI）、dpi_service（启停主程序）、
-    dpi_agent_service（启停升级 agent）、dpi_switch_mode（切工作模式）、dpi_apply_config（改配置并重启）、
-    dpi_get_config、dpi_read_stat（读状态文件）、dpi_wait_stat（等指标达标）、dpi_wait_file（等文件写完）、
-    dpi_check_stalled（查线程卡死）、dpi_policy_get（读策略）、dpi_policy_put（下发策略）、
-    dpi_policy_write（写策略资产）、dpi_policy_wait（等策略生效）、
-    dpi_clean_stat（清空统计）、dpi_backup、dpi_prepare_package（准备安装包）、dpi_install（全新安装）、dpi_upgrade（升级固件）。
+【12 类 48 个工具】1 登记 target_list/target_add/target_remove；2 命令 shell_exec；
+3 文件 file_get/file_put/file_stat/file_list/file_mkdir/file_remove/file_unzip/file_transfer_hint；
+4 网络 net_route/net_set_mtu/net_set_time；5 抓包 capture_start/capture_stop；6 回放 replay_run；
+7 流分析 pcap_extract_flows；8 收流 listen_start/listen_fetch/listen_save/listen_clean/listen_stop；
+9 拨测 probe_visit；10 桥自身 bridge_version/bridge_upgrade；11 IP 段 ip_db_load/ip_lookup；
+12 DPI：dpi_get_info/dpi_service/dpi_agent_service/dpi_switch_mode/dpi_apply_config/dpi_get_config/
+dpi_read_stat/dpi_wait_stat/dpi_wait_file/dpi_check_stalled/dpi_policy_get/dpi_policy_put/dpi_policy_write/
+dpi_policy_wait/dpi_clean_stat/dpi_backup/dpi_prepare_package/dpi_install/dpi_upgrade。
+远程/靶机/抓包/pcap/回放/打流/收流/传文件到远端/DPI/策略下发/封堵/拨测/IP 方向判定——想到这些词就搜本服务；
+各工具时机与入参见其自身 description。
 
-【什么时候该用本服务——看到这些词就该找这里】
-远程 / 远端 / 靶机 / 测试机 / 被测设备 / 目标主机 / 某台机器 / 那台服务器；
-抓包 / 抓流量 / tcpdump / pcap / 报文 / 五元组 / 流统计 / 流量分析；
-回放 / 重放 / replay / 打流 / 压测流量 / 限速回放；
-端口监听 / 收流量 / 收包 / 监听某端口；
-上传到远端 / 下载回来 / 传到靶机 / 取回文件 / 远端路径 / 远端目录；
-DPI / 防火墙 / 策略下发 / 封堵 / 重定向 / 模式切换 / 安装固件 / 升级设备 / 设备备份；
-拨测 / 验证封堵 / 访问某 URL 看通不通；
-IP 库 / 机房 IP 段 / ipsegs / 方向判定 / 入向 / 出向 / 内外判定；
-远端执行命令 / 在靶机上跑 / 远程 shell。
+【典型序列】target_list→target_add；抓包 net_route→capture_start→业务流量→capture_stop→file_get；
+回放 file_put→replay_run（同机抓包回放互斥）；收流 listen_start→listen_fetch/save→listen_stop；
+DPI dpi_get_info→dpi_prepare_package→dpi_install/dpi_upgrade→dpi_get_info 复核。
 
-【典型调用序列】
-- 第一次接触：target_list 看有哪些 → target_add 登记（会先探活）。
-- 执行远端命令：shell_exec（args 是完整命令字符串，如 "systemctl status xsa"）。
-- 传文件：file_put 上传 → shell_exec chmod +x → 执行；回传用 file_get。
-- 抓包分析：net_route 确认网卡 → capture_start → 跑业务流量 → capture_stop → file_get 取回 pcap。
-- 回放对比：file_put 传 pcap → replay_run；要同时抓包请用另一台主机（同机互斥）。
-- 端口收流：listen_start → 业务流量 → listen_fetch（回本地）或 listen_save（留远端）→ listen_stop。
-- DPI 设备：dpi_get_info 看现状 → dpi_prepare_package → dpi_install / dpi_upgrade → dpi_get_info 复核。
+【结果约定】统一信封 {ok,total,results[],failed[]}；failed[] 含 target/reason/error_type（network|timeout|business）；
+timeout 可能带 cleanup{killed,verified}，verified=false=未确认远端进程退出，勿假定环境已释放。
+多台主机 targets 数组或 @tag 标签；不可逆（file_remove/dpi_install/dpi_upgrade/dpi_switch_mode）先确认。`
 
-【结果约定】
-所有工具返回统一信封：{ok, total, results[], failed[]}。
-- results[].data 是该工具的具体结果，字段含义见各工具 outputSchema。
-- failed[] 每项含 target / reason / error_type（network | timeout | business）。
-- error_type=timeout 时可能带 cleanup{killed,verified}；verified 为 false 表示
-  无法确认远端进程已退出，不要假定环境已释放。
-- 多台主机用 targets 传数组，或 @tag 按标签批量选；工具名不带服务前缀但都属于本服务。
-- 不可逆操作（file_remove / dpi_install / dpi_upgrade / dpi_switch_mode）先确认路径和目标。`
-
-// NewServer 构建 mcp.Server（serverInfo.version = 桥版本 0.5.0——工具集 15→48 跨度随能力变更升版本，与 dt14 分离）。
+// NewServer 构建 mcp.Server（serverInfo.version = 桥版本——工具面/说明面变更升版本，与 dt14 分离）。
 func NewServer(b *Bridge) *mcp.Server {
 	impl := &mcp.Implementation{Name: "mcp-socket-server", Version: BridgeVersion}
 	s := mcp.NewServer(impl, &mcp.ServerOptions{Instructions: ServerInstructions})

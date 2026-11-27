@@ -167,3 +167,11 @@ target_add/target_remove 的 port 描述统一括号风格（e6ee81f），其余
 本机源码已 bump 但**尚未构建部署**（运行中的桥实测仍报 0.4.0，需 go build + systemctl restart 后生效）；
 follow 平台 mcp_tool 快照按页面「测试连接」同口径刷新至 48 工具（ip_db_load/ip_lookup/dpi_clean_stat
 入库，行级启停保留；port 描述仍为旧文案，随下次桥部署自然对齐）。
+
+## M. P-INSTR 服务级说明瘦身与 0.5.1 bump（2026-11-27，follow 侧方案 A）
+
+ServerInstructions 2,716→约 1.6k rune：能力总览压成 12 类一行式（48 工具名一个不少，TestServerInstructionsExist
+继续逐名校验），触发词合一行，典型序列留五条，结果约定保留信封/error_type/cleanup.verified/@tag/不可逆确认。
+新增 TestServerInstructionsSlim：>1500 rune 直接红（重写压缩，不许抬线）。
+BridgeVersion 0.5.0→0.5.1：说明面变更 + 线上桥仍在跑 0.4.0，本次随部署一并到位；部署判据=
+:9010 initialize 的 serverInfo.version=0.5.1 且 instructions≤1500。go test mcpbridge + cmd 全绿。

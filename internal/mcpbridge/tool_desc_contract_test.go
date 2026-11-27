@@ -126,6 +126,16 @@ func TestServerInstructionsExist(t *testing.T) {
 	}
 }
 
+// TestServerInstructionsSlim（P-INSTR 2026-11-27）：说明随 initialize 首轮全量预付，
+// 超过上限会把每个新会话的首轮输入顶高。上限按「12 类 48 个工具名 + 结果约定」
+// 的最小完整面取 1500 rune，重写文本超了先压缩再落地，不许直接抬线。
+func TestServerInstructionsSlim(t *testing.T) {
+	n := len([]rune(ServerInstructions))
+	if n > 1500 {
+		t.Errorf("ServerInstructions %d rune 超上限 1500——压缩文案而不是抬上限", n)
+	}
+}
+
 // TestServerInstructionsDontDictateOtherTools 只说明自己是远程工具，不指导
 // 宿主的内置工具怎么用——harness 各不相同，工具集不在本服务管辖范围内。
 // 子工具描述同样适用（2026-11-06 用户第二遍指出 file_get/file_list/shell_exec）。
