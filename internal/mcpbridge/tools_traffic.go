@@ -29,7 +29,7 @@ type captureStopIn struct {
 
 type replayIn struct {
 	BaseIn
-	Pcaps         []string `json:"pcaps" jsonschema:"靶机上 pcap 文件的绝对路径列表，如 [\"/home/tmp/a.pcap\"]（先用 file_put 上传）"`
+	Pcaps         []string `json:"pcaps" jsonschema:"靶机上 pcap 文件的绝对路径列表，如 [\"/home/tmp/a.pcap\"]（先用 file_transfer 的 curl 方法上传）"`
 	UplinkIface   string   `json:"uplink_iface" jsonschema:"上行物理网卡名，如 eth0"`
 	DownlinkIface string   `json:"downlink_iface,omitempty" jsonschema:"下行物理网卡名；单臂回放可与上行相同"`
 	UplinkVlan    *int     `json:"uplink_vlan,omitempty" jsonschema:"VLAN ID（可选，不给则不打 VLAN 标）"`
@@ -224,7 +224,7 @@ func (b *Bridge) registerCaptureTools(s *mcp.Server) {
 func (b *Bridge) registerTrafficTools(s *mcp.Server) {
 	addTyped(s, destructive("replay_run",
 		"回放 pcap 流量",
-		"在靶机回放 pcap 流量。什么时候用：要复现某段流量、验证策略或对比封堵效果时。前置：先用 file_put 把 pcap 传到靶机，pcaps 填靶机上的绝对路径，如 [\"/home/tmp/a.pcap\"]。回放与抓包/拨测在同一台靶机上互斥，回放+抓包请分属两台靶机。uplink_iface 填上行网卡名（如 \"eth0\"），downlink_iface 填下行网卡；单臂回放时两者可相同，此时下载方向计数恒 0 属正常。mbps 缺省 50，显式传 0 = 不限速（打满网口）。"),
+		"在靶机回放 pcap 流量。什么时候用：要复现某段流量、验证策略或对比封堵效果时。前置：先用 file_transfer 返回的 curl 方法把客户端 pcap 直传到靶机，pcaps 填靶机上的绝对路径，如 [\"/home/tmp/a.pcap\"]。回放与抓包/拨测在同一台靶机上互斥，回放+抓包请分属两台靶机。uplink_iface 填上行网卡名（如 \"eth0\"），downlink_iface 填下行网卡；单臂回放时两者可相同，此时下载方向计数恒 0 属正常。mbps 缺省 50，显式传 0 = 不限速（打满网口）。"),
 		func(ctx context.Context, a replayIn) Envelope[map[string]any] {
 			var fis, fid *string
 			if a.ForceIPSrc != "" {
@@ -419,7 +419,7 @@ func (b *Bridge) registerListenTools(s *mcp.Server) {
 func (b *Bridge) registerPcapTools(s *mcp.Server) {
 	addTyped(s, ro("pcap_extract_flows",
 		"从 pcap 提五元组流",
-		"从靶机 pcap 目录直接提取五元组流，不下载 pcap 文件。什么时候用：只要流统计、查误封，不需要 pcap 原件时，比 file_get 下载后本地解析快得多。pcap_dir 填靶机上的目录路径。已 ip_db_load 建库时每条流附加 src_ip_in/dest_ip_in/direction（相对默认库），未建库则省略。返回流数统计，最多 1000 条，truncated=true 表示已截断。"),
+		"从靶机 pcap 目录直接提取五元组流，不下载 pcap 文件。什么时候用：只要流统计、查误封，不需要 pcap 原件时，不必下载 pcap 到客户端。pcap_dir 填靶机上的目录路径。已 ip_db_load 建库时每条流附加 src_ip_in/dest_ip_in/direction（相对默认库），未建库则省略。返回流数统计，最多 1000 条，truncated=true 表示已截断。"),
 		func(ctx context.Context, a pcapFlowsIn) Envelope[pcapFlowsData] {
 			return runEnvelope[pcapFlowsData](b, ctx, a.BaseIn, "pcap_extract_flows",
 				map[string]any{"pcap_dir": a.PcapDir}, LkNone, "", true, func(c *Client) (any, error) {

@@ -106,10 +106,8 @@ var toolBasis = map[string]string{
 	"file_list":           "底层 find，原 listdir 无超时，按文件多时变慢估 30",
 	"file_mkdir":          "dt9 单次操作",
 	"file_remove":         "大目录删除可能耗时，原 rm 无超时",
-	"file_get":            "实测 367 MB 经 :9001 耗时 3.1 秒，2 GB 约 17 秒",
-	"file_put":            "初值，待最大安装包实测校准（方案 §12 待实证 3）",
 	"file_unzip":          "初值，原实现无 deadline，待最大包实测",
-	"file_transfer_hint":  "零网络调用，只拼 curl 命令",
+	"file_transfer":       "零网络调用，只返回客户端直连靶机的 curl 方法",
 	"shell_exec":          "沿用现有 60；wait=false 时上限 15",
 	"net_route":           "dt4 一次查询",
 	"net_set_mtu":         "dt10 内部改完会 sleep 5 秒",
@@ -169,8 +167,8 @@ func withMeta(t *mcp.Tool) *mcp.Tool {
 var toolDanger = map[string]string{
 	"target_list": DangerRead, "target_add": DangerWrite, "target_remove": DangerDestructive,
 	"file_stat": DangerRead, "file_list": DangerRead, "file_mkdir": DangerWrite,
-	"file_remove": DangerDestructive, "file_get": DangerRead, "file_put": DangerWrite,
-	"file_unzip": DangerWrite, "file_transfer_hint": DangerRead,
+	"file_remove": DangerDestructive,
+	"file_unzip":  DangerWrite, "file_transfer": DangerRead,
 	"shell_exec": DangerDestructive,
 	"net_route":  DangerRead, "net_set_mtu": DangerDestructive, "net_set_time": DangerDestructive,
 	"capture_start": DangerWrite, "capture_stop": DangerWrite,
@@ -178,8 +176,8 @@ var toolDanger = map[string]string{
 	"listen_start": DangerWrite, "listen_clean": DangerWrite, "listen_save": DangerWrite,
 	"listen_fetch": DangerRead, "listen_stop": DangerWrite,
 	"pcap_extract_flows": DangerRead,
-	"ip_db_load": DangerWrite, "ip_lookup": DangerRead,
-	"dpi_get_info":       DangerRead, "dpi_get_config": DangerRead, "dpi_apply_config": DangerDestructive,
+	"ip_db_load":         DangerWrite, "ip_lookup": DangerRead,
+	"dpi_get_info": DangerRead, "dpi_get_config": DangerRead, "dpi_apply_config": DangerDestructive,
 	"dpi_service": DangerDestructive, "dpi_agent_service": DangerDestructive, "dpi_switch_mode": DangerDestructive,
 	"dpi_read_stat": DangerRead, "dpi_wait_stat": DangerRead, "dpi_wait_file": DangerRead, "dpi_check_stalled": DangerRead,
 	"dpi_clean_stat": DangerDestructive,
@@ -193,7 +191,7 @@ var toolDanger = map[string]string{
 var toolDefaultTimeout = map[string]int{
 	"target_list": 5, "target_add": 10, "target_remove": 10,
 	"file_stat": 15, "file_list": 30, "file_mkdir": 15, "file_remove": 60,
-	"file_get": 120, "file_put": 300, "file_unzip": 600, "file_transfer_hint": 5,
+	"file_unzip": 600, "file_transfer": 5,
 	"shell_exec":          60,
 	"net_route":           15,
 	"net_set_mtu":         30,
@@ -375,7 +373,7 @@ func noResolveReason(targets []string) string {
 	return base + "（targets=" + joinTargets(targets) + "，未知 @tag 或未登记的主机）"
 }
 
-// emptyResolveEnvelope 不走 runBatchResults 的工具（如纯本地的 file_transfer_hint）
+// emptyResolveEnvelope 不走 runBatchResults 的工具（如纯本地的 file_transfer）
 // 也必须给出同样的可见失败，否则 0/0 会被读成"全成功"。
 func emptyResolveEnvelope[T any](targets []string) Envelope[T] {
 	return Envelope[T]{Total: 1, Results: []Result[T]{}, Failed: []Failure{{

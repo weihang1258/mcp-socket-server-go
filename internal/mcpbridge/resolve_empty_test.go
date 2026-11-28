@@ -43,8 +43,8 @@ func TestEmptyTargetsIsVisibleFailure(t *testing.T) {
 }
 
 // 不走 runBatchResults 的纯本地工具同样不能回 0/0。
-func TestFileTransferHintUnknownTagIsVisibleFailure(t *testing.T) {
-	env := emptyResolveEnvelope[fileTransferHintData]([]string{"@gone"})
+func TestFileTransferUnknownTagIsVisibleFailure(t *testing.T) {
+	env := emptyResolveEnvelope[fileTransferData]([]string{"@gone"})
 	if env.Ok != 0 || env.Total != 1 || len(env.Failed) != 1 {
 		t.Fatalf("纯本地工具也要给可见失败: %+v", env)
 	}

@@ -175,3 +175,19 @@ ServerInstructions 2,716→约 1.6k rune：能力总览压成 12 类一行式（
 新增 TestServerInstructionsSlim：>1500 rune 直接红（重写压缩，不许抬线）。
 BridgeVersion 0.5.0→0.5.1：说明面变更 + 线上桥仍在跑 0.4.0，本次随部署一并到位；部署判据=
 :9010 initialize 的 serverInfo.version=0.5.1 且 instructions≤1500。go test mcpbridge + cmd 全绿。
+
+## N. 恢复客户端 curl 直传接口（2026-11-28）
+
+原 Python `file_transfer` 的设计是返回客户端直连靶机 :9001 的 curl 方法，明确客户端文件不经
+远端 MCP 桥中转。Go v3 工具面改造新增桥侧 `file_get/file_put`，把原工具降级为 `file_transfer_hint`，
+并在抓包/回放/命令等描述里默认桥中转，违背了原设计。现删除公开 `file_get/file_put`，恢复
+`file_transfer`，输出 `target/ip/http_port/download/upload`；curl 增加 `-f` 避免把 HTTP 错误体当文件。
+桥侧内部 `httpUpload/httpDownload` 保留，升级和 DPI 安装包流程不受影响。
+
+- 工具总数 48→46，BridgeVersion 0.5.1→0.6.0；服务说明与 replay/shell/pcap 引用同步。
+- 新契约测试覆盖：IP/端口/命令、IPv6 URL、未知标签、无网络生成；`go test ./... -count=1`、
+  `go vet ./...` 通过。
+- 82 真机 curl 往返通过：客户端 `/tmp` → 82 `/home/tmp` → 客户端 `/tmp`，61B 三份文件
+  sha256 均 `48428bf3da41ed9f48c3f0a4b6a478b26107be9d2ae4b477bf300689dceac375`；靶机测试文件已删除。
+- :9001 GET/POST 行为不变；直接 curl 要求靶机 1.7.0+、`http_port` 非 0、客户端到该端口可达。
+- 拟发布 v1.9.29（BridgeVersion 0.6.0）；本机桥已手工部署并验证 46 工具与 file_transfer。

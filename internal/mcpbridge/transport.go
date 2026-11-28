@@ -14,7 +14,7 @@ import (
 
 // ServerInstructions 服务级说明：客户端在 initialize 时拿到，作为独立的
 // MCP instructions 块交给模型。这是「这组工具管什么」的唯一服务级入口——
-// 45 个子工具描述装不下整体认知，没有它模型只知道有一堆 file_get/shell_exec，
+// 子工具描述装不下整体认知，没有它模型只知道有一堆 shell_exec/file_stat，
 // 不知道该在什么场景想起来。
 //
 // 写作原则：
@@ -25,8 +25,8 @@ import (
 const ServerInstructions = `操作**远程主机**（靶机/服务器/设备）：socket_server 协议连远端执行命令、传文件、
 抓包、流量回放、DPI 设备管理。所有操作发生在被连接的机器上，不是本机。
 
-【12 类 48 个工具】1 登记 target_list/target_add/target_remove；2 命令 shell_exec；
-3 文件 file_get/file_put/file_stat/file_list/file_mkdir/file_remove/file_unzip/file_transfer_hint；
+【12 类 46 个工具】1 登记 target_list/target_add/target_remove；2 命令 shell_exec；
+3 文件 file_stat/file_list/file_mkdir/file_remove/file_unzip/file_transfer；
 4 网络 net_route/net_set_mtu/net_set_time；5 抓包 capture_start/capture_stop；6 回放 replay_run；
 7 流分析 pcap_extract_flows；8 收流 listen_start/listen_fetch/listen_save/listen_clean/listen_stop；
 9 拨测 probe_visit；10 桥自身 bridge_version/bridge_upgrade；11 IP 段 ip_db_load/ip_lookup；
@@ -36,8 +36,8 @@ dpi_policy_wait/dpi_clean_stat/dpi_backup/dpi_prepare_package/dpi_install/dpi_up
 远程/靶机/抓包/pcap/回放/打流/收流/传文件到远端/DPI/策略下发/封堵/拨测/IP 方向判定——想到这些词就搜本服务；
 各工具时机与入参见其自身 description。
 
-【典型序列】target_list→target_add；抓包 net_route→capture_start→业务流量→capture_stop→file_get；
-回放 file_put→replay_run（同机抓包回放互斥）；收流 listen_start→listen_fetch/save→listen_stop；
+【典型序列】target_list→target_add；抓包 net_route→capture_start→业务流量→capture_stop→file_transfer 取 curl 下载到客户端；
+回放 file_transfer 取 curl 上传→replay_run（同机抓包回放互斥）；收流 listen_start→listen_fetch/save→listen_stop；
 DPI dpi_get_info→dpi_prepare_package→dpi_install/dpi_upgrade→dpi_get_info 复核。
 
 【结果约定】统一信封 {ok,total,results[],failed[]}；failed[] 含 target/reason/error_type（network|timeout|business）；

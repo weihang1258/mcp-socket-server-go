@@ -110,20 +110,23 @@ func TestLiveFifteenToolsE2E(t *testing.T) {
 		t.Fatalf("bridge_version: %v", out)
 	}
 
-	// 4. file_transfer_hint（零网络，纯指引）
-	out = mcpCallAny(t, cs, "file_transfer_hint", map[string]any{"targets": []string{"127.0.0.1"}})
+	// 4. file_transfer（零网络，纯指引）
+	out = mcpCallAny(t, cs, "file_transfer", map[string]any{"targets": []string{"127.0.0.1"}})
 	// 新契约：信封 results[].data.{download,upload}
 	if out["ok"] != float64(1) {
-		t.Fatalf("file_transfer_hint: %v", out)
+		t.Fatalf("file_transfer: %v", out)
 	}
 	rs, _ := out["results"].([]any)
 	if len(rs) != 1 {
-		t.Fatalf("file_transfer_hint results: %v", out)
+		t.Fatalf("file_transfer results: %v", out)
 	}
 	rm, _ := rs[0].(map[string]any)
 	dm, _ := rm["data"].(map[string]any)
+	if dm["ip"] != "127.0.0.1" || dm["http_port"] != float64(9001) {
+		t.Fatalf("file_transfer 地址字段: %v", out)
+	}
 	if s, _ := dm["download"].(string); s == "" {
-		t.Fatalf("file_transfer_hint 缺 download: %v", out)
+		t.Fatalf("file_transfer 缺 download: %v", out)
 	}
 
 	// 5. isfile

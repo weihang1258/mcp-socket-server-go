@@ -75,7 +75,7 @@ func Init(cfg BridgeConfig) *Bridge {
 	}
 	schedGlobal = NewScheduler()
 	b := &Bridge{
-		IPDB: ipdb.NewLoader(),
+		IPDB:          ipdb.NewLoader(),
 		Registry:      mustRegistry(cfg.DBPath),
 		Locks:         NewLockManager(),
 		Audit:         mustAudit(cfg.DBPath, cfg.AuditDays),
@@ -112,7 +112,7 @@ func mustAudit(path string, days int) *Audit {
 }
 
 // BridgeVersion initialize serverInfo 桥版本序列（与 dt14 靶机版本分离，§0）。
-var BridgeVersion = "0.5.1"
+var BridgeVersion = "0.6.0"
 
 // resolve @tag 展开（registry nil 兜底直通）。
 func (b *Bridge) resolve(targets []string) []string {

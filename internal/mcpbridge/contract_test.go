@@ -7,7 +7,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// 方案 §2/§3 契约：48 个工具，每个都有 inputSchema / outputSchema / _meta。
+// 方案 §2/§3 契约：46 个工具，每个都有 inputSchema / outputSchema / _meta。
 func TestToolContract(t *testing.T) {
 	b := newTestBridge(t)
 	srv := mcp.NewServer(&mcp.Implementation{Name: "t", Version: "0"}, nil)
@@ -30,7 +30,7 @@ func TestToolContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Tools) != 48 {
+	if len(list.Tools) != 46 {
 		t.Fatalf("want 48 tools, got %d", len(list.Tools))
 	}
 	got := map[string]bool{}
@@ -79,10 +79,8 @@ func TestToolContract(t *testing.T) {
 		"file_list":           30,
 		"file_mkdir":          15,
 		"file_remove":         60,
-		"file_get":            120,
-		"file_put":            300,
 		"file_unzip":          600,
-		"file_transfer_hint":  5,
+		"file_transfer":       5,
 		"shell_exec":          60,
 		"net_route":           15,
 		"net_set_mtu":         30,
@@ -131,8 +129,8 @@ func TestToolContract(t *testing.T) {
 var planDanger = map[string]string{
 	"target_list": DangerRead, "target_add": DangerWrite, "target_remove": DangerDestructive,
 	"file_stat": DangerRead, "file_list": DangerRead, "file_mkdir": DangerWrite,
-	"file_remove": DangerDestructive, "file_get": DangerRead, "file_put": DangerWrite,
-	"file_unzip": DangerWrite, "file_transfer_hint": DangerRead,
+	"file_remove": DangerDestructive,
+	"file_unzip":  DangerWrite, "file_transfer": DangerRead,
 	"shell_exec": DangerDestructive,
 	"net_route":  DangerRead, "net_set_mtu": DangerDestructive, "net_set_time": DangerDestructive,
 	"capture_start": DangerWrite, "capture_stop": DangerWrite,
@@ -140,8 +138,8 @@ var planDanger = map[string]string{
 	"listen_start": DangerWrite, "listen_clean": DangerWrite, "listen_save": DangerWrite,
 	"listen_fetch": DangerRead, "listen_stop": DangerWrite,
 	"pcap_extract_flows": DangerRead,
-	"ip_db_load": DangerWrite, "ip_lookup": DangerRead,
-	"dpi_get_info":       DangerRead, "dpi_get_config": DangerRead, "dpi_apply_config": DangerDestructive,
+	"ip_db_load":         DangerWrite, "ip_lookup": DangerRead,
+	"dpi_get_info": DangerRead, "dpi_get_config": DangerRead, "dpi_apply_config": DangerDestructive,
 	"dpi_service": DangerDestructive, "dpi_agent_service": DangerDestructive, "dpi_switch_mode": DangerDestructive,
 	"dpi_read_stat": DangerRead, "dpi_wait_stat": DangerRead, "dpi_wait_file": DangerRead, "dpi_check_stalled": DangerRead,
 	"dpi_clean_stat": DangerDestructive,

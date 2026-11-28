@@ -46,20 +46,6 @@ type fileRemoveIn struct {
 	Recursive *bool  `json:"recursive,omitempty" jsonschema:"目录是否递归删除，缺省 true（rm -rf）；传 false 只删空目录"`
 }
 
-type fileGetIn struct {
-	BaseIn
-	RemotePath string `json:"remote_path" jsonschema:"靶机上的文件绝对路径"`
-	LocalName  string `json:"local_name,omitempty" jsonschema:"桥本地文件名（只能落在桥的下载目录，禁止绝对路径；缺省取远端文件名）"`
-	HTTPPort   int    `json:"http_port,omitempty" jsonschema:"靶机 :9001 文件服务端口，缺省 9001"`
-}
-
-type filePutIn struct {
-	BaseIn
-	LocalPath  string `json:"local_path" jsonschema:"桥本地文件绝对路径"`
-	RemotePath string `json:"remote_path" jsonschema:"靶机上的目标绝对路径"`
-	HTTPPort   int    `json:"http_port,omitempty" jsonschema:"靶机 :9001 文件服务端口，缺省 9001"`
-}
-
 type fileUnzipIn struct {
 	BaseIn
 	File        string `json:"file" jsonschema:"靶机上的 zip 绝对路径"`
@@ -67,7 +53,7 @@ type fileUnzipIn struct {
 	PasswordRef string `json:"password_ref,omitempty" jsonschema:"密码引用名（桥本地配置键），明文密码不得出现在工具参数里"`
 }
 
-type fileTransferHintIn struct {
+type fileTransferIn struct {
 	BaseIn
 	HTTPPort int `json:"http_port,omitempty" jsonschema:"靶机 :9001 文件服务端口，缺省 9001"`
 }
@@ -84,12 +70,6 @@ type netSetTimeIn struct {
 }
 
 // ---- 出参 ----
-
-type FileData struct {
-	Name      string `json:"name" jsonschema:"文件名（不含目录）"`
-	SizeBytes int64  `json:"size_bytes" jsonschema:"文件字节数"`
-	SHA256    string `json:"sha256,omitempty" jsonschema:"文件内容的 sha256 十六进制；用于校验传输完整性"`
-}
 
 type fileStatData struct {
 	Exists    bool  `json:"exists" jsonschema:"true 表示路径存在。注意不存在是正常结果不是错误"`
@@ -115,10 +95,12 @@ type fileUnzipData struct {
 	NewEntries int    `json:"new_entries" jsonschema:"本次解压新增的条目数；为 0 会判失败（设备回 ok 但实际没解出东西）"`
 }
 
-type fileTransferHintData struct {
-	Download string `json:"download" jsonschema:"下载命令模板（curl）"`
-	Upload   string `json:"upload" jsonschema:"上传命令模板（curl -F）"`
-	Target   string `json:"target" jsonschema:"该命令对应的靶机"`
+type fileTransferData struct {
+	Target   string `json:"target" jsonschema:"登记的靶机"`
+	IP       string `json:"ip" jsonschema:"靶机地址（原始 IPv6 地址不带方括号）"`
+	HTTPPort int    `json:"http_port" jsonschema:"靶机 HTTP 文件服务端口"`
+	Download string `json:"download" jsonschema:"客户端本机执行的下载命令；替换占位符后直连靶机"`
+	Upload   string `json:"upload" jsonschema:"客户端本机执行的上传命令；替换占位符后直连靶机"`
 }
 
 type netRouteData struct {
@@ -242,49 +224,6 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 				})
 		})
 
-	addTyped(s, ro("file_get",
-		"下载远程文件到桥",
-		"把靶机上的文件下载到桥的下载目录。什么时候用：文件在远程靶机上、本地读不到时（pcap、日志、安装包回传）。remote_path 填靶机绝对路径；local_name 只能填文件名，会拼在桥的下载目录下，禁止绝对路径。返回 {name,size_bytes,sha256}。"),
-		func(ctx context.Context, a fileGetIn) Envelope[FileData] {
-			name := a.LocalName
-			if name == "" {
-				name = filepath.Base(a.RemotePath)
-			}
-			if strings.ContainsAny(name, "/\\") || name == "." || name == ".." {
-				return allFailedEnvelope[FileData](a.Targets, "local_name 只能是文件名，不能带路径", ErrBusiness)
-			}
-			return runEnvelope[FileData](b, ctx, a.BaseIn, "file_get",
-				map[string]any{"remote_path": a.RemotePath, "local_name": name}, LkNone, "", true,
-				func(c *Client) (any, error) {
-					dest := filepath.Join(b.DownloadDir, name)
-					n, sum, err := httpDownload(c.Host, orDefault(a.HTTPPort, 9001), a.RemotePath, dest,
-						timeoutFor(a.BaseIn, "file_get"))
-					if err != nil {
-						return nil, err
-					}
-					return FileData{Name: name, SizeBytes: n, SHA256: sum}, nil
-				})
-		})
-
-	addTyped(s, write("file_put",
-		"上传本地文件到靶机",
-		"把桥本地文件上传到靶机指定路径。什么时候用：要在靶机上执行脚本、或把 pcap 交给 replay_run 前。local_path 填桥上的路径；remote_path 填靶机绝对路径。返回 {name,size_bytes,sha256}。上传后需要执行权限的，接 shell_exec chmod +x。"),
-		func(ctx context.Context, a filePutIn) Envelope[FileData] {
-			if _, err := os.Stat(a.LocalPath); err != nil {
-				return allFailedEnvelope[FileData](a.Targets, "桥本地文件不存在: "+a.LocalPath, ErrBusiness)
-			}
-			return runEnvelope[FileData](b, ctx, a.BaseIn, "file_put",
-				map[string]any{"local_path": a.LocalPath, "remote_path": a.RemotePath}, LkFileIO, "", false,
-				func(c *Client) (any, error) {
-					n, sum, err := httpUpload(c.Host, orDefault(a.HTTPPort, 9001), a.LocalPath, a.RemotePath,
-						timeoutFor(a.BaseIn, "file_put"))
-					if err != nil {
-						return nil, err
-					}
-					return FileData{Name: filepath.Base(a.RemotePath), SizeBytes: n, SHA256: sum}, nil
-				})
-		})
-
 	addTyped(s, write("file_unzip",
 		"解压远程 zip",
 		"解压靶机上的 zip 文件。什么时候用：安装包或日志包需要展开时。关键语义：设备侧解压失败常仍返回 ok，因此本工具会在解压后用 file_list 复核目标目录非空，为空则判 business 失败——调用方看到失败不代表命令没跑，可能只是包损坏。password_ref 传密码引用（密码只在桥内存，不出现在参数里）。"),
@@ -332,31 +271,34 @@ func (b *Bridge) registerFileTools(s *mcp.Server) {
 				})
 		})
 
-	addTyped(s, ro("file_transfer_hint",
-		"生成传文件 curl 命令",
-		"生成桥与靶机之间点对点传文件的 curl 命令，零网络调用、不执行传输。什么时候用：需要在别处（如另一台机器）人工执行 curl 时；直接传文件请用 file_get/file_put。返回每个靶机的 download/upload 命令模板。"),
-		func(ctx context.Context, a fileTransferHintIn) Envelope[fileTransferHintData] {
-			out := Envelope[fileTransferHintData]{Results: []Result[fileTransferHintData]{}, Failed: []Failure{}}
-			resolved := b.resolve(a.Targets)
-			if len(resolved) == 0 { // 同 runBatchResults：0/0 读起来像"全成功"
-				return emptyResolveEnvelope[fileTransferHintData](a.Targets)
-			}
-			for _, t := range resolved {
-				host := stripPortForURL(t)
-				if strings.Contains(host, ":") {
-					host = "[" + host + "]"
-				}
-				port := orDefault(a.HTTPPort, 9001)
-				out.Ok++
-				out.Results = append(out.Results, Result[fileTransferHintData]{Target: t, Data: fileTransferHintData{
-					Target:   t,
-					Download: fmt.Sprintf("curl -o 本地文件 \"http://%s:%d/files?path=<远端绝对路径>\"", host, port),
-					Upload:   fmt.Sprintf("curl -F \"path=<远端绝对路径>\" -F \"file=@本地文件\" http://%s:%d/files", host, port),
-				}})
-			}
-			out.Total = out.Ok
-			return out
+	addTyped(s, ro("file_transfer",
+		"获取客户端直连靶机的传文件方法",
+		"返回靶机 IP、HTTP 文件端口及客户端本机执行的 curl 上传/下载命令。什么时候用：客户端与靶机之间传文件；客户端本地文件不能经 MCP 桥中转，必须直连靶机，文件不经过桥。本工具零网络调用、不执行传输、不探测端口。要求靶机 1.7.0+、http_port 非 0 且客户端网络可达；连接拒绝时检查配置或先 bridge_upgrade。替换命令中的路径占位符；下载保存到客户端，上传读取客户端文件。curl -f 让 HTTP 错误返回非零且不落错误页。上传后需执行权限接 shell_exec chmod +x。"),
+		func(ctx context.Context, a fileTransferIn) Envelope[fileTransferData] {
+			return fileTransferCommands(b, a)
 		})
+}
+
+// fileTransferCommands 只从登记表生成客户端直连靶机的 curl 方法，不建连、不传输。
+func fileTransferCommands(b *Bridge, a fileTransferIn) Envelope[fileTransferData] {
+	out := Envelope[fileTransferData]{Results: []Result[fileTransferData]{}, Failed: []Failure{}}
+	resolved := b.resolve(a.Targets)
+	if len(resolved) == 0 {
+		return emptyResolveEnvelope[fileTransferData](a.Targets)
+	}
+	port := orDefault(a.HTTPPort, 9001)
+	for _, t := range resolved {
+		ip := stripPortForURL(t)
+		host := urlHost(ip)
+		out.Ok++
+		out.Results = append(out.Results, Result[fileTransferData]{Target: t, Data: fileTransferData{
+			Target: t, IP: ip, HTTPPort: port,
+			Download: fmt.Sprintf("curl -f -o 本地文件 \"http://%s:%d/files?path=<靶机文件绝对路径>\"", host, port),
+			Upload:   fmt.Sprintf("curl -f -F \"path=<靶机文件绝对路径>\" -F \"file=@客户端本地文件\" http://%s:%d/files", host, port),
+		}})
+	}
+	out.Total = out.Ok
+	return out
 }
 
 func (b *Bridge) registerNetTools(s *mcp.Server) {
@@ -773,7 +715,7 @@ type shellExecData struct {
 func (b *Bridge) registerShellTools(s *mcp.Server) {
 	addTyped(s, destructive("shell_exec",
 		"在靶机执行命令",
-		"在靶机执行一条命令。什么时候用：要在被连接的那台机器上执行命令时。args 填完整命令字符串，如 \"systemctl status xsa\"（不是数组）。返回 results[].data{code,stdout,stderr}；stdout 超 64KB 截断并带 stdout_truncated=true。wait=false 为异步执行不返回回显。大段脚本或文件请先用 file_put 上传再执行，不要经命令内嵌。env 禁止传密码或 Token——凭据由桥本地配置读取。"),
+		"在靶机执行一条命令。什么时候用：要在被连接的那台机器上执行命令时。args 填完整命令字符串，如 \"systemctl status xsa\"（不是数组）。返回 results[].data{code,stdout,stderr}；stdout 超 64KB 截断并带 stdout_truncated=true。wait=false 为异步执行不返回回显。大段脚本或文件请先按 file_transfer 返回的 curl 方法上传再执行，不要经命令内嵌。env 禁止传密码或 Token——凭据由桥本地配置读取。"),
 		func(ctx context.Context, a shellExecIn) Envelope[shellExecData] {
 			wait := true
 			if a.Wait != nil {

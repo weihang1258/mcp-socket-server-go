@@ -24,7 +24,7 @@ type bridgeUpgradeIn struct {
 }
 
 type bridgeVersionData struct {
-	Version string `json:"version" jsonschema:"靶机上 socket_server 的版本号，如 1.9.28"`
+	Version string `json:"version" jsonschema:"靶机上 socket_server 的版本号，如 1.9.29"`
 }
 
 type bridgeUpgradeData struct {
