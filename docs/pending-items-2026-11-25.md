@@ -190,4 +190,9 @@ BridgeVersion 0.5.0→0.5.1：说明面变更 + 线上桥仍在跑 0.4.0，本�
 - 82 真机 curl 往返通过：客户端 `/tmp` → 82 `/home/tmp` → 客户端 `/tmp`，61B 三份文件
   sha256 均 `48428bf3da41ed9f48c3f0a4b6a478b26107be9d2ae4b477bf300689dceac375`；靶机测试文件已删除。
 - :9001 GET/POST 行为不变；直接 curl 要求靶机 1.7.0+、`http_port` 非 0、客户端到该端口可达。
-- 拟发布 v1.9.29（BridgeVersion 0.6.0）；本机桥已手工部署并验证 46 工具与 file_transfer。
+- **已发布 v1.9.29**（commit 2724e2c，BridgeVersion 0.6.0）：release 资产 23,906,397B，sha256
+  `4b0a44671fa87d39c9071ec451f637e4ecdbf79e384a74ac431dbef9c01948f2`；gh-proxy 镜像回源校验通过。
+- 本机桥已切换 `/opt/socket/versions/1.9.29/socket_server`（与 release sha 相同）并重启。
+  新 MCP initialize 实测 serverInfo.version=0.6.0、46 工具；旧 file_get/file_put/file_transfer_hint
+  均消失，file_transfer 实调返回正确 ip/http_port/download/upload。
+- 本机 35 的 agent 也随 current 切至 v1.9.29；其他靶机未在本次指令中要求铺开。
